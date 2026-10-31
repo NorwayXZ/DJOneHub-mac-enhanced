@@ -501,6 +501,7 @@ func serve(instance *app, listen string) {
 	defer stop()
 	if !instance.demo {
 		go instance.startCellularPolicyGuard(ctx)
+		go instance.runProxyAutoStart(ctx)
 	}
 
 	if !instance.demo {

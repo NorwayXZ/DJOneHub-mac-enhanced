@@ -57,29 +57,33 @@ type proxyState struct {
 	// Filled after a reconnect finishes: wall time from click to verified exit, and radio cycles used.
 	ReconnectSeconds  float64 `json:"reconnect_seconds"`
 	ReconnectAttempts int     `json:"reconnect_attempts"`
-	Error             string  `json:"error"`
-	Connections       int     `json:"connections"`
-	Uploaded          uint64  `json:"uploaded"`
-	Downloaded        uint64  `json:"downloaded"`
+	// AutoStart: the user turned the proxy on and has not stopped it manually.
+	AutoStart   bool   `json:"auto_start"`
+	Error       string `json:"error"`
+	Connections int    `json:"connections"`
+	Uploaded    uint64 `json:"uploaded"`
+	Downloaded  uint64 `json:"downloaded"`
 }
 type cellularProxy struct {
-	lifecycle     context.Context
-	historyLoaded bool
-	historyPath   string
-	mu            sync.Mutex
-	listener      net.Listener
-	clients       map[net.Conn]bool
-	state         proxyState
-	cancel        context.CancelFunc
-	lastReconnect time.Time
-	uploaded      atomic.Uint64
-	downloaded    atomic.Uint64
+	lifecycle       context.Context
+	historyLoaded   bool
+	historyPath     string
+	autoStartLoaded bool
+	mu              sync.Mutex
+	listener        net.Listener
+	clients         map[net.Conn]bool
+	state           proxyState
+	cancel          context.CancelFunc
+	lastReconnect   time.Time
+	uploaded        atomic.Uint64
+	downloaded      atomic.Uint64
 }
 
 func (p *cellularProxy) snapshot() proxyState {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.loadHistoryLocked()
+	p.loadAutoStartLocked()
 	s := p.state
 	s.History = append([]proxyIPVisit{}, p.state.History...)
 	s.Address = proxyListenAddress()
@@ -333,6 +337,7 @@ func (a *app) proxyActionAPI(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 502, err.Error())
 			return
 		}
+		p.setAutoStart(true)
 		// Listener startup is separate from external exit verification.
 		p.mu.Lock()
 		p.state.PublicIP = ""
@@ -352,6 +357,7 @@ func (a *app) proxyActionAPI(w http.ResponseWriter, r *http.Request) {
 			p.recordExit(r.Context(), iface, ip, source)
 		}
 	case "stop":
+		p.setAutoStart(false)
 		p.stop()
 	case "probe":
 		iface, err := proxyInterface()

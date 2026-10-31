@@ -29,6 +29,7 @@ struct CellularProxyStatus: Decodable {
     var phase: String
     var reconnectSeconds: Double? = nil
     var reconnectAttempts: Int? = nil
+    var autoStart: Bool? = nil
     var error: String
     var connections: Int
     var uploaded: UInt64
@@ -36,6 +37,7 @@ struct CellularProxyStatus: Decodable {
     enum CodingKeys: String, CodingKey {
         case location, isp, history
         case reconnectSeconds = "reconnect_seconds", reconnectAttempts = "reconnect_attempts"
+        case autoStart = "auto_start"
         case historyError = "history_error"
         case ipSource = "ip_source"
         case checkedAt = "checked_at", locationError = "location_error"
@@ -185,6 +187,8 @@ final class ProxyCenter: ObservableObject {
         NSPasteboard.general.setString("socks5h://" + (selected?.address ?? status?.address ?? "127.0.0.1:10909"), forType: .string)
     }
     var reconnecting: Bool { status?.phase == "reconnecting" }
+    /// Stopped only because the cellular link is gone; the backend restarts it when the module recovers.
+    var awaitingAutoStart: Bool { status?.running == false && status?.autoStart == true }
     var result: String {
         switch status?.phase {
         case "reconnecting": return "正在重新注册蜂窝网络…"
@@ -216,8 +220,9 @@ struct ProxyDashboard: View {
                             .font(.subheadline).foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Label(proxy.status?.running == true ? "监听中" : "已停止", systemImage: proxy.status?.running == true ? "circle.fill" : "circle")
-                        .font(.caption.weight(.semibold)).foregroundStyle(accent)
+                    Label(proxy.status?.running == true ? "监听中" : (proxy.awaitingAutoStart ? "等待恢复" : "已停止"),
+                          systemImage: proxy.status?.running == true ? "circle.fill" : (proxy.awaitingAutoStart ? "clock.arrow.circlepath" : "circle"))
+                        .font(.caption.weight(.semibold)).foregroundStyle(proxy.awaitingAutoStart ? Color.orange : accent)
                         .padding(10).background(accent.opacity(0.1), in: Capsule())
                 }
                 if proxy.fleetMode { modulePicker }
@@ -252,6 +257,10 @@ struct ProxyDashboard: View {
                         }.buttonStyle(.borderedProminent).tint(accent).disabled(disabled)
                         Button("重连并尝试换 IP", systemImage: "arrow.triangle.2.circlepath") { confirmReconnect = true }.disabled(disabled)
                         if proxy.busy || proxy.reconnecting { ProgressView().controlSize(.small) }
+                    }
+                    if proxy.awaitingAutoStart {
+                        Text("蜂窝网络中断，代理已暂停；模块恢复后会自动重新开启。点“启动蜂窝代理”可立即重试。")
+                            .font(.caption).foregroundStyle(.orange)
                     }
                 }
                 .padding(18)

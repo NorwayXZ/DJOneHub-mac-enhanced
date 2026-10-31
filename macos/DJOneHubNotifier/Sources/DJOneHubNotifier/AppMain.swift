@@ -844,9 +844,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func updateProxyStatusIcon(_ status: CellularProxyStatus?) {
         let running = status?.running == true
         let reconnecting = status?.phase == "reconnecting"
+        let awaiting = !running && status?.autoStart == true
         let symbol = NSImage(systemSymbolName: "antenna.radiowaves.left.and.right", accessibilityDescription: "DJOneHub")
-        if running || reconnecting {
-            let color: NSColor = reconnecting ? .systemOrange : .systemGreen
+        if running || reconnecting || awaiting {
+            let color: NSColor = running && !reconnecting ? .systemGreen : .systemOrange
             let colored = symbol?.withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [color]))
             colored?.isTemplate = false
             appStatusItem?.button?.image = colored
@@ -854,7 +855,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             symbol?.isTemplate = true
             appStatusItem?.button?.image = symbol
         }
-        let state = reconnecting ? "蜂窝网络重连中" : (running ? (proxyCenter.fleetMode ? "\(proxyCenter.runningCount) 个蜂窝代理已开启" : "蜂窝代理已开启 · 127.0.0.1:10909") : (status == nil ? "蜂窝代理状态未知" : "蜂窝代理已停止"))
+        let state = reconnecting ? "蜂窝网络重连中" : (running ? (proxyCenter.fleetMode ? "\(proxyCenter.runningCount) 个蜂窝代理已开启" : "蜂窝代理已开启 · 127.0.0.1:10909") : (status == nil ? "蜂窝代理状态未知" : (awaiting ? "蜂窝网络中断，恢复后自动开启代理" : "蜂窝代理已停止")))
         appStatusItem?.button?.toolTip = "DJOneHub · " + state
     }
     private var statusContextMenu: NSMenu?
