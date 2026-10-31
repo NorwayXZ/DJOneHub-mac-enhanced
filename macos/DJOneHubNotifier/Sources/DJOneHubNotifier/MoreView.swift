@@ -147,6 +147,10 @@ struct MoreView: View {
             }
             .modifier(PhoneCard())
 
+            MoreSectionTitle("频段优化")
+            BandOptimizerPanel(api: calls.apiClient)
+                .modifier(PhoneCard())
+
             MoreSectionTitle("连接模式")
             VStack(spacing: 0) {
                 HStack(spacing: 10) {

@@ -80,6 +80,7 @@ type modulePhonebookEntry struct {
 
 type app struct {
 	proxy             cellularProxy
+	bands             bandOptimizer
 	moduleOperationMu sync.Mutex
 	updatePending     atomic.Bool
 	modem             *modem.Manager
@@ -502,6 +503,7 @@ func serve(instance *app, listen string) {
 	if !instance.demo {
 		go instance.startCellularPolicyGuard(ctx)
 		go instance.runProxyAutoStart(ctx)
+		go instance.runBandGuard(ctx)
 	}
 
 	if !instance.demo {
@@ -1136,6 +1138,8 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /api/update/prepare", a.prepareUpdateAPI)
 	mux.HandleFunc("GET /api/proxy", a.proxyStatusAPI)
 	mux.HandleFunc("POST /api/proxy", a.proxyActionAPI)
+	mux.HandleFunc("GET /api/band", a.bandStatusAPI)
+	mux.HandleFunc("POST /api/band", a.bandActionAPI)
 	mux.HandleFunc("GET /api/platform", a.platformInfo)
 	mux.HandleFunc("GET /api/health", a.health)
 	mux.HandleFunc("GET /api/status", a.status)
