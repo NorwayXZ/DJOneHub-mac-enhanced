@@ -57,6 +57,13 @@ type proxyState struct {
 	// Filled after a reconnect finishes: wall time from click to verified exit, and radio cycles used.
 	ReconnectSeconds  float64 `json:"reconnect_seconds"`
 	ReconnectAttempts int     `json:"reconnect_attempts"`
+	// Live progress of the running (or last) reconnect: mode "ip" or "segment",
+	// attempt cap, a human-readable note and every exit IP seen per cycle.
+	ReconnectMode  string   `json:"reconnect_mode"`
+	ReconnectMax   int      `json:"reconnect_max"`
+	ReconnectNote  string   `json:"reconnect_note"`
+	ReconnectTried []string `json:"reconnect_tried"`
+	AvoidHours     int      `json:"avoid_hours"`
 	// AutoStart: the user turned the proxy on and has not stopped it manually.
 	AutoStart   bool   `json:"auto_start"`
 	Error       string `json:"error"`
@@ -75,6 +82,7 @@ type cellularProxy struct {
 	state           proxyState
 	cancel          context.CancelFunc
 	lastReconnect   time.Time
+	stopRotation    atomic.Bool
 	uploaded        atomic.Uint64
 	downloaded      atomic.Uint64
 }
@@ -86,6 +94,7 @@ func (p *cellularProxy) snapshot() proxyState {
 	p.loadAutoStartLocked()
 	s := p.state
 	s.History = append([]proxyIPVisit{}, p.state.History...)
+	s.ReconnectTried = append([]string{}, p.state.ReconnectTried...)
 	s.Address = proxyListenAddress()
 	s.Running = p.listener != nil
 	s.Connections = len(p.clients)
@@ -284,10 +293,18 @@ func (a *app) proxyStatusAPI(w http.ResponseWriter, r *http.Request) {
 }
 func (a *app) proxyActionAPI(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Action  string `json:"action"`
-		Confirm bool   `json:"confirm"`
+		Action     string `json:"action"`
+		Confirm    bool   `json:"confirm"`
+		AvoidHours int    `json:"avoid_hours"`
 	}
 	if !decodeJSON(w, r, &body) {
+		return
+	}
+	// A running reconnect holds the module lock; stopping further attempts must
+	// not need it. The current radio cycle always completes first.
+	if body.Action == "stop_reconnect" {
+		a.proxy.stopRotation.Store(true)
+		writeJSON(w, 200, a.proxy.snapshot())
 		return
 	}
 	if !a.tryModuleOperation() {
@@ -346,7 +363,11 @@ func (a *app) proxyActionAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		p.recordExit(r.Context(), iface, ip, source)
-	case "reconnect":
+	case "reconnect", "reconnect_segment":
+		mode := ipReconnectMode()
+		if body.Action == "reconnect_segment" {
+			mode = segmentReconnectMode(body.AvoidHours)
+		}
 		if !body.Confirm {
 			writeError(w, 400, "confirmation required: disconnects proxy, SMS and calls temporarily")
 			return
@@ -379,10 +400,16 @@ func (a *app) proxyActionAPI(w http.ResponseWriter, r *http.Request) {
 		p.state.Phase = "reconnecting"
 		p.state.ReconnectSeconds = 0
 		p.state.ReconnectAttempts = 0
+		p.state.ReconnectMode = mode.name
+		p.state.ReconnectMax = mode.maxAttempts
+		p.state.ReconnectNote = ""
+		p.state.ReconnectTried = nil
+		p.state.AvoidHours = mode.avoidHours
 		p.state.Error = ""
 		p.mu.Unlock()
+		p.stopRotation.Store(false)
 		unlock = false
-		go func() { defer a.moduleOperationMu.Unlock(); a.reconnectProxy(iface) }()
+		go func() { defer a.moduleOperationMu.Unlock(); a.reconnectProxy(iface, mode) }()
 		writeJSON(w, 202, p.snapshot())
 		return
 	default:
@@ -391,7 +418,7 @@ func (a *app) proxyActionAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, p.snapshot())
 }
-func (a *app) reconnectProxy(iface string) {
+func (a *app) reconnectProxy(iface string, mode reconnectMode) {
 	a.moduleVoiceOpMu.Lock()
 	defer a.moduleVoiceOpMu.Unlock()
 	p := &a.proxy
@@ -401,7 +428,7 @@ func (a *app) reconnectProxy(iface string) {
 	if parent == nil {
 		parent = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(parent, 20*time.Second+maxReconnectAttempts*reconnectAttemptTimeout)
+	ctx, cancel := context.WithTimeout(parent, 20*time.Second+time.Duration(mode.maxAttempts)*reconnectAttemptTimeout)
 	defer cancel()
 	old, oldSource, oldErr := probeProxyExit(ctx, iface, p.snapshot().IPSource)
 	p.stop()
@@ -415,6 +442,13 @@ func (a *app) reconnectProxy(iface string) {
 		p.state.IPSource = oldSource
 		p.state.CheckedAt = time.Now().UTC().Format(time.RFC3339)
 		p.recordHistoryLocked()
+	}
+	var usedSegments map[string]bool
+	if mode.name == "segment" {
+		usedSegments = recentSegments(p.state.History, started.Add(-time.Duration(mode.avoidHours)*time.Hour))
+		if segment := ipv4Segment(old); segment != "" {
+			usedSegments[segment] = true
+		}
 	}
 	p.state.PreviousIP = old
 	p.state.PublicIP = ""
@@ -442,18 +476,51 @@ func (a *app) reconnectProxy(iface string) {
 			}
 		}
 	}
+	progress := func(attempts int, note string, tried string) {
+		p.mu.Lock()
+		p.state.ReconnectAttempts = attempts
+		if note != "" {
+			p.state.ReconnectNote = note
+		}
+		if tried != "" {
+			p.state.ReconnectTried = append(p.state.ReconnectTried, tried)
+		}
+		p.mu.Unlock()
+	}
 	for attempt := 1; ; attempt++ {
 		if ctx.Err() != nil {
 			finish("failed", attempt-1, ctx.Err())
 			return
 		}
+		progress(attempt, fmt.Sprintf("第 %d/%d 次：正在开关射频", attempt, mode.maxAttempts), "")
 		current, ip, source, err := a.cycleRadio(ctx, oldSource)
 		if err != nil {
 			finish("failed", attempt, err)
 			return
 		}
+		progress(attempt, "", ip)
 		comparable := oldErr == nil && oldSource == source
-		if comparable && ip == old && attempt < maxReconnectAttempts {
+		more := attempt < mode.maxAttempts && !p.stopRotation.Load()
+		if mode.name == "segment" {
+			segment := ipv4Segment(ip)
+			if usedSegments[segment] && more {
+				progress(attempt, fmt.Sprintf("第 %d/%d 次：%s.x 在最近 %d 小时内用过，继续尝试", attempt, mode.maxAttempts, segment, mode.avoidHours), "")
+				log.Printf("cellular reconnect: segment %s.x used recently, cycling radio again", segment)
+				continue
+			}
+			p.recordExit(ctx, current, ip, source)
+			phase, note := "new_segment", fmt.Sprintf("已换到新网段 %s.x", segment)
+			switch {
+			case usedSegments[segment] && p.stopRotation.Load():
+				phase, note = "stopped", fmt.Sprintf("已停止后续尝试，保留 %s", ip)
+			case usedSegments[segment]:
+				phase, note = "segment_reused", fmt.Sprintf("试了 %d 次，运营商只分配了最近 %d 小时内用过的网段", attempt, mode.avoidHours)
+			}
+			progress(attempt, note, "")
+			finish(phase, attempt, nil)
+			return
+		}
+		if comparable && ip == old && more {
 			log.Printf("cellular reconnect: carrier returned the same IP, cycling radio once more")
 			continue
 		}

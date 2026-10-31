@@ -842,6 +842,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         add("复制 SOCKS5 地址", #selector(copyProxy))
         add("检测蜂窝出口 IP", #selector(probeProxy))
         add("重连并尝试换 IP…", #selector(reconnectProxy))
+        add("重连并换到新网段…", #selector(reconnectSegment))
         menu.addItem(.separator())
         add("检查软件更新…", #selector(checkUpdates))
         add("完全退出 DJOneHub…", #selector(quitWorkspace))
@@ -892,6 +893,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         Task {
             await proxyCenter.act(action, confirm: confirm)
             if proxyCenter.error != nil { showMainWindow() }
+        }
+    }
+    @objc private func reconnectSegment() {
+        let hours = UserDefaults.standard.object(forKey: "djonehub.segmentAvoidHours") as? Int ?? 24
+        let alert = NSAlert()
+        alert.messageText = "重连并换到新网段？"
+        alert.informativeText = "将反复开关射频，直到出口落在最近 \(hours) 小时内没用过的网段，最多 4 次（约 1 分钟）；期间代理、短信和来电会中断。"
+        alert.addButton(withTitle: "取消")
+        alert.addButton(withTitle: "开始")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertSecondButtonReturn {
+            Task {
+                await proxyCenter.act("reconnect_segment", confirm: true, avoidHours: hours)
+                if proxyCenter.error != nil { showMainWindow() }
+            }
         }
     }
     @objc private func reconnectProxy() {

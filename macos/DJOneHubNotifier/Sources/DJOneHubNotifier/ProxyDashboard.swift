@@ -30,6 +30,11 @@ struct CellularProxyStatus: Decodable {
     var reconnectSeconds: Double? = nil
     var reconnectAttempts: Int? = nil
     var autoStart: Bool? = nil
+    var reconnectMode: String? = nil
+    var reconnectMax: Int? = nil
+    var reconnectNote: String? = nil
+    var reconnectTried: [String]? = nil
+    var avoidHours: Int? = nil
     var error: String
     var connections: Int
     var uploaded: UInt64
@@ -38,6 +43,8 @@ struct CellularProxyStatus: Decodable {
         case location, isp, history
         case reconnectSeconds = "reconnect_seconds", reconnectAttempts = "reconnect_attempts"
         case autoStart = "auto_start"
+        case reconnectMode = "reconnect_mode", reconnectMax = "reconnect_max", reconnectNote = "reconnect_note"
+        case reconnectTried = "reconnect_tried", avoidHours = "avoid_hours"
         case historyError = "history_error"
         case ipSource = "ip_source"
         case checkedAt = "checked_at", locationError = "location_error"
@@ -96,9 +103,12 @@ extension DJOneHubAPI {
     func proxyStatus() async throws -> CellularProxyStatus {
         try await get(path: "api/proxy")
     }
-    func proxyAction(_ action: String, confirm: Bool = false, moduleID: String? = nil) async throws -> CellularProxyStatus {
-        struct Action: Encodable { var action: String; var confirm: Bool }
-        return try await postDecoded(path: moduleID.map { "api/modules/\($0)/proxy" } ?? "api/proxy", body: Action(action: action, confirm: confirm), timeout: 25)
+    func proxyAction(_ action: String, confirm: Bool = false, moduleID: String? = nil, avoidHours: Int? = nil) async throws -> CellularProxyStatus {
+        struct Action: Encodable {
+            var action: String; var confirm: Bool; var avoidHours: Int?
+            enum CodingKeys: String, CodingKey { case action, confirm; case avoidHours = "avoid_hours" }
+        }
+        return try await postDecoded(path: moduleID.map { "api/modules/\($0)/proxy" } ?? "api/proxy", body: Action(action: action, confirm: confirm, avoidHours: avoidHours), timeout: 25)
     }
 }
 
@@ -159,15 +169,16 @@ final class ProxyCenter: ObservableObject {
             catch { self.error = error.localizedDescription; status = nil }
         }
     }
-    func act(_ action: String, confirm: Bool = false) async {
+    func act(_ action: String, confirm: Bool = false, avoidHours: Int? = nil) async {
         guard !previewOnly else { return }
         let id = fleetMode ? selectedID : nil
         let key = id ?? "legacy"
-        guard !busyIDs.contains(key), !unavailable else { return }
+        // Stopping further segment attempts must work while the reconnect keeps the module busy.
+        guard action == "stop_reconnect" || !busyIDs.contains(key), !unavailable else { return }
         busyIDs.insert(key)
         defer { busyIDs.remove(key) }
         do {
-            let result = try await api.proxyAction(action, confirm: confirm, moduleID: id)
+            let result = try await api.proxyAction(action, confirm: confirm, moduleID: id, avoidHours: avoidHours)
             if id == selectedID || !fleetMode { status = result; error = nil }
             await refresh()
         } catch { if id == selectedID || !fleetMode { self.error = error.localizedDescription } }
@@ -194,6 +205,9 @@ final class ProxyCenter: ObservableObject {
         case "reconnecting": return "正在重新注册蜂窝网络…"
         case "changed": return "已检测到新的公网 IP"
         case "unchanged": return "已自动重试，运营商仍分配了原 IP"
+        case "new_segment": return "已换到新网段"
+        case "segment_reused": return "未换到新网段：运营商只分配了最近用过的网段"
+        case "stopped": return "已停止后续尝试，保留当前 IP"
         case "recovered_unverified": return "网络已恢复，未能可靠比较前后 IP"
         case "failed": return "恢复未完成，请检查模块"
         default: return "尚未执行重连"
@@ -204,6 +218,8 @@ final class ProxyCenter: ObservableObject {
 struct ProxyDashboard: View {
     @EnvironmentObject private var proxy: ProxyCenter
     @State private var confirmReconnect = false
+    @State private var confirmSegment = false
+    @AppStorage("djonehub.segmentAvoidHours") private var segmentAvoidHours = 24
     @State private var confirmBinding = false
     @State private var renameModule = false
     @State private var moduleName = ""
@@ -256,6 +272,8 @@ struct ProxyDashboard: View {
                                 .frame(minWidth: 130)
                         }.buttonStyle(.borderedProminent).tint(accent).disabled(disabled)
                         Button("重连并尝试换 IP", systemImage: "arrow.triangle.2.circlepath") { confirmReconnect = true }.disabled(disabled)
+                        Button("换到新网段", systemImage: "square.stack.3d.up") { confirmSegment = true }.disabled(disabled)
+                            .help("反复开关射频，直到出口落在最近 \(segmentAvoidHours) 小时内没用过的 /24 网段，最多 4 次")
                         if proxy.busy || proxy.reconnecting { ProgressView().controlSize(.small) }
                     }
                     if proxy.awaitingAutoStart {
@@ -271,8 +289,24 @@ struct ProxyDashboard: View {
                     metric("代理流量", ByteCountFormatter.string(fromByteCount: Int64(clamping: (proxy.status?.uploaded ?? 0) &+ (proxy.status?.downloaded ?? 0)), countStyle: .binary))
                 }
                 VStack(alignment: .leading, spacing: 10) {
-                    Label("重连结果", systemImage: "arrow.clockwise.circle").font(.headline)
+                    HStack {
+                        Label("重连结果", systemImage: "arrow.clockwise.circle").font(.headline)
+                        Spacer()
+                        Picker("换网段时避开最近", selection: $segmentAvoidHours) {
+                            ForEach([6, 12, 24, 48, 72], id: \.self) { Text("\($0) 小时").tag($0) }
+                        }.fixedSize().font(.caption)
+                    }
                     Text(proxy.result).foregroundStyle(.secondary)
+                    if let note = proxy.status?.reconnectNote, !note.isEmpty, proxy.status?.reconnectMode == "segment" {
+                        Text(note).font(.callout).foregroundStyle(proxy.reconnecting ? Color.orange : Color.secondary)
+                    }
+                    if proxy.reconnecting && proxy.status?.reconnectMode == "segment" {
+                        Button("停止后续尝试") { Task { await proxy.act("stop_reconnect") } }
+                            .help("当前这次开关射频完成后停止，保留拿到的 IP")
+                    }
+                    if let tried = proxy.status?.reconnectTried, tried.count > 1 || (proxy.status?.reconnectMode == "segment" && !tried.isEmpty) {
+                        Text("本次拿到过：" + tried.joined(separator: " → ")).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
+                    }
                     if let old = proxy.status?.previousIP, !old.isEmpty {
                         Text("上次出口  \(old)").font(.system(.caption, design: .monospaced)).textSelection(.enabled)
                     }
@@ -281,7 +315,7 @@ struct ProxyDashboard: View {
                         Text("用时 \(String(format: "%.1f", seconds)) 秒" + (attempts > 1 ? " · 开关射频 \(attempts) 次" : ""))
                             .font(.caption).foregroundStyle(.secondary)
                     }
-                    if proxy.status?.phase == "changed", let ip = proxy.status?.publicIP, !ip.isEmpty {
+                    if ["changed", "new_segment", "segment_reused", "stopped"].contains(proxy.status?.phase ?? ""), let ip = proxy.status?.publicIP, !ip.isEmpty {
                         let seen = (proxy.status?.history ?? []).dropLast().filter { $0.ip == ip }.count
                         Text(seen > 0 ? "这个 IP 以前用过 \(seen) 次" : "这个 IP 以前没用过")
                             .font(.caption).foregroundStyle(seen > 0 ? Color.orange : Color.secondary)
@@ -306,6 +340,12 @@ struct ProxyDashboard: View {
             Button("断开并重连", role: .destructive) { Task { await proxy.act("reconnect", confirm: true) } }
         } message: {
             Text("所选模块的代理连接将中断，短信与来电会暂时不可用；其他模块继续工作。IP 由运营商分配，不保证更换；拿到原 IP 时会自动再试一次；两次操作间隔至少 20 秒。")
+        }
+        .alert("换到新网段？", isPresented: $confirmSegment) {
+            Button("取消", role: .cancel) {}
+            Button("开始", role: .destructive) { Task { await proxy.act("reconnect_segment", confirm: true, avoidHours: segmentAvoidHours) } }
+        } message: {
+            Text("将反复开关射频，直到出口 IP 落在最近 \(segmentAvoidHours) 小时内没用过的 /24 网段，最多 4 次（约 1 分钟）。期间代理、短信和来电会中断。网段由运营商分配，试满 4 次仍可能换不到；可随时停止后续尝试。")
         }
     }
     private var modulePicker: some View {
@@ -363,6 +403,10 @@ struct ProxyDashboard: View {
                 Button("保存") { Task { await proxy.renameSelected(moduleName) } }
             }
     }
+    /// The /24 segment ("a.b.c") that risk platforms commonly treat as one source.
+    static func segment(of ip: String) -> String {
+        ip.split(separator: ".").prefix(3).joined(separator: ".")
+    }
     private func historyTime(_ value: String) -> String {
         ISO8601DateFormatter().date(from: value)?.formatted(date: .abbreviated, time: .shortened) ?? value
     }
@@ -370,6 +414,7 @@ struct ProxyDashboard: View {
         let visits = proxy.status?.history ?? []
         let currentIP = proxy.status?.publicIP ?? ""
         let previousVisits = visits.dropLast().filter { $0.ip == currentIP }.count
+        let segmentCounts = Dictionary(visits.map { (Self.segment(of: $0.ip), 1) }, uniquingKeysWith: +)
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Label("IP 使用历史", systemImage: "clock.arrow.circlepath").font(.headline)
@@ -400,6 +445,10 @@ struct ProxyDashboard: View {
                                         Text("再次出现").font(.caption).foregroundStyle(.orange)
                                     }
                                 }
+                                let segment = Self.segment(of: visit.ip)
+                                let segmentUses = segmentCounts[segment] ?? 1
+                                Text("网段 \(segment).x" + (segmentUses > 1 ? " · 记录中共 \(segmentUses) 个 IP" : ""))
+                                    .font(.caption).foregroundStyle(segmentUses > 1 ? Color.orange : Color.secondary)
                                 Text([visit.location, visit.isp].filter { !$0.isEmpty }.joined(separator: " · "))
                                     .font(.caption).foregroundStyle(.secondary)
                                 Text(historyTime(visit.firstSeen) + " — " + historyTime(visit.lastSeen))
@@ -408,7 +457,7 @@ struct ProxyDashboard: View {
                             Divider()
                         }
                     }
-                }.frame(height: min(CGFloat(visits.count) * 90, 270))
+                }.frame(height: min(CGFloat(visits.count) * 105, 315))
                 Text("时间表示成功检测到该 IP 的时间范围；停止代理后记录仍保留。")
                     .font(.caption2).foregroundStyle(.secondary)
             }
