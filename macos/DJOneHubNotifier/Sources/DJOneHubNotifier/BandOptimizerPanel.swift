@@ -153,7 +153,7 @@ struct BandOptimizerPanel: View {
             // The switch shows what the module is actually doing, read back every 10s.
             HStack(alignment: .center, spacing: 10) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(lockedBand > 0 ? "已锁定 Band \(lockedBand)" : "使用全部频段（模块自动选择）")
+                    Text(status?.maskKnown != true ? "正在读取模块频段设置…" : lockedBand > 0 ? "已锁定 Band \(lockedBand)" : "使用全部频段（模块自动选择）")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(lockedBand > 0 ? Color.green : Color.primary)
                     Text(modeDetail).font(.system(size: 11)).foregroundStyle(profile?.fallback == true ? Color.orange : Color.secondary)
@@ -166,7 +166,7 @@ struct BandOptimizerPanel: View {
                     set: { on in Task { await center.act(on ? "lock" : "unlock") } }
                 ))
                 .labelsHidden().toggleStyle(.switch)
-                .disabled(running || center.busy || (lockedBand == 0 && (profile?.band ?? 0) == 0))
+                .disabled(running || center.busy || status?.maskKnown != true || (lockedBand == 0 && (profile?.band ?? 0) == 0))
                 .help(lockedBand > 0 ? "关闭后恢复全部频段，保留测试结果，随时可再打开" : "打开后锁定这张卡测得的最优频段")
             }
             .padding(10)

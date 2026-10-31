@@ -619,6 +619,8 @@ func (a *app) runBandOptimizer(saveData bool) {
 // ---- guard: per-SIM apply and fallback ----
 
 func (a *app) runBandGuard(ctx context.Context) {
+	// Read the lock state right away so the App does not show "unlocked" while waiting for the first tick.
+	a.bandGuardOnce()
 	ticker := time.NewTicker(bandGuardInterval)
 	defer ticker.Stop()
 	for {
