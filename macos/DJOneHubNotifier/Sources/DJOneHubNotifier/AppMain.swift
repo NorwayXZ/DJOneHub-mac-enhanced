@@ -478,26 +478,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
+    // Shown whenever the module answers, not only when 4G is the default route:
+    // broadband usually stays default while the SIM carries the SOCKS5 proxy.
     private func pollCellularStatus() async {
-        guard (try? await api.isUsingCellularRoute()) == true,
-              let modem = try? await api.modemStatus(),
-              let signalDBM = modem.signalDBM,
-              Self.isCellularNetwork(modem.networkMode)
-        else {
+        guard let modem = try? await api.modemStatus() else {
             removeCellularStatusItem()
             return
         }
-        showCellularStatusItem(signalLevel: Self.cellularSignalLevel(signalDBM))
+        let registered = ["已注册", "漫游注册"].contains(modem.regStatusText ?? "")
+        let online = modem.simInserted == true && registered && Self.isCellularNetwork(modem.networkMode)
+        let level = online ? Self.cellularSignalLevel(modem.signalDBM ?? -113) : 0
+        var detail: String
+        if modem.simInserted != true {
+            detail = "未检测到 SIM 卡"
+        } else if !online {
+            detail = "蜂窝网络" + (modem.regStatusText ?? "未注册")
+        } else {
+            detail = "信号 \(level)/4"
+            if let dbm = modem.signalDBM { detail += " · \(dbm) dBm" }
+            if let name = modem.operatorName, !name.isEmpty { detail += " · " + name }
+        }
+        let role = (try? await api.isUsingCellularRoute()) == true ? "4G 正在接管网络" : "4G 供蜂窝代理使用"
+        showCellularStatusItem(signalLevel: level, toolTip: "DJOneHub \(role) · \(detail)；点击打开控制面板")
     }
 
-    private func showCellularStatusItem(signalLevel: Int) {
+    private func showCellularStatusItem(signalLevel: Int, toolTip: String) {
         if cellularStatusItem == nil {
             cellularStatusItem = NSStatusBar.system.statusItem(withLength: 48)
             cellularStatusItem?.button?.target = self
             cellularStatusItem?.button?.action = #selector(openDJOneHubFromCellularMenuBar)
         }
         cellularStatusItem?.button?.image = Self.cellularStatusImage(signalLevel: signalLevel)
-        cellularStatusItem?.button?.toolTip = "DJOneHub 4G 正在接管网络；点击打开控制面板"
+        cellularStatusItem?.button?.toolTip = toolTip
     }
 
     private func removeCellularStatusItem() {
