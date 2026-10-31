@@ -251,7 +251,8 @@ func relayProxy(dst, src net.Conn, counter *atomic.Uint64) {
 	}
 }
 
-// DNS uses the selected module's DHCP resolver, with every socket interface-bound.
+// DNS races the module's DHCP resolver and public resolvers, with every socket
+// interface-bound to cellular; broadband DNS is never used.
 func cellularDial(ctx context.Context, iface, address string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
@@ -260,34 +261,8 @@ func cellularDial(ctx context.Context, iface, address string) (net.Conn, error) 
 	var ips []net.IP
 	if ip := net.ParseIP(host); ip != nil {
 		ips = []net.IP{ip}
-	} else {
-		server, err := cellularDNSServer(ctx, iface)
-		if err != nil {
-			return nil, err
-		}
-		resolver := net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			attempt, cancel := context.WithTimeout(ctx, 2*time.Second)
-			defer cancel()
-			conn, err := boundProxyDial(attempt, iface, server)
-			if err == nil {
-				return conn, nil
-			}
-			// Some module firmware does not serve TCP DNS. The alternative
-			// resolver is still strictly bound to cellular, never broadband.
-			return boundProxyDial(ctx, iface, "223.5.5.5:53")
-		}}
-		lookupCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		ips, err = resolver.LookupIP(lookupCtx, "ip4", host)
-		cancel()
-		if err != nil {
-			fallback := net.Resolver{PreferGo: true, Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return boundProxyDial(ctx, iface, "223.5.5.5:53")
-			}}
-			ips, err = fallback.LookupIP(ctx, "ip4", host)
-		}
-		if err != nil {
-			return nil, err
-		}
+	} else if ips, err = resolveCellularIPv4(ctx, iface, host); err != nil {
+		return nil, err
 	}
 	for _, ip := range ips {
 		if ip.To4() == nil || !ip.IsGlobalUnicast() || ip.IsPrivate() {
@@ -575,20 +550,26 @@ func (p *cellularProxy) recordExit(ctx context.Context, iface, ip, source string
 	p.state.ISP = ""
 	p.state.LocationError = ""
 	p.mu.Unlock()
-	location, isp, err := probeProxyLocation(ctx, iface, ip)
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.state.PublicIP != ip {
-		return
-	}
-	if err != nil {
-		p.state.LocationError = err.Error()
+	// The IP is final now; the slower (foreign) geolocation lookup fills in
+	// afterwards so callers and the App are not held up by it.
+	go func() {
+		lookupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		location, isp, err := probeProxyLocation(lookupCtx, iface, ip)
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if p.state.PublicIP != ip {
+			return
+		}
+		if err != nil {
+			p.state.LocationError = err.Error()
+			p.recordHistoryLocked()
+			return
+		}
+		p.state.Location = location
+		p.state.ISP = isp
 		p.recordHistoryLocked()
-		return
-	}
-	p.state.Location = location
-	p.state.ISP = isp
-	p.recordHistoryLocked()
+	}()
 }
 func probeProxyLocation(ctx context.Context, iface, ip string) (string, string, error) {
 	transport := &http.Transport{Proxy: nil, DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) { return cellularDial(ctx, iface, addr) }, DisableKeepAlives: true, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}}

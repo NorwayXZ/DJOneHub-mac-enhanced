@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"net"
+	"testing"
+	"time"
+)
 
 func TestCellularDNSUsesDHCPResolverOnly(t *testing.T) {
 	for _, tt := range []struct {
@@ -31,5 +35,23 @@ func TestExitProviderRepliesAreValidated(t *testing.T) {
 		if (err != nil) != tt.fail {
 			t.Fatalf("exit %q: %v", tt.body, err)
 		}
+	}
+	if ip, err := parseProxyExitReply("Current IP Address: 8.8.8.8", "Current IP Address:"); err != nil || ip != "8.8.8.8" {
+		t.Fatalf("oray reply: %q %v", ip, err)
+	}
+	if _, err := parseProxyExitReply("Current IP Address: 192.168.1.2", "Current IP Address:"); err == nil {
+		t.Fatal("private oray reply accepted")
+	}
+}
+
+func TestCellularDNSCacheExpires(t *testing.T) {
+	now := time.Now()
+	key := "en99|cache.example"
+	storeCellularIPv4(key, []net.IP{net.ParseIP("8.8.8.8")}, now)
+	if ips := cachedCellularIPv4(key, now.Add(cellularDNSCacheTTL/2)); len(ips) != 1 {
+		t.Fatal("fresh entry missing")
+	}
+	if ips := cachedCellularIPv4(key, now.Add(cellularDNSCacheTTL+time.Second)); ips != nil {
+		t.Fatal("expired entry returned")
 	}
 }

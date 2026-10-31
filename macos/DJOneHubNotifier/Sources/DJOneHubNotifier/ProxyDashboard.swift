@@ -296,7 +296,7 @@ struct ProxyDashboard: View {
                     Text("02   仅本机 · IPv4 · TCP。UDP / QUIC 与局域网共享暂不支持。")
                     Text("03   模块断线后代理失败，不改走宽带；公网 IP 不保证独享或每次变化。")
                     Text("04   保持宽带为系统默认网络；本版本不自动修改系统网关。")
-                    Text("05   DNS：模块 DHCP 提供；出口检测：myip.ipip.net / api.ipify.org；归属地：ipwho.is（会获知出口 IP）。位置为估算，非 GPS。")
+                    Text("05   DNS：模块 DHCP DNS 与 223.5.5.5 / 119.29.29.29 并行查询，均只走蜂窝；出口检测：myip.ipip.net / ip.3322.net / ddns.oray.com / ifconfig.me 并行；归属地：ipwho.is（会获知出口 IP）。位置为估算，非 GPS。")
                     }.font(.callout).foregroundStyle(.secondary).padding(.top, 8)
                 }
             }.padding(24)

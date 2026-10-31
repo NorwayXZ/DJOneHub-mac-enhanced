@@ -14,21 +14,36 @@ import (
 
 type proxyExitProvider struct {
 	url, source string
-	ipip        bool
+	// prefix precedes the IP in the reply; empty means the body is the bare IP.
+	prefix string
 }
 
+// Domestic providers answer over China Mobile in a few hundred ms; ifconfig.me
+// covers the case where they are unreachable. All are queried in parallel.
 var proxyExitProviders = []proxyExitProvider{
-	{"https://myip.ipip.net", "myip.ipip.net", true},
-	{"https://api.ipify.org", "api.ipify.org", false},
+	{"https://myip.ipip.net", "myip.ipip.net", "当前 IP："},
+	{"https://ip.3322.net", "ip.3322.net", ""},
+	{"https://ddns.oray.com/checkip", "ddns.oray.com", "Current IP Address:"},
+	{"https://ifconfig.me/ip", "ifconfig.me", ""},
 }
+
+const proxyExitTimeout = 6 * time.Second
 
 func parseProxyExit(body string, ipip bool) (string, error) {
-	text := strings.TrimSpace(body)
+	prefix := ""
 	if ipip {
-		if !strings.HasPrefix(text, "当前 IP：") {
+		prefix = "当前 IP："
+	}
+	return parseProxyExitReply(body, prefix)
+}
+
+func parseProxyExitReply(body, prefix string) (string, error) {
+	text := strings.TrimSpace(body)
+	if prefix != "" {
+		if !strings.HasPrefix(text, prefix) {
 			return "", errors.New("unexpected exit provider format")
 		}
-		fields := strings.Fields(strings.TrimPrefix(text, "当前 IP："))
+		fields := strings.Fields(strings.TrimPrefix(text, prefix))
 		if len(fields) == 0 {
 			return "", errors.New("empty exit provider reply")
 		}
@@ -40,36 +55,59 @@ func parseProxyExit(body string, ipip bool) (string, error) {
 	}
 	return ip.String(), nil
 }
+
+// probeProxyExit queries every provider at once and returns the first valid
+// answer. When preferred names a provider (reconnect compares before/after IPs
+// from the same source), its answer wins if it arrives at all; the others are
+// only a fallback for when it fails.
 func probeProxyExit(ctx context.Context, iface, preferred string) (string, string, error) {
-	providers := append([]proxyExitProvider(nil), proxyExitProviders...)
-	if preferred != "" {
-		for i, p := range providers {
-			if p.source == preferred {
-				providers[0], providers[i] = providers[i], providers[0]
-				break
+	ctx, cancel := context.WithTimeout(ctx, proxyExitTimeout)
+	defer cancel()
+	type answer struct {
+		ip, source string
+		err        error
+	}
+	answers := make(chan answer, len(proxyExitProviders))
+	waitPreferred := false
+	for _, provider := range proxyExitProviders {
+		if provider.source == preferred {
+			waitPreferred = true
+		}
+		go func(provider proxyExitProvider) {
+			ip, err := probeProxyExitProvider(ctx, iface, provider)
+			answers <- answer{ip, provider.source, err}
+		}(provider)
+	}
+	var fallback *answer
+	failures := []string{}
+	for range proxyExitProviders {
+		a := <-answers
+		if a.err != nil {
+			failures = append(failures, a.source+": "+a.err.Error())
+			if a.source == preferred {
+				waitPreferred = false
 			}
+		} else if !waitPreferred || a.source == preferred {
+			return a.ip, a.source, nil
+		} else if fallback == nil {
+			fallback = &a
+		}
+		if fallback != nil && !waitPreferred {
+			return fallback.ip, fallback.source, nil
 		}
 	}
-	failures := []string{}
-	for _, provider := range providers {
-		if ctx.Err() != nil {
-			return "", "", ctx.Err()
-		}
-		ip, err := probeProxyExitProvider(ctx, iface, provider)
-		if err == nil {
-			return ip, provider.source, nil
-		}
-		failures = append(failures, provider.source+": "+err.Error())
+	if fallback != nil {
+		return fallback.ip, fallback.source, nil
 	}
 	return "", "", errors.New(strings.Join(failures, "; "))
 }
+
 func probeProxyExitProvider(ctx context.Context, iface string, provider proxyExitProvider) (string, error) {
-	attempt, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
 	transport := &http.Transport{Proxy: nil, DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) { return cellularDial(ctx, iface, addr) }, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}, DisableKeepAlives: true}
 	defer transport.CloseIdleConnections()
-	client := &http.Client{Transport: transport, Timeout: 6 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirect rejected") }}
-	request, _ := http.NewRequestWithContext(attempt, "GET", provider.url, nil)
+	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirect rejected") }}
+	request, _ := http.NewRequestWithContext(ctx, "GET", provider.url, nil)
+	request.Header.Set("User-Agent", "curl/8")
 	response, err := client.Do(request)
 	if err != nil {
 		return "", err
@@ -85,5 +123,5 @@ func probeProxyExitProvider(ctx context.Context, iface string, provider proxyExi
 	if len(body) > 1024 {
 		return "", errors.New("oversized exit reply")
 	}
-	return parseProxyExit(string(body), provider.ipip)
+	return parseProxyExitReply(string(body), provider.prefix)
 }
