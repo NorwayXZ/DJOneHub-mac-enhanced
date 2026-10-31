@@ -1856,7 +1856,7 @@ func (a *app) runATCommand(command string, timeout time.Duration) (string, error
 
 func (a *app) sendSMS(w http.ResponseWriter, r *http.Request) {
 	if !a.tryModuleOperation() {
-		writeError(w, 409, "module operation in progress")
+		writeError(w, 409, errModuleBusy)
 		return
 	}
 	defer a.moduleOperationMu.Unlock()
@@ -1951,7 +1951,7 @@ func smsSubmitOptions(message string) smscodec.SubmitOptions {
 
 func (a *app) executeAT(w http.ResponseWriter, r *http.Request) {
 	if !a.tryModuleOperation() {
-		writeError(w, 409, "module operation in progress")
+		writeError(w, 409, errModuleBusy)
 		return
 	}
 	defer a.moduleOperationMu.Unlock()
@@ -2569,7 +2569,7 @@ func (a *app) getCellularPolicy(w http.ResponseWriter, _ *http.Request) {
 
 func (a *app) setCellularPolicy(w http.ResponseWriter, r *http.Request) {
 	if !a.tryModuleOperation() {
-		writeError(w, 409, "module operation in progress")
+		writeError(w, 409, errModuleBusy)
 		return
 	}
 	defer a.moduleOperationMu.Unlock()
@@ -2627,7 +2627,7 @@ func (a *app) startCellularPolicyGuard(ctx context.Context) {
 
 func (a *app) setUSBNetMode(w http.ResponseWriter, r *http.Request) {
 	if !a.tryModuleOperation() {
-		writeError(w, 409, "module operation in progress")
+		writeError(w, 409, errModuleBusy)
 		return
 	}
 	defer a.moduleOperationMu.Unlock()
@@ -2665,7 +2665,7 @@ func (a *app) setUSBNetMode(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) rebootModule(w http.ResponseWriter, _ *http.Request) {
 	if !a.tryModuleOperation() {
-		writeError(w, 409, "module operation in progress")
+		writeError(w, 409, errModuleBusy)
 		return
 	}
 	defer a.moduleOperationMu.Unlock()
@@ -2761,7 +2761,7 @@ func (a *app) usbProfile(w http.ResponseWriter, _ *http.Request) {
 // the configuration without rebooting; unplugging to iPhone/iPad applies it.
 func (a *app) setUSBProfile(w http.ResponseWriter, r *http.Request) {
 	if !a.tryModuleOperation() {
-		writeError(w, 409, "module operation in progress")
+		writeError(w, 409, errModuleBusy)
 		return
 	}
 	defer a.moduleOperationMu.Unlock()
@@ -3168,7 +3168,7 @@ func (a *app) phonebookProbeCommand(command string, result *phonebookProbeResult
 // phonebook entry, so it is safe to use before enabling portable card notes.
 func (a *app) probeESIMPhonebook(w http.ResponseWriter, _ *http.Request) {
 	if !a.tryModuleOperation() {
-		writeError(w, 409, "module operation in progress")
+		writeError(w, 409, errModuleBusy)
 		return
 	}
 	defer a.moduleOperationMu.Unlock()
@@ -3329,7 +3329,7 @@ func (a *app) listModuleESIMNotes(w http.ResponseWriter, _ *http.Request) {
 
 func (a *app) saveModuleESIMNote(w http.ResponseWriter, r *http.Request) {
 	if !a.tryModuleOperation() {
-		writeError(w, 409, "module operation in progress")
+		writeError(w, 409, errModuleBusy)
 		return
 	}
 	defer a.moduleOperationMu.Unlock()
@@ -3509,7 +3509,7 @@ func (a *app) esimHealth(w http.ResponseWriter, _ *http.Request) {
 
 func (a *app) switchESIM(w http.ResponseWriter, r *http.Request) {
 	if !a.tryModuleOperation() {
-		writeError(w, 409, "module operation in progress")
+		writeError(w, 409, errModuleBusy)
 		return
 	}
 	defer a.moduleOperationMu.Unlock()
@@ -3581,7 +3581,7 @@ func (a *app) switchESIM(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) renameESIMProfile(w http.ResponseWriter, r *http.Request) {
 	if !a.tryModuleOperation() {
-		writeError(w, 409, "module operation in progress")
+		writeError(w, 409, errModuleBusy)
 		return
 	}
 	defer a.moduleOperationMu.Unlock()
@@ -3617,7 +3617,7 @@ func (a *app) renameESIMProfile(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) deleteESIMProfile(w http.ResponseWriter, r *http.Request) {
 	if !a.tryModuleOperation() {
-		writeError(w, 409, "module operation in progress")
+		writeError(w, 409, errModuleBusy)
 		return
 	}
 	defer a.moduleOperationMu.Unlock()
@@ -3652,7 +3652,7 @@ func (a *app) deleteESIMProfile(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) downloadESIMProfile(w http.ResponseWriter, r *http.Request) {
 	if !a.tryModuleOperation() {
-		writeError(w, 409, "module operation in progress")
+		writeError(w, 409, errModuleBusy)
 		return
 	}
 	defer a.moduleOperationMu.Unlock()

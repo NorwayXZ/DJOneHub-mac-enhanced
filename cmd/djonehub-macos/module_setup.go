@@ -227,7 +227,7 @@ func (a *app) invalidateReadyModuleSetup() {
 
 func (a *app) moduleSetupStartAPI(w http.ResponseWriter, r *http.Request) {
 	if !a.tryModuleOperation() {
-		writeError(w, 409, "module operation in progress")
+		writeError(w, 409, errModuleBusy)
 		return
 	}
 	unlock := true

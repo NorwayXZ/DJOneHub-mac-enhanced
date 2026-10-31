@@ -350,7 +350,7 @@ func (b *bandOptimizer) update(fn func(s *bandOptimizerState)) {
 func (a *app) setLTEBands(mask string) error {
 	resp, err := a.runATCommand(fmt.Sprintf(`AT+QCFG="band",0,%s,0,1`, mask), 10*time.Second)
 	if err == nil && !strings.Contains(resp, "OK") {
-		err = fmt.Errorf("band change rejected: %s", strings.TrimSpace(resp))
+		err = fmt.Errorf("模块拒绝了频段设置：%s", strings.TrimSpace(resp))
 	}
 	return err
 }
@@ -525,7 +525,7 @@ func (a *app) runBandOptimizer(saveData bool) {
 		s.Candidates = candidates
 	})
 	if len(candidates) == 0 {
-		finish("failed", "没有可测试的频段", errors.New("no candidate bands"))
+		finish("failed", "没有可测试的频段", errors.New("当前运营商没有模块支持的候选频段"))
 		return
 	}
 	p.stop()
@@ -722,11 +722,11 @@ func (a *app) bandActionAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if a.demo {
-		writeError(w, 409, "radio operations disabled in demo")
+		writeError(w, 409, "演示模式下不能操作射频")
 		return
 	}
 	if !a.tryModuleOperation() {
-		writeError(w, 409, "module operation in progress")
+		writeError(w, 409, errModuleBusy)
 		return
 	}
 	a.callMu.RLock()
@@ -734,7 +734,7 @@ func (a *app) bandActionAPI(w http.ResponseWriter, r *http.Request) {
 	a.callMu.RUnlock()
 	if busy {
 		a.moduleOperationMu.Unlock()
-		writeError(w, 409, "call in progress")
+		writeError(w, 409, errCallActive)
 		return
 	}
 	switch body.Action {
@@ -768,7 +768,7 @@ func (a *app) bandActionAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		b.mu.Unlock()
 		if err := a.setLTEBands(full); err != nil {
-			writeError(w, 502, err.Error())
+			writeError(w, 502, friendlyProxyError(err))
 			return
 		}
 		b.update(func(s *bandOptimizerState) { s.ICCID, s.LockedBand, s.MaskKnown = iccid, 0, true })
@@ -785,7 +785,7 @@ func (a *app) bandActionAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := a.setLTEBands(bandMaskFor(p.Band)); err != nil {
-			writeError(w, 502, err.Error())
+			writeError(w, 502, friendlyProxyError(err))
 			return
 		}
 		p.Disabled, p.Fallback = false, false
@@ -798,6 +798,6 @@ func (a *app) bandActionAPI(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, b.snapshot())
 	default:
 		a.moduleOperationMu.Unlock()
-		writeError(w, 400, "unknown band action")
+		writeError(w, 400, "未知的频段操作")
 	}
 }

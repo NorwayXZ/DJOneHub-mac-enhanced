@@ -253,7 +253,7 @@ func (c *fleetController) forward(w http.ResponseWriter, r *http.Request, id, pa
 	paused := c.paused
 	c.mu.Unlock()
 	if paused && r.Method != "GET" {
-		writeError(w, 409, "update in progress")
+		writeError(w, 409, errUpdateActive)
 		return
 	}
 	if worker == nil {
@@ -385,7 +385,7 @@ func (c *fleetController) prepareAllWorkers() error {
 	c.mu.Lock()
 	if c.paused {
 		c.mu.Unlock()
-		return errors.New("update in progress")
+		return errors.New(errUpdateActive)
 	}
 	c.paused = true
 	workers := []fleetProcess{}

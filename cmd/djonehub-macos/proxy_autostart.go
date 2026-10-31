@@ -110,7 +110,7 @@ func (a *app) autoStartProxyOnce(ctx context.Context) {
 	a.moduleOperationMu.Unlock()
 	if err != nil {
 		p.mu.Lock()
-		p.state.Error = "Auto-start pending: " + err.Error()
+		p.state.Error = "等待蜂窝网络恢复后自动开启：" + friendlyProxyError(err)
 		p.mu.Unlock()
 		return
 	}
@@ -128,7 +128,7 @@ func (a *app) autoStartProxyOnce(ctx context.Context) {
 	iface := p.snapshot().Interface
 	if ip, source, err := probeProxyExit(probeCtx, iface, ""); err != nil {
 		p.mu.Lock()
-		p.state.Error = "Proxy listening, exit check failed: " + err.Error()
+		p.state.Error = "代理已开启，但暂时检测不到出口 IP：" + friendlyProxyError(err)
 		p.mu.Unlock()
 	} else {
 		p.recordExit(probeCtx, iface, ip, source)

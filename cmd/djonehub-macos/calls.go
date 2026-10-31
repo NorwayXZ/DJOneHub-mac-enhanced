@@ -375,7 +375,7 @@ func (a *app) rejectCall(w http.ResponseWriter, _ *http.Request) {
 
 func (a *app) answerCall(w http.ResponseWriter, _ *http.Request) {
 	if !a.tryModuleOperation() {
-		writeError(w, 409, "module operation in progress")
+		writeError(w, 409, errModuleBusy)
 		return
 	}
 	defer a.moduleOperationMu.Unlock()
@@ -468,7 +468,7 @@ func (a *app) dtmfCall(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) dialCall(w http.ResponseWriter, r *http.Request) {
 	if !a.tryModuleOperation() {
-		writeError(w, 409, "module operation in progress")
+		writeError(w, 409, errModuleBusy)
 		return
 	}
 	defer a.moduleOperationMu.Unlock()

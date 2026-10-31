@@ -52,11 +52,11 @@ func proxyInterface() (string, error) {
 		}
 	}
 	if found == "" {
-		return "", errors.New("no hardware-verified DJI USB IPv4 interface")
+		return "", errors.New("未找到模块的蜂窝网卡，请检查模块是否已连接并完成上网初始化")
 	}
 	route := discoverMacDefaultRoute()
 	if route.Interface == "" || route.Interface == found {
-		return "", errors.New("proxy-only mode requires broadband/Wi-Fi as the default route")
+		return "", errors.New("需要宽带或 Wi-Fi 作为 Mac 的默认网络，蜂窝只给代理使用")
 	}
 	return found, nil
 }
@@ -67,7 +67,7 @@ func boundProxyDial(ctx context.Context, iface, address string) (net.Conn, error
 func boundInterfaceDial(ctx context.Context, iface, network, address string) (net.Conn, error) {
 	current, err := proxyInterface()
 	if err != nil || current != iface {
-		return nil, errors.New("cellular interface changed or broadband default route unavailable")
+		return nil, errors.New("蜂窝网卡已变化或宽带默认网络不可用")
 	}
 	i, err := net.InterfaceByName(iface)
 	if err != nil {

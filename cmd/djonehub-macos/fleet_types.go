@@ -271,7 +271,7 @@ func (c *fleetController) confirm(id, expectedSession string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.paused {
-		return errors.New("update in progress")
+		return errors.New(errUpdateActive)
 	}
 	d, ok := c.devices[id]
 	if !ok {

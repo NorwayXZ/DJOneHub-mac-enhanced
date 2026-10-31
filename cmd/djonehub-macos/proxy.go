@@ -308,7 +308,7 @@ func (a *app) proxyActionAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !a.tryModuleOperation() {
-		writeError(w, 409, "module operation in progress")
+		writeError(w, 409, errModuleBusy)
 		return
 	}
 	unlock := true
@@ -322,11 +322,11 @@ func (a *app) proxyActionAPI(w http.ResponseWriter, r *http.Request) {
 	case "start":
 		policy, err := a.cellularPolicyStatus()
 		if err != nil || policy.ForceOff {
-			writeError(w, 409, "enable cellular data in settings first")
+			writeError(w, 409, "请先在设置中打开“允许 4G 上网”")
 			return
 		}
 		if err := p.start(); err != nil {
-			writeError(w, 502, err.Error())
+			writeError(w, 502, "无法开启代理："+friendlyProxyError(err))
 			return
 		}
 		p.setAutoStart(true)
@@ -343,7 +343,8 @@ func (a *app) proxyActionAPI(w http.ResponseWriter, r *http.Request) {
 		ip, source, err := probeProxyExit(r.Context(), iface, "")
 		if err != nil {
 			p.mu.Lock()
-			p.state.Error = "Proxy listening, exit check failed: " + err.Error()
+			log.Printf("cellular proxy: exit check after start failed: %v", err)
+			p.state.Error = "代理已开启，但暂时检测不到出口 IP：" + friendlyProxyError(err)
 			p.mu.Unlock()
 		} else {
 			p.recordExit(r.Context(), iface, ip, source)
@@ -354,12 +355,13 @@ func (a *app) proxyActionAPI(w http.ResponseWriter, r *http.Request) {
 	case "probe":
 		iface, err := proxyInterface()
 		if err != nil {
-			writeError(w, 502, err.Error())
+			writeError(w, 502, friendlyProxyError(err))
 			return
 		}
 		ip, source, err := probeProxyExit(r.Context(), iface, "")
 		if err != nil {
-			writeError(w, 502, err.Error())
+			log.Printf("cellular proxy: exit probe failed: %v", err)
+			writeError(w, 502, "检测出口失败："+friendlyProxyError(err))
 			return
 		}
 		p.recordExit(r.Context(), iface, ip, source)
@@ -369,30 +371,30 @@ func (a *app) proxyActionAPI(w http.ResponseWriter, r *http.Request) {
 			mode = segmentReconnectMode(body.AvoidHours)
 		}
 		if !body.Confirm {
-			writeError(w, 400, "confirmation required: disconnects proxy, SMS and calls temporarily")
+			writeError(w, 400, "需要确认：重连会暂时中断代理、短信和来电")
 			return
 		}
 		if a.demo {
-			writeError(w, 409, "radio operations disabled in demo")
+			writeError(w, 409, "演示模式下不能操作射频")
 			return
 		}
 		a.callMu.RLock()
 		busy := a.activeCall != nil
 		a.callMu.RUnlock()
 		if busy {
-			writeError(w, 409, "call in progress")
+			writeError(w, 409, errCallActive)
 			return
 		}
 		p.mu.Lock()
 		cooldown := time.Since(p.lastReconnect) < reconnectCooldown
 		p.mu.Unlock()
 		if cooldown {
-			writeError(w, 429, fmt.Sprintf("wait %d seconds between reconnects", int(reconnectCooldown.Seconds())))
+			writeError(w, 429, fmt.Sprintf("两次重连至少间隔 %d 秒，请稍后再试", int(reconnectCooldown.Seconds())))
 			return
 		}
 		iface, err := proxyInterface()
 		if err != nil {
-			writeError(w, 502, err.Error())
+			writeError(w, 502, friendlyProxyError(err))
 			return
 		}
 		p.mu.Lock()
@@ -413,7 +415,7 @@ func (a *app) proxyActionAPI(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 202, p.snapshot())
 		return
 	default:
-		writeError(w, 400, "unknown proxy action")
+		writeError(w, 400, "未知的代理操作")
 		return
 	}
 	writeJSON(w, 200, p.snapshot())
@@ -465,13 +467,14 @@ func (a *app) reconnectProxy(iface string, mode reconnectMode) {
 		p.state.ReconnectAttempts = attempts
 		p.state.ReconnectSeconds = float64(time.Since(started).Milliseconds()) / 1000
 		if err != nil {
-			p.state.Error = err.Error()
+			log.Printf("cellular reconnect failed: %v", err)
+			p.state.Error = "重连未完成：" + friendlyProxyError(err)
 		}
 		p.mu.Unlock()
 		if wasRunning && ctx.Err() == nil {
 			if e := p.start(); e != nil {
 				p.mu.Lock()
-				p.state.Error += "; proxy restart: " + e.Error()
+				p.state.Error += "；代理重新开启失败：" + friendlyProxyError(e)
 				p.mu.Unlock()
 			}
 		}
@@ -594,7 +597,7 @@ func (p *cellularProxy) monitor(ctx context.Context, iface string) {
 			if err != nil || current != iface {
 				p.mu.Lock()
 				if ctx.Err() == nil {
-					p.state.Error = "Cellular interface or default route changed; proxy stopped (no broadband fallback)"
+					p.state.Error = "蜂窝网络中断，代理已暂停（不会改走宽带）"
 					p.state.PublicIP = ""
 					p.state.IPSource = ""
 					p.stopLocked()

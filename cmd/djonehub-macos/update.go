@@ -18,14 +18,14 @@ func (a *app) tryModuleOperation() bool {
 }
 func (a *app) beginUpdateLease() error {
 	if !a.tryModuleOperation() {
-		return errors.New("module operation in progress")
+		return errors.New(errModuleBusy)
 	}
 	defer a.moduleOperationMu.Unlock()
 	a.callMu.RLock()
 	busy := a.activeCall != nil
 	a.callMu.RUnlock()
 	if busy {
-		return errors.New("call in progress")
+		return errors.New(errCallActive)
 	}
 	a.updatePending.Store(true)
 	a.proxy.stop()

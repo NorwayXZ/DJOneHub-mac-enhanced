@@ -504,7 +504,7 @@ func voiceRouteIsStopped(adb *adbClient, m *voiceRuntimeManifest) (bool, error) 
 
 func (a *app) voiceProvisionAPI(w http.ResponseWriter, r *http.Request) {
 	if !a.tryModuleOperation() {
-		writeError(w, 409, "module operation in progress")
+		writeError(w, 409, errModuleBusy)
 		return
 	}
 	defer a.moduleOperationMu.Unlock()
@@ -533,7 +533,7 @@ func (a *app) voiceStatusAPI(w http.ResponseWriter, _ *http.Request) {
 
 func (a *app) voiceStartAPI(w http.ResponseWriter, _ *http.Request) {
 	if !a.tryModuleOperation() {
-		writeError(w, 409, "module operation in progress")
+		writeError(w, 409, errModuleBusy)
 		return
 	}
 	defer a.moduleOperationMu.Unlock()
@@ -547,7 +547,7 @@ func (a *app) voiceStartAPI(w http.ResponseWriter, _ *http.Request) {
 
 func (a *app) voiceStopAPI(w http.ResponseWriter, _ *http.Request) {
 	if !a.tryModuleOperation() {
-		writeError(w, 409, "module operation in progress")
+		writeError(w, 409, errModuleBusy)
 		return
 	}
 	defer a.moduleOperationMu.Unlock()
