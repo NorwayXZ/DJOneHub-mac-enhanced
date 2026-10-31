@@ -12,6 +12,7 @@ import "C"
 import (
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -200,20 +201,38 @@ func usbATCandidates(handle *C.libusb_device_handle) ([]usbATCandidate, error) {
 	return candidates, nil
 }
 
+// usbATCloseWait bounds how long Close waits for libusb cleanup. After a
+// physical unplug libusb_exit has been seen blocking for minutes on macOS.
+const usbATCloseWait = 2 * time.Second
+
+// Close detaches the handle under the lock and frees libusb resources outside
+// it. Cleanup that outlives usbATCloseWait keeps running in the background, so
+// a hung libusb call can no longer hold u.mu and freeze status, SMS and call
+// polling, nor block reopening a re-enumerated module with a fresh context.
 func (u *usbAT) Close() {
 	if u == nil {
 		return
 	}
 	u.mu.Lock()
-	defer u.mu.Unlock()
-	if u.handle == nil {
-		return
-	}
-	C.libusb_release_interface(u.handle, C.int(u.iface))
-	C.libusb_close(u.handle)
-	C.libusb_exit(u.ctx)
+	handle, ctx, iface := u.handle, u.ctx, u.iface
 	u.handle = nil
 	u.ctx = nil
+	u.mu.Unlock()
+	if handle == nil {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		C.libusb_release_interface(handle, C.int(iface))
+		C.libusb_close(handle)
+		C.libusb_exit(ctx)
+	}()
+	select {
+	case <-done:
+	case <-time.After(usbATCloseWait):
+		log.Printf("USB AT cleanup still running after %s; continuing without it", usbATCloseWait)
+	}
 }
 
 func (u *usbAT) Command(cmd string, timeout time.Duration) (string, error) {
