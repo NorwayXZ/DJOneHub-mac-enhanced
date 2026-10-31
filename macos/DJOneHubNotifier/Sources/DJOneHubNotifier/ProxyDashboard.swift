@@ -27,12 +27,15 @@ struct CellularProxyStatus: Decodable {
     var publicIP: String
     var previousIP: String
     var phase: String
+    var reconnectSeconds: Double? = nil
+    var reconnectAttempts: Int? = nil
     var error: String
     var connections: Int
     var uploaded: UInt64
     var downloaded: UInt64
     enum CodingKeys: String, CodingKey {
         case location, isp, history
+        case reconnectSeconds = "reconnect_seconds", reconnectAttempts = "reconnect_attempts"
         case historyError = "history_error"
         case ipSource = "ip_source"
         case checkedAt = "checked_at", locationError = "location_error"
@@ -186,7 +189,7 @@ final class ProxyCenter: ObservableObject {
         switch status?.phase {
         case "reconnecting": return "正在重新注册蜂窝网络…"
         case "changed": return "已检测到新的公网 IP"
-        case "unchanged": return "网络已恢复，运营商分配的 IP 未变"
+        case "unchanged": return "已自动重试，运营商仍分配了原 IP"
         case "recovered_unverified": return "网络已恢复，未能可靠比较前后 IP"
         case "failed": return "恢复未完成，请检查模块"
         default: return "尚未执行重连"
@@ -264,6 +267,16 @@ struct ProxyDashboard: View {
                     if let old = proxy.status?.previousIP, !old.isEmpty {
                         Text("上次出口  \(old)").font(.system(.caption, design: .monospaced)).textSelection(.enabled)
                     }
+                    if !proxy.reconnecting, let seconds = proxy.status?.reconnectSeconds, seconds > 0 {
+                        let attempts = proxy.status?.reconnectAttempts ?? 0
+                        Text("用时 \(String(format: "%.1f", seconds)) 秒" + (attempts > 1 ? " · 开关射频 \(attempts) 次" : ""))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    if proxy.status?.phase == "changed", let ip = proxy.status?.publicIP, !ip.isEmpty {
+                        let seen = (proxy.status?.history ?? []).dropLast().filter { $0.ip == ip }.count
+                        Text(seen > 0 ? "这个 IP 以前用过 \(seen) 次" : "这个 IP 以前没用过")
+                            .font(.caption).foregroundStyle(seen > 0 ? Color.orange : Color.secondary)
+                    }
                     if let message = proxy.error, !message.isEmpty { Text(message).foregroundStyle(.red).textSelection(.enabled) }
                     if let message = proxy.status?.error, !message.isEmpty { Text(message).foregroundStyle(.orange).textSelection(.enabled) }
                 }.padding(18).frame(maxWidth: .infinity, alignment: .leading).background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 14))
@@ -283,7 +296,7 @@ struct ProxyDashboard: View {
             Button("取消", role: .cancel) {}
             Button("断开并重连", role: .destructive) { Task { await proxy.act("reconnect", confirm: true) } }
         } message: {
-            Text("所选模块的代理连接将中断，短信与来电会暂时不可用；其他模块继续工作。IP 由运营商分配，不保证更换；两次操作间隔至少 60 秒。")
+            Text("所选模块的代理连接将中断，短信与来电会暂时不可用；其他模块继续工作。IP 由运营商分配，不保证更换；拿到原 IP 时会自动再试一次；两次操作间隔至少 20 秒。")
         }
     }
     private var modulePicker: some View {

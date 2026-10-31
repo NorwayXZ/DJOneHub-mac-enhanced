@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"strconv"
@@ -18,6 +19,17 @@ import (
 )
 
 const proxyAddress = "127.0.0.1:10909"
+
+const (
+	reconnectCooldown = 20 * time.Second
+	// Like a quick airplane-mode toggle: long enough for the network to drop the
+	// session, short enough to keep switching fast.
+	radioOffDuration = 3 * time.Second
+	// A second cycle runs only when the exact same IP comes back; a new IP in the
+	// same segment counts as success because the carrier's NAT pool decides that.
+	maxReconnectAttempts    = 2
+	reconnectAttemptTimeout = 60 * time.Second
+)
 
 var workerProxyAddress string
 
@@ -42,10 +54,13 @@ type proxyState struct {
 	PublicIP      string         `json:"public_ip"`
 	PreviousIP    string         `json:"previous_ip"`
 	Phase         string         `json:"phase"`
-	Error         string         `json:"error"`
-	Connections   int            `json:"connections"`
-	Uploaded      uint64         `json:"uploaded"`
-	Downloaded    uint64         `json:"downloaded"`
+	// Filled after a reconnect finishes: wall time from click to verified exit, and radio cycles used.
+	ReconnectSeconds  float64 `json:"reconnect_seconds"`
+	ReconnectAttempts int     `json:"reconnect_attempts"`
+	Error             string  `json:"error"`
+	Connections       int     `json:"connections"`
+	Uploaded          uint64  `json:"uploaded"`
+	Downloaded        uint64  `json:"downloaded"`
 }
 type cellularProxy struct {
 	lifecycle     context.Context
@@ -367,10 +382,10 @@ func (a *app) proxyActionAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		p.mu.Lock()
-		cooldown := time.Since(p.lastReconnect) < 60*time.Second
+		cooldown := time.Since(p.lastReconnect) < reconnectCooldown
 		p.mu.Unlock()
 		if cooldown {
-			writeError(w, 429, "wait 60 seconds between reconnects")
+			writeError(w, 429, fmt.Sprintf("wait %d seconds between reconnects", int(reconnectCooldown.Seconds())))
 			return
 		}
 		iface, err := proxyInterface()
@@ -381,6 +396,8 @@ func (a *app) proxyActionAPI(w http.ResponseWriter, r *http.Request) {
 		p.mu.Lock()
 		p.lastReconnect = time.Now()
 		p.state.Phase = "reconnecting"
+		p.state.ReconnectSeconds = 0
+		p.state.ReconnectAttempts = 0
 		p.state.Error = ""
 		p.mu.Unlock()
 		unlock = false
@@ -397,12 +414,13 @@ func (a *app) reconnectProxy(iface string) {
 	a.moduleVoiceOpMu.Lock()
 	defer a.moduleVoiceOpMu.Unlock()
 	p := &a.proxy
+	started := time.Now()
 	wasRunning := p.snapshot().Running
 	parent := p.lifecycle
 	if parent == nil {
 		parent = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(parent, 100*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 20*time.Second+maxReconnectAttempts*reconnectAttemptTimeout)
 	defer cancel()
 	old, oldSource, oldErr := probeProxyExit(ctx, iface, p.snapshot().IPSource)
 	p.stop()
@@ -426,9 +444,11 @@ func (a *app) reconnectProxy(iface string) {
 	p.state.LocationError = ""
 	p.state.Error = ""
 	p.mu.Unlock()
-	finish := func(phase string, err error) {
+	finish := func(phase string, attempts int, err error) {
 		p.mu.Lock()
 		p.state.Phase = phase
+		p.state.ReconnectAttempts = attempts
+		p.state.ReconnectSeconds = float64(time.Since(started).Milliseconds()) / 1000
 		if err != nil {
 			p.state.Error = err.Error()
 		}
@@ -441,56 +461,77 @@ func (a *app) reconnectProxy(iface string) {
 			}
 		}
 	}
-	if ctx.Err() != nil {
-		finish("failed", ctx.Err())
+	for attempt := 1; ; attempt++ {
+		if ctx.Err() != nil {
+			finish("failed", attempt-1, ctx.Err())
+			return
+		}
+		current, ip, source, err := a.cycleRadio(ctx, oldSource)
+		if err != nil {
+			finish("failed", attempt, err)
+			return
+		}
+		comparable := oldErr == nil && oldSource == source
+		if comparable && ip == old && attempt < maxReconnectAttempts {
+			log.Printf("cellular reconnect: carrier returned the same IP, cycling radio once more")
+			continue
+		}
+		p.recordExit(ctx, current, ip, source)
+		phase := "changed"
+		if !comparable {
+			phase = "recovered_unverified"
+		} else if ip == old {
+			phase = "unchanged"
+		}
+		finish(phase, attempt, nil)
 		return
 	}
+}
+
+// cycleRadio toggles the radio off and on (AT+CFUN=0/1) and waits until the
+// cellular interface serves traffic again, returning the verified exit.
+func (a *app) cycleRadio(parent context.Context, ipSource string) (iface, ip, source string, err error) {
+	ctx, cancel := context.WithTimeout(parent, reconnectAttemptTimeout)
+	defer cancel()
 	response, offErr := a.runATCommand("AT+CFUN=0", 5*time.Second)
 	if offErr == nil {
 		offErr = validateCallATResponse(response)
 	}
 	if offErr != nil {
 		_, _ = a.runATCommand("AT+CFUN=1", 10*time.Second)
-		finish("failed", offErr)
-		return
+		return "", "", "", offErr
 	}
 	// Always attempt to turn the radio back on, even when later recovery fails.
 	select {
 	case <-ctx.Done():
-	case <-time.After(3 * time.Second):
+	case <-time.After(radioOffDuration):
 	}
 	response, onErr := a.runATCommand("AT+CFUN=1", 10*time.Second)
 	if onErr == nil {
 		onErr = validateCallATResponse(response)
 	}
-	if err := onErr; err != nil {
-		finish("failed", err)
-		return
+	if onErr != nil {
+		return "", "", "", onErr
 	}
 	var last error
-	for ctx.Err() == nil {
-		time.Sleep(3 * time.Second)
+	for {
+		select {
+		case <-ctx.Done():
+			return "", "", "", fmt.Errorf("recovery timed out: %v", last)
+		case <-time.After(2 * time.Second):
+		}
 		current, err := proxyInterface()
 		if err != nil {
 			last = err
 			continue
 		}
-		ip, source, err := probeProxyExit(ctx, current, oldSource)
+		ip, source, err := probeProxyExit(ctx, current, ipSource)
 		if err != nil {
 			last = err
 			continue
 		}
-		p.recordExit(ctx, current, ip, source)
-		phase := "changed"
-		if oldErr != nil || oldSource != source {
-			phase = "recovered_unverified"
-		} else if ip == old {
-			phase = "unchanged"
-		}
-		finish(phase, nil)
-		return
+		return current, ip, source, nil
 	}
-	finish("failed", fmt.Errorf("recovery timed out: %v", last))
 }
 
 func (p *cellularProxy) monitor(ctx context.Context, iface string) {
