@@ -53,6 +53,35 @@ func isSupportedUSBModuleIdentity(vendorID, productID int) bool {
 }
 
 func openSupportedUSBModuleDevice(ctx *C.libusb_context) (*C.libusb_device_handle, usbModuleIdentity) {
+	if coordinatorOnly {
+		return nil, usbModuleIdentity{}
+	}
+	if scopedUSBSession != 0 {
+		var devices **C.libusb_device
+		count := C.libusb_get_device_list(ctx, &devices)
+		if count < 0 {
+			return nil, usbModuleIdentity{}
+		}
+		defer C.libusb_free_device_list(devices, 1)
+		for _, device := range unsafe.Slice(devices, int(count)) {
+			if uint64(C.libusb_get_session_data(device)) != scopedUSBSession {
+				continue
+			}
+			var desc C.struct_libusb_device_descriptor
+			if C.libusb_get_device_descriptor(device, &desc) != 0 {
+				continue
+			}
+			identity := usbModuleIdentity{vendorID: int(desc.idVendor), productID: int(desc.idProduct)}
+			if !isSupportedUSBModuleIdentity(identity.vendorID, identity.productID) {
+				continue
+			}
+			var handle *C.libusb_device_handle
+			if C.libusb_open(device, &handle) == 0 {
+				return handle, identity
+			}
+		}
+		return nil, usbModuleIdentity{}
+	}
 	for _, identity := range supportedUSBModuleIdentities {
 		if handle := C.libusb_open_device_with_vid_pid(ctx, C.uint16_t(identity.vendorID), C.uint16_t(identity.productID)); handle != nil {
 			return handle, identity
@@ -142,6 +171,9 @@ func usbATCandidates(handle *C.libusb_device_handle) ([]usbATCandidate, error) {
 	for _, intf := range interfaces {
 		altsettings := unsafe.Slice(intf.altsetting, int(intf.num_altsetting))
 		for _, alt := range altsettings {
+			if !isUSBATInterface(int(alt.bInterfaceNumber), int(alt.bInterfaceClass), int(alt.bInterfaceSubClass), int(alt.bInterfaceProtocol)) {
+				continue
+			}
 			var endpointIn, endpointOut byte
 			endpoints := unsafe.Slice(alt.endpoint, int(alt.bNumEndpoints))
 			for _, ep := range endpoints {

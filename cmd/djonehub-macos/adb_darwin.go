@@ -24,6 +24,7 @@ import (
 // ADBModuleController + ADBProtocol; only shell/push are needed for the
 // module-side voice route.
 type adbClient struct {
+	server           *adbServerTarget
 	ctx              *C.libusb_context
 	handle           *C.libusb_device_handle
 	iface            int
@@ -79,7 +80,7 @@ func openDJIUSBADB() (*adbClient, error) {
 	for _, intf := range interfaces {
 		altsettings := unsafe.Slice(intf.altsetting, int(intf.num_altsetting))
 		for _, alt := range altsettings {
-			if byte(alt.bInterfaceNumber) != 6 && byte(alt.bInterfaceSubClass) != 66 {
+			if byte(alt.bInterfaceClass) != 255 || byte(alt.bInterfaceSubClass) != 66 || byte(alt.bInterfaceProtocol) != 1 {
 				continue
 			}
 			var endpointIn, endpointOut byte
@@ -115,8 +116,16 @@ func openDJIUSBADB() (*adbClient, error) {
 		return nil, fmt.Errorf("USB ADB interface (6/adb) not found on %s", identity.String())
 	}
 	if rc := C.libusb_claim_interface(handle, C.int(target.iface)); rc != 0 {
+		session := uint64(C.libusb_get_session_data(dev))
 		C.libusb_close(handle)
 		C.libusb_exit(ctx)
+		if rc == C.LIBUSB_ERROR_ACCESS || rc == C.LIBUSB_ERROR_BUSY {
+			if server, err := openADBServerTarget(session); err == nil {
+				return &adbClient{server: server}, nil
+			} else {
+				return nil, fmt.Errorf("USB ADB occupied; local ADB server fallback: %w", err)
+			}
+		}
 		return nil, fmt.Errorf("claim USB ADB interface %d: %s", target.iface, usbErrorName(rc))
 	}
 	return &adbClient{
@@ -136,6 +145,7 @@ func (a *adbClient) Close() {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.server = nil
 	if a.handle == nil {
 		return
 	}
@@ -149,7 +159,7 @@ func (a *adbClient) Close() {
 func (a *adbClient) isOpen() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a != nil && a.handle != nil
+	return a.handle != nil || a.server != nil
 }
 
 func (a *adbClient) bulkWrite(payload []byte, timeout time.Duration) error {
@@ -478,6 +488,9 @@ func (a *adbClient) closeStreamLocked(stream adbStream) error {
 func (a *adbClient) shellChecked(command string, timeout time.Duration) (string, int, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.server != nil {
+		return a.server.shellChecked(command, timeout)
+	}
 	if a.handle == nil {
 		return "", 0, errors.New("ADB 通道未打开")
 	}
@@ -557,6 +570,9 @@ func parseADBStatus(raw, token string) (int, bool) {
 func (a *adbClient) push(data []byte, remotePath string, mode uint32, timeout time.Duration) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.server != nil {
+		return a.server.push(data, remotePath, mode, timeout)
+	}
 	if a.handle == nil {
 		return errors.New("ADB 通道未打开")
 	}

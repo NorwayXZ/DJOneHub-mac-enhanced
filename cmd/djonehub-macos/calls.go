@@ -237,6 +237,9 @@ func (a *app) applyCallPoll(calls []parsedCall, now time.Time) {
 	}
 	// Match MaVo's verified lifecycle: the call is established first and media
 	// starts only after CLCC reports one active voice call.
+	if scopedUSBSession != 0 && !workerExclusive() {
+		return
+	}
 	a.callMu.RLock()
 	swiftAudioHost := a.swiftAudioHost
 	a.callMu.RUnlock()
@@ -371,6 +374,11 @@ func (a *app) rejectCall(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (a *app) answerCall(w http.ResponseWriter, _ *http.Request) {
+	if !a.tryModuleOperation() {
+		writeError(w, 409, "module operation in progress")
+		return
+	}
+	defer a.moduleOperationMu.Unlock()
 	if a.demo {
 		writeJSON(w, http.StatusOK, map[string]bool{"answered": true})
 		return
@@ -459,6 +467,11 @@ func (a *app) dtmfCall(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) dialCall(w http.ResponseWriter, r *http.Request) {
+	if !a.tryModuleOperation() {
+		writeError(w, 409, "module operation in progress")
+		return
+	}
+	defer a.moduleOperationMu.Unlock()
 	var body struct {
 		Number string `json:"number"`
 	}

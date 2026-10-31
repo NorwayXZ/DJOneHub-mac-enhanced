@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -39,7 +40,7 @@ import (
 //go:embed web/*
 var webAssets embed.FS
 
-const appVersion = "1.2.10"
+const appVersion = "1.3.0-proxy-preview.12"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
@@ -78,6 +79,9 @@ type modulePhonebookEntry struct {
 }
 
 type app struct {
+	proxy             cellularProxy
+	moduleOperationMu sync.Mutex
+	updatePending     atomic.Bool
 	modem             *modem.Manager
 	esimMu            sync.RWMutex
 	esim              *esim.Manager
@@ -297,11 +301,36 @@ func main() {
 	var listen string
 	var demo bool
 	var webConsole bool
+	var moduleSession uint64
+	var multiModule bool
+	var moduleID, workerSocket, proxyListen string
 	flag.StringVar(&port, "port", "", "AT serial port; auto-detected when omitted")
 	flag.StringVar(&listen, "listen", "127.0.0.1:7575", "HTTP listen address")
 	flag.BoolVar(&demo, "demo", false, "run the web UI with simulated modem data")
 	flag.BoolVar(&webConsole, "web-console", false, "serve the embedded compatibility console")
+	flag.BoolVar(&multiModule, "multi-module", false, "enable isolated multi-module proxy supervisor")
+	flag.Uint64Var(&moduleSession, "module-session", 0, "internal: pin worker to a USB enumeration")
+	flag.StringVar(&moduleID, "module-id", "", "internal: persistent module identity")
+	flag.StringVar(&workerSocket, "worker-socket", "", "internal: private supervisor socket")
+	flag.StringVar(&proxyListen, "proxy-listen", proxyAddress, "internal: assigned loopback SOCKS address")
+	flag.StringVar(&fleetStateRoot, "state-dir", "", "module manager state directory; default: Application Support/DJOneHub")
 	flag.Parse()
+	if moduleSession != 0 {
+		scopedUSBSession = moduleSession
+		scopedModuleID = moduleID
+		workerProxyAddress = proxyListen
+		if err := serveModuleWorker(workerSocket); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if multiModule && runtime.GOOS == "darwin" && !demo && port == "" {
+		coordinatorOnly = true
+		if err := serveFleetSupervisor(listen); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 
 	if demo {
 		instance := newDemoApp()
@@ -461,6 +490,8 @@ func (a *app) installESIMManager(manager *esim.Manager, switchAllowed bool) bool
 }
 
 func serve(instance *app, listen string) {
+	defer instance.proxy.stop()
+	defer func() { instance.moduleOperationMu.Lock(); instance.moduleOperationMu.Unlock() }()
 	server := &http.Server{
 		Addr:              listen,
 		Handler:           instance.routes(),
@@ -597,6 +628,12 @@ func portScore(port string) int {
 }
 
 func discoverDJIUSBDevice() *usbDeviceStatus {
+	if coordinatorOnly {
+		return nil
+	}
+	if scopedUSBSession != 0 {
+		return scopedUSBDeviceStatus()
+	}
 	out, err := exec.Command("ioreg", "-r", "-c", "IOUSBHostInterface", "-l", "-w", "0").Output()
 	if err != nil {
 		return nil
@@ -783,6 +820,9 @@ func (a *app) startSMSPoller(ctx context.Context) {
 }
 
 func (a *app) pollSMSOnce() error {
+	if scopedUSBSession != 0 && !workerExclusive() {
+		return nil
+	}
 	if a.demo || a.modem != nil {
 		return nil
 	}
@@ -815,6 +855,9 @@ func (a *app) pollSMSOnce() error {
 }
 
 func (a *app) ensureUSBAT() error {
+	if coordinatorOnly {
+		return errors.New("module control belongs to isolated workers")
+	}
 	if a.demo || a.modem != nil || a.usbAT != nil {
 		return nil
 	}
@@ -853,6 +896,10 @@ func (a *app) ensureUSBAT() error {
 	a.port = dev.Description()
 	a.discoveryError = ""
 	log.Printf("USB AT bridge opened on DJI %s", dev.Description())
+	if scopedUSBSession != 0 {
+		a.initUSBATESIMManager()
+		return nil
+	}
 	if changed, err := a.autoEnableMacAudioProfile(); err != nil {
 		log.Printf("Mac audio profile check: %v", err)
 	} else if changed {
@@ -998,6 +1045,10 @@ func (a *app) startSignalRecovery(ctx context.Context) {
 }
 
 func (a *app) signalRecoveryOnce() {
+	if !a.tryModuleOperation() {
+		return
+	}
+	defer a.moduleOperationMu.Unlock()
 	if a.demo || a.modem != nil {
 		return
 	}
@@ -1078,6 +1129,12 @@ func (a *app) recoverSignal() {
 
 func (a *app) routes() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/module-mode", moduleModeStatus)
+	mux.HandleFunc("POST /api/module-mode", a.moduleModeChange)
+	mux.HandleFunc("GET /api/modules", func(w http.ResponseWriter, r *http.Request) { writeError(w, 404, "multi-module mode is disabled") })
+	mux.HandleFunc("POST /api/update/prepare", a.prepareUpdateAPI)
+	mux.HandleFunc("GET /api/proxy", a.proxyStatusAPI)
+	mux.HandleFunc("POST /api/proxy", a.proxyActionAPI)
 	mux.HandleFunc("GET /api/platform", a.platformInfo)
 	mux.HandleFunc("GET /api/health", a.health)
 	mux.HandleFunc("GET /api/status", a.status)
@@ -1165,6 +1222,21 @@ func (a *app) platformInfo(w http.ResponseWriter, _ *http.Request) {
 
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			host, _, err := net.SplitHostPort(r.Host)
+			if err != nil || (host != "127.0.0.1" && host != "localhost" && host != "::1") {
+				http.Error(w, "invalid host", 403)
+				return
+			}
+			if origin := r.Header.Get("Origin"); origin != "" && origin != "http://"+r.Host {
+				http.Error(w, "invalid origin", 403)
+				return
+			}
+			if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+				http.Error(w, "cross-site request rejected", 403)
+				return
+			}
+		}
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
@@ -1778,6 +1850,11 @@ func (a *app) runATCommand(command string, timeout time.Duration) (string, error
 }
 
 func (a *app) sendSMS(w http.ResponseWriter, r *http.Request) {
+	if !a.tryModuleOperation() {
+		writeError(w, 409, "module operation in progress")
+		return
+	}
+	defer a.moduleOperationMu.Unlock()
 	var body struct {
 		Phone   string `json:"phone"`
 		Message string `json:"message"`
@@ -1868,6 +1945,11 @@ func smsSubmitOptions(message string) smscodec.SubmitOptions {
 }
 
 func (a *app) executeAT(w http.ResponseWriter, r *http.Request) {
+	if !a.tryModuleOperation() {
+		writeError(w, 409, "module operation in progress")
+		return
+	}
+	defer a.moduleOperationMu.Unlock()
 	var body struct {
 		Command string `json:"command"`
 	}
@@ -1947,7 +2029,17 @@ func (a *app) networkTraffic(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	interfaces := discoverMacNetworkInterfaces()
-	name := selectUSBTrafficInterface(interfaces, discoverMacDefaultRoute())
+	name := ""
+	for _, iface := range interfaces {
+		session := fleetSessionForInterface(iface.Name)
+		if session != 0 && (scopedUSBSession == 0 || session == scopedUSBSession) {
+			if name != "" {
+				name = ""
+				break
+			}
+			name = iface.Name
+		}
+	}
 	if name == "" {
 		writeJSON(w, http.StatusOK, snapshot)
 		return
@@ -2138,6 +2230,9 @@ func renewMacNetworkServiceDHCP(name string) error {
 // bridge reopens so a re-enumerated module regains its 4G fallback route
 // without user interaction.
 func (a *app) ensureCellularDHCP() {
+	if scopedUSBSession != 0 || coordinatorOnly {
+		return
+	}
 	if a.demo || a.modem != nil {
 		return
 	}
@@ -2154,7 +2249,7 @@ func (a *app) ensureCellularDHCP() {
 	// also be disabled, in which case DHCP renewals never apply.
 	var target string
 	for _, service := range services {
-		if !isDJICellularService(service) {
+		if !isHardwareCellularService(service) {
 			continue
 		}
 		if service.Disabled {
@@ -2215,7 +2310,7 @@ func (a *app) ensureCellularDHCP() {
 // address rather than a burned-in vendor OUI, which distinguishes them from
 // built-in Ethernet and Wi-Fi.
 func findUnprovisionedUSBModemInterface(services []macNetworkService) string {
-	return selectUnprovisionedUSBInterface(discoverMacNetworkInterfaces(), services)
+	return selectVerifiedUnprovisioned(discoverMacNetworkInterfaces(), services, fleetSessionForInterface)
 }
 
 func selectUnprovisionedUSBInterface(interfaces []macNetInterface, services []macNetworkService) string {
@@ -2262,7 +2357,11 @@ func createMacNetworkService(name, device string) error {
 	if err != nil {
 		return fmt.Errorf("%s on %s: %s", name, device, strings.TrimSpace(string(out)))
 	}
-	return nil
+	services, err := discoverMacNetworkServices()
+	if err != nil {
+		return err
+	}
+	return verifyCreatedNetworkService(name, device, services, strings.TrimSpace(string(out)))
 }
 
 type macIPv4ServiceInfo struct {
@@ -2402,7 +2501,7 @@ func (a *app) applyCellularPolicyLocked() error {
 		var skipped []string
 		applied := 0
 		for _, service := range services {
-			if !isDJICellularService(service) || service.Disabled {
+			if !isHardwareCellularService(service) || service.Disabled {
 				continue
 			}
 			info, err := readMacIPv4ServiceInfo(service.Name)
@@ -2464,6 +2563,11 @@ func (a *app) getCellularPolicy(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (a *app) setCellularPolicy(w http.ResponseWriter, r *http.Request) {
+	if !a.tryModuleOperation() {
+		writeError(w, 409, "module operation in progress")
+		return
+	}
+	defer a.moduleOperationMu.Unlock()
 	var body struct {
 		ForceOff bool `json:"force_off"`
 	}
@@ -2474,6 +2578,10 @@ func (a *app) setCellularPolicy(w http.ResponseWriter, r *http.Request) {
 	defer a.networkPolicyMu.Unlock()
 	if err := a.loadNetworkPolicyLocked(); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if body.ForceOff && a.proxy.snapshot().Running {
+		writeError(w, 409, "stop cellular proxy before disabling cellular data")
 		return
 	}
 	previousForceOff := a.force4GOff
@@ -2513,6 +2621,11 @@ func (a *app) startCellularPolicyGuard(ctx context.Context) {
 }
 
 func (a *app) setUSBNetMode(w http.ResponseWriter, r *http.Request) {
+	if !a.tryModuleOperation() {
+		writeError(w, 409, "module operation in progress")
+		return
+	}
+	defer a.moduleOperationMu.Unlock()
 	var body struct {
 		Mode int `json:"mode"`
 	}
@@ -2529,6 +2642,15 @@ func (a *app) setUSBNetMode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
+	if err := validateCallATResponse(response); err != nil {
+		writeError(w, 502, err.Error())
+		return
+	}
+	readBack, err := a.runATCommand(`AT+QCFG="usbnet"`, 5*time.Second)
+	if err != nil || parseUSBNetMode(readBack) != strconv.Itoa(body.Mode) {
+		writeError(w, 502, "USB 网络模式写入未通过回读确认")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"mode":         body.Mode,
 		"response":     response,
@@ -2537,6 +2659,11 @@ func (a *app) setUSBNetMode(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) rebootModule(w http.ResponseWriter, _ *http.Request) {
+	if !a.tryModuleOperation() {
+		writeError(w, 409, "module operation in progress")
+		return
+	}
+	defer a.moduleOperationMu.Unlock()
 	response, err := a.runATCommand("AT+CFUN=1,1", 3*time.Second)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
@@ -2628,6 +2755,11 @@ func (a *app) usbProfile(w http.ResponseWriter, _ *http.Request) {
 // setUSBProfile changes only Quectel's documented UAC field. Mobile mode saves
 // the configuration without rebooting; unplugging to iPhone/iPad applies it.
 func (a *app) setUSBProfile(w http.ResponseWriter, r *http.Request) {
+	if !a.tryModuleOperation() {
+		writeError(w, 409, "module operation in progress")
+		return
+	}
+	defer a.moduleOperationMu.Unlock()
 	var body struct {
 		Mode string `json:"mode"`
 	}
@@ -3030,6 +3162,11 @@ func (a *app) phonebookProbeCommand(command string, result *phonebookProbeResult
 // probeESIMPhonebook performs only AT test/read commands. It never writes a
 // phonebook entry, so it is safe to use before enabling portable card notes.
 func (a *app) probeESIMPhonebook(w http.ResponseWriter, _ *http.Request) {
+	if !a.tryModuleOperation() {
+		writeError(w, 409, "module operation in progress")
+		return
+	}
+	defer a.moduleOperationMu.Unlock()
 	result := phonebookProbeResult{Responses: make(map[string]string)}
 	if a.demo {
 		result.StorageSupported = true
@@ -3186,6 +3323,11 @@ func (a *app) listModuleESIMNotes(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (a *app) saveModuleESIMNote(w http.ResponseWriter, r *http.Request) {
+	if !a.tryModuleOperation() {
+		writeError(w, 409, "module operation in progress")
+		return
+	}
+	defer a.moduleOperationMu.Unlock()
 	var body moduleProfileNote
 	if !decodeJSON(w, r, &body) {
 		return
@@ -3361,6 +3503,11 @@ func (a *app) esimHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (a *app) switchESIM(w http.ResponseWriter, r *http.Request) {
+	if !a.tryModuleOperation() {
+		writeError(w, 409, "module operation in progress")
+		return
+	}
+	defer a.moduleOperationMu.Unlock()
 	esimManager, switchAllowed := a.currentESIMManager()
 	if !a.demo && esimManager == nil {
 		writeError(w, http.StatusServiceUnavailable, "eSIM manager is unavailable")
@@ -3428,6 +3575,11 @@ func (a *app) switchESIM(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) renameESIMProfile(w http.ResponseWriter, r *http.Request) {
+	if !a.tryModuleOperation() {
+		writeError(w, 409, "module operation in progress")
+		return
+	}
+	defer a.moduleOperationMu.Unlock()
 	esimManager, _ := a.currentESIMManager()
 	if !a.demo && esimManager == nil {
 		writeError(w, http.StatusServiceUnavailable, "eSIM manager is unavailable")
@@ -3459,6 +3611,11 @@ func (a *app) renameESIMProfile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) deleteESIMProfile(w http.ResponseWriter, r *http.Request) {
+	if !a.tryModuleOperation() {
+		writeError(w, 409, "module operation in progress")
+		return
+	}
+	defer a.moduleOperationMu.Unlock()
 	esimManager, _ := a.currentESIMManager()
 	if !a.demo && esimManager == nil {
 		writeError(w, http.StatusServiceUnavailable, "eSIM manager is unavailable")
@@ -3489,6 +3646,11 @@ func (a *app) deleteESIMProfile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) downloadESIMProfile(w http.ResponseWriter, r *http.Request) {
+	if !a.tryModuleOperation() {
+		writeError(w, 409, "module operation in progress")
+		return
+	}
+	defer a.moduleOperationMu.Unlock()
 	esimManager, _ := a.currentESIMManager()
 	if !a.demo && esimManager == nil {
 		writeError(w, http.StatusServiceUnavailable, "eSIM manager is unavailable")

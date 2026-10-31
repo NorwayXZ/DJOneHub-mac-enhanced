@@ -503,6 +503,11 @@ func voiceRouteIsStopped(adb *adbClient, m *voiceRuntimeManifest) (bool, error) 
 }
 
 func (a *app) voiceProvisionAPI(w http.ResponseWriter, r *http.Request) {
+	if !a.tryModuleOperation() {
+		writeError(w, 409, "module operation in progress")
+		return
+	}
+	defer a.moduleOperationMu.Unlock()
 	var request struct {
 		Confirm bool `json:"confirm"`
 	}
@@ -527,6 +532,11 @@ func (a *app) voiceStatusAPI(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (a *app) voiceStartAPI(w http.ResponseWriter, _ *http.Request) {
+	if !a.tryModuleOperation() {
+		writeError(w, 409, "module operation in progress")
+		return
+	}
+	defer a.moduleOperationMu.Unlock()
 	err := a.ensureModuleVoiceRoute()
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
@@ -536,6 +546,11 @@ func (a *app) voiceStartAPI(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (a *app) voiceStopAPI(w http.ResponseWriter, _ *http.Request) {
+	if !a.tryModuleOperation() {
+		writeError(w, 409, "module operation in progress")
+		return
+	}
+	defer a.moduleOperationMu.Unlock()
 	a.stopModuleVoiceRoute()
 	writeJSON(w, http.StatusOK, map[string]any{"stopped": true, "status": a.voiceStatus()})
 }

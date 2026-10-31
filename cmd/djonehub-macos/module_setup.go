@@ -226,6 +226,16 @@ func (a *app) invalidateReadyModuleSetup() {
 }
 
 func (a *app) moduleSetupStartAPI(w http.ResponseWriter, r *http.Request) {
+	if !a.tryModuleOperation() {
+		writeError(w, 409, "module operation in progress")
+		return
+	}
+	unlock := true
+	defer func() {
+		if unlock {
+			a.moduleOperationMu.Unlock()
+		}
+	}()
 	var body struct {
 		Confirm bool `json:"confirm"`
 	}
@@ -249,7 +259,8 @@ func (a *app) moduleSetupStartAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.setModuleSetup(moduleSetupStatus{State: "initializing", Summary: "正在备份并启用通话支持", Detail: inspection.Detail})
-	go a.runModuleSetup()
+	unlock = false
+	go func() { defer a.moduleOperationMu.Unlock(); a.runModuleSetup() }()
 	a.moduleSetupMu.RLock()
 	status := a.moduleSetup
 	a.moduleSetupMu.RUnlock()

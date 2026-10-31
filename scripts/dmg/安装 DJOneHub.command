@@ -7,6 +7,10 @@ RUNTIME="$DEST/runtime"
 NOTIFIER_DIR="$DEST/notifier"
 AGENTS="$HOME/Library/LaunchAgents"
 UID_NUM=$(id -u)
+MULTI_MODULE_XML=""
+if /usr/libexec/PlistBuddy -c 'Print :ProgramArguments' "$AGENTS/com.jamie.djonehub.plist" 2>/dev/null | /usr/bin/grep -Eq '^[[:space:]]*--?multi-module(=true)?[[:space:]]*$'; then
+  MULTI_MODULE_XML='<string>--multi-module</string>'
+fi
 
 echo "DJOneHub 一键安装"
 echo "安装目录：$DEST"
@@ -41,6 +45,7 @@ cat > "$AGENTS/com.jamie.djonehub.plist" <<EOF
     <string>$RUNTIME/bin/djonehub-macos</string>
     <string>-listen</string>
     <string>127.0.0.1:7575</string>
+    $MULTI_MODULE_XML
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -98,11 +103,11 @@ for i in {1..50}; do
   sleep 0.2
 done
 if [ "$ok" = 1 ]; then
-  echo "，管理页面已打开。"
-  open http://127.0.0.1:7575
+  echo "，控制台已打开。"
+  open "$NOTIFIER_DIR/DJOneHubNotifier.app" --args --show-window
 else
   echo "，未能就绪，请查看 $HOME/Library/Logs/DJOneHub/launchd.log"
 fi
-echo "安装完成：开机自动启动；4G/GPS/提醒等设置请在管理页面调整。"
+echo "安装完成：开机自动启动；代理/4G/GPS/提醒等设置请在 App 内调整。"
 echo
 sleep 1

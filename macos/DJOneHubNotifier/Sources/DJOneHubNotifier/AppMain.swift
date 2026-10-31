@@ -19,6 +19,7 @@ enum DJOneHubNotifierMain {
 }
 
 enum SelfTest {
+    @MainActor
     static func run() {
         precondition(NotificationText.displayNumber("  ") == "未知号码")
         let codeMessage = SMSMessage(
@@ -35,12 +36,42 @@ enum SelfTest {
             timestamp: Date()
         )
         precondition(NotificationText.smsPreview(longMessage, limit: 8) == "第一行 第二行以…")
+        let hidden = SystemNotifications.messageContent(codeMessage, reveal: false)
+        precondition(!hidden.body.contains("482913"))
+        precondition(!hidden.body.contains(codeMessage.content))
+        precondition(hidden.userInfo["destination"] as? String == "messages")
+        let visible = SystemNotifications.messageContent(codeMessage, reveal: true)
+        precondition(visible.body == codeMessage.content)
+        let notificationID = SystemNotifications.identifier(kind: "sms", identity: codeMessage.identity)
+        precondition(!notificationID.contains("482913") && !notificationID.contains("10086"))
+        precondition(notificationID == SystemNotifications.identifier(kind: "sms", identity: codeMessage.identity))
+        precondition(notificationID != SystemNotifications.identifier(kind: "sms", identity: longMessage.identity))
+        precondition(AppUpdater.newer("v1.3.0-proxy-preview.2", than: "1.3.0-proxy-preview.1"))
+        precondition(AppUpdater.newer("v1.3.0", than: "1.3.0-proxy-preview.2"))
+        precondition(!AppUpdater.newer("v1.2.9", than: "1.3.0"))
+        precondition(!AppUpdater.newer("v1.3.0", than: "1.3.0"))
+        precondition(!AppUpdater.newer("invalid", than: "1.3.0"))
+        let fleetCenter = ProxyCenter(api: DJOneHubAPI(baseURL: URL(string: "http://127.0.0.1:1/")!))
+        fleetCenter.previewOnly = true
+        fleetCenter.fleetMode = true
+        let firstState = CellularProxyStatus(running: true, address: "127.0.0.1:10909", interface: "demo", publicIP: "192.0.2.10", previousIP: "", phase: "", error: "", connections: 0, uploaded: 0, downloaded: 0)
+        fleetCenter.modules = [
+            FleetModule(id: "a", name: "A", port: 10909, identity: "demo", connected: true, needsConfirmation: false, generation: "1", interface: "demo", error: "", proxy: firstState),
+            FleetModule(id: "b", name: "B", port: 10910, identity: "demo", connected: true, needsConfirmation: true, generation: "2", interface: "demo", error: "", proxy: nil)
+        ]
+        var summaryRunning = false
+        fleetCenter.onStatusChange = { summaryRunning = $0?.running == true }
+        fleetCenter.select("b")
+        precondition(fleetCenter.status?.address == "127.0.0.1:10910")
+        precondition(fleetCenter.unavailable && summaryRunning && fleetCenter.runningCount == 1)
+        fleetCenter.select("a")
+        precondition(fleetCenter.status?.publicIP == "192.0.2.10")
         print("DJOneHubNotifier self-test passed")
     }
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let api: DJOneHubAPI
     private let panel: NotifierPanel
     private let gpsMapPanel = GPSMapPanel()
@@ -51,6 +82,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let ringtoneStore: RingtoneStore
     private let appSettings: AppSettings
     private var mainWindow: NSWindow?
+    private let proxyCenter: ProxyCenter
+    private let updater: AppUpdater
+    private let systemNotifications = SystemNotifications()
+    private var appStatusItem: NSStatusItem?
+    private var proxyTimer: Timer?
     private let healthCheck: Bool
     private let reviewSafe: Bool
 
@@ -84,6 +120,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .flatMap(URL.init(string:))
             ?? URL(string: "http://127.0.0.1:7575/")!
         api = DJOneHubAPI(baseURL: baseURL)
+        proxyCenter = ProxyCenter(api: api)
+        updater = AppUpdater(api: api)
         previewMode = Self.argumentValue("--preview", in: arguments)
         snapshotPath = Self.argumentValue("--snapshot", in: arguments)
         healthCheck = arguments.contains("--health-check")
@@ -171,8 +209,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             return
         }
+        installStatusMenu()
+        systemNotifications.onOpen = { [weak self] destination in
+            guard let self else { return }
+            self.systemNotifications.destination = destination
+            self.showMainWindow()
+        }
+        if !reviewSafe { systemNotifications.start() }
+        proxyTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                await self.proxyCenter.refresh()
+            }
+        }
+        if reviewSafe {
+            proxyCenter.previewOnly = true
+            proxyTimer?.invalidate()
+            proxyCenter.status = CellularProxyStatus(running: false, address: "127.0.0.1:10909", interface: "", publicIP: "", previousIP: "", phase: "", error: "预览模式：未连接后台，未操作硬件", connections: 0, uploaded: 0, downloaded: 0)
+            if CommandLine.arguments.contains("--review-fleet") {
+                proxyCenter.fleetMode = true
+                proxyCenter.modules = (0..<3).map { index in
+                    let state = CellularProxyStatus(running: index == 0, address: "127.0.0.1:\(10909 + index)", interface: "演示网卡 \(index + 1)", publicIP: index == 0 ? "192.0.2.10" : "", previousIP: "", phase: "", error: "界面演示，未启动真实代理", connections: 0, uploaded: 0, downloaded: 0)
+                    return FleetModule(id: "demo-\(index)", name: "演示模块 \(index + 1)", port: 10909 + index, identity: "演示 USB 位置", connected: index != 2, needsConfirmation: index == 1, generation: "demo", interface: "演示网卡", error: "", proxy: state)
+                }
+                proxyCenter.select("demo-0")
+            }
+            if CommandLine.arguments.contains("--review-proxy-active") {
+                let now = ISO8601DateFormatter().string(from: Date())
+                proxyCenter.status = CellularProxyStatus(
+                    history: [
+                        ProxyIPVisit(ip: "192.0.2.10", firstSeen: now, lastSeen: now, location: "演示归属地", isp: "演示运营商"),
+                        ProxyIPVisit(ip: "198.51.100.20", firstSeen: now, lastSeen: now, location: "演示归属地", isp: "演示运营商"),
+                        ProxyIPVisit(ip: "192.0.2.10", firstSeen: now, lastSeen: now, location: "演示归属地", isp: "演示运营商")
+                    ], location: "演示归属地", isp: "演示运营商", checkedAt: now,
+                    running: true, address: "127.0.0.1:10909", interface: "演示接口", publicIP: "192.0.2.10", previousIP: "198.51.100.20", phase: "changed", error: "界面演示：示例 IP，未开启真实代理", connections: 0, uploaded: 0, downloaded: 0)
+            }
+        } else {
+            Task { await proxyCenter.refresh() }
+        }
         let demoCall = CommandLine.arguments.contains("--show-call")
-        if !demoCall {
+        if !demoCall && !reviewSafe {
             callTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
                 Task { @MainActor in await self?.pollCalls() }
             }
@@ -193,7 +269,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
             Task {
                 // 重新打开应用时，恢复被「完全退出」停止的后台服务（后端 + WiFi/短信守护）
-                await ensureModuleServices()
+                if !reviewSafe { await ensureModuleServices() }
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 await pollCalls()
                 await pollMessages()
@@ -222,9 +298,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if CommandLine.arguments.contains("--show-window") {
             showMainWindow()
+        } else if !demoCall {
+            NSApp.setActivationPolicy(.accessory)
         }
         if previewMode == nil, let snapshotPath {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
                 guard let self else { return }
                 try? self.saveMainWindowSnapshot(to: URL(fileURLWithPath: snapshotPath))
                 NSApplication.shared.terminate(nil)
@@ -248,6 +326,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        proxyTimer?.invalidate()
         callTimer?.invalidate()
         smsTimer?.invalidate()
         gpsTimer?.invalidate()
@@ -306,10 +385,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 wasCallConnected = false
             }
 
-            if let missed = history.first(where: { $0.missed && !seenCallHistoryIDs.contains($0.id) }) {
+            let newMissed = history.filter { $0.missed && !seenCallHistoryIDs.contains($0.id) }
+            for missed in newMissed {
                 seenCallHistoryIDs.insert(missed.id)
-                showMissed(missed)
+                systemNotifications.postMissedCall(missed)
             }
+            if lastActiveCallID == nil, let missed = newMissed.first { showMissed(missed) }
             seenCallHistoryIDs.formUnion(history.map(\.id))
         } catch {
             consecutiveErrors += 1
@@ -356,11 +437,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 seenMessageIDs = Set(messages.map(\.identity))
                 return
             }
-            guard let newest = messages.first(where: { !seenMessageIDs.contains($0.identity) }) else {
-                return
-            }
+            let newMessages = messages.filter { !seenMessageIDs.contains($0.identity) }
             seenMessageIDs.formUnion(messages.map(\.identity))
-            showMessage(newest)
+            for message in newMessages { systemNotifications.postMessage(message) }
+            if lastActiveCallID == nil, let newest = newMessages.first { showMessage(newest) }
         } catch {
             // Call polling owns the offline warning to avoid duplicate banners.
         }
@@ -673,8 +753,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.show(
             .sms(
                 sender: message.sender.isEmpty ? "未知发送方" : message.sender,
-                preview: NotificationText.smsPreview(message),
-                code: message.code
+                preview: systemNotifications.showMessageContents ? NotificationText.smsPreview(message) : "收到一条新短信，打开 App 查看",
+                code: systemNotifications.showMessageContents ? message.code : nil
             ),
             onReject: {},
             onAnswer: {},
@@ -724,25 +804,151 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard sender === mainWindow else { return true }
+        sender.orderOut(nil)
+        NSApp.setActivationPolicy(.accessory)
+        return false
+    }
+
+    private func installStatusMenu() {
+        NotificationCenter.default.addObserver(self, selector: #selector(quitWorkspace), name: Notification.Name("DJOneHubQuitRequested"), object: nil)
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        item.button?.image = NSImage(systemSymbolName: "antenna.radiowaves.left.and.right", accessibilityDescription: "DJOneHub")
+        let menu = NSMenu()
+        func add(_ title: String, _ action: Selector) {
+            let entry = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            entry.target = self
+            menu.addItem(entry)
+        }
+        add("打开蜂窝工作台", #selector(openWorkspace))
+        menu.addItem(.separator())
+        add("启动蜂窝代理", #selector(startProxy))
+        add("停止蜂窝代理", #selector(stopProxy))
+        add("复制 SOCKS5 地址", #selector(copyProxy))
+        add("检测蜂窝出口 IP", #selector(probeProxy))
+        add("重连并尝试换 IP…", #selector(reconnectProxy))
+        menu.addItem(.separator())
+        add("检查软件更新…", #selector(checkUpdates))
+        add("完全退出 DJOneHub…", #selector(quitWorkspace))
+        item.button?.target = self
+        item.button?.action = #selector(statusItemClicked)
+        item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        statusContextMenu = menu
+        appStatusItem = item
+        proxyCenter.onStatusChange = { [weak self] status in self?.updateProxyStatusIcon(status) }
+        updateProxyStatusIcon(proxyCenter.status)
+    }
+    private func updateProxyStatusIcon(_ status: CellularProxyStatus?) {
+        let running = status?.running == true
+        let reconnecting = status?.phase == "reconnecting"
+        let symbol = NSImage(systemSymbolName: "antenna.radiowaves.left.and.right", accessibilityDescription: "DJOneHub")
+        if running || reconnecting {
+            let color: NSColor = reconnecting ? .systemOrange : .systemGreen
+            let colored = symbol?.withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [color]))
+            colored?.isTemplate = false
+            appStatusItem?.button?.image = colored
+        } else {
+            symbol?.isTemplate = true
+            appStatusItem?.button?.image = symbol
+        }
+        let state = reconnecting ? "蜂窝网络重连中" : (running ? (proxyCenter.fleetMode ? "\(proxyCenter.runningCount) 个蜂窝代理已开启" : "蜂窝代理已开启 · 127.0.0.1:10909") : (status == nil ? "蜂窝代理状态未知" : "蜂窝代理已停止"))
+        appStatusItem?.button?.toolTip = "DJOneHub · " + state
+    }
+    private var statusContextMenu: NSMenu?
+    @objc private func statusItemClicked() {
+        if NSApp.currentEvent?.type == .rightMouseUp, let item = appStatusItem {
+            item.menu = statusContextMenu
+            item.button?.performClick(nil)
+            item.menu = nil
+        } else { showMainWindow() }
+    }
+    @objc private func checkUpdates() {
+        showMainWindow()
+        NotificationCenter.default.post(name: Notification.Name("DJOneHubShowUpdates"), object: nil)
+        Task { await updater.check() }
+    }
+    @objc private func openWorkspace() { showMainWindow() }
+    @objc private func copyProxy() { proxyCenter.copyAddress() }
+    @objc private func startProxy() { performProxyAction("start") }
+    @objc private func stopProxy() { performProxyAction("stop") }
+    @objc private func probeProxy() { performProxyAction("probe") }
+    private func performProxyAction(_ action: String, confirm: Bool = false) {
+        Task {
+            await proxyCenter.act(action, confirm: confirm)
+            if proxyCenter.error != nil { showMainWindow() }
+        }
+    }
+    @objc private func reconnectProxy() {
+        let alert = NSAlert()
+        alert.messageText = "重连蜂窝网络并尝试换 IP？"
+        alert.informativeText = "将中断全部代理连接，并暂时影响短信和来电。运营商不保证分配新 IP。"
+        alert.addButton(withTitle: "取消")
+        alert.addButton(withTitle: "断开并重连")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertSecondButtonReturn { performProxyAction("reconnect", confirm: true) }
+    }
+    @objc private func quitWorkspace() {
+        let alert = NSAlert()
+        alert.messageText = "停止代理并完全退出？"
+        alert.informativeText = "将停止 DJOneHub 后台服务；关闭窗口则可以保持运行。"
+        alert.addButton(withTitle: "取消")
+        alert.addButton(withTitle: "退出")
+        if alert.runModal() != .alertSecondButtonReturn { return }
+        Task {
+            await proxyCenter.refresh()
+            if proxyCenter.reconnecting {
+                let warning = NSAlert()
+                warning.messageText = "请等待蜂窝重连结束后再退出"
+                warning.runModal()
+                return
+            }
+            do { _ = try await api.proxyAction("stop") }
+            catch {
+                if proxyCenter.reconnecting {
+                    let warning = NSAlert()
+                    warning.messageText = "请等待蜂窝重连结束后再退出"
+                    warning.informativeText = "避免无线电在关闭后尚未恢复时退出。"
+                    warning.runModal()
+                    return
+                }
+            }
+            for label in ["com.jamie.djonehub", "com.jamie.djonehub-wifi-sms-guard", "com.jamie.djonehub-notifier"] {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+                process.arguments = ["bootout", "gui/\(getuid())/\(label)"]
+                try? process.run()
+            }
+            NSApp.terminate(nil)
+        }
+    }
+
     private func showMainWindow() {
+        NSApp.setActivationPolicy(.regular)
         if mainWindow == nil {
             let rootView = PhoneAppView()
                 .environmentObject(callCenter)
                 .environmentObject(contactStore)
                 .environmentObject(ringtoneStore)
                 .environmentObject(appSettings)
-            let hosting = NSHostingController(rootView: rootView)
+                .environmentObject(proxyCenter)
+                .environmentObject(updater)
+                .environmentObject(systemNotifications)
+            let hosting = FirstClickHostingController(rootView: rootView)
             let window = NSWindow(contentViewController: hosting)
             window.title = "DJOneHub"
-            window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
+            window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
             window.titlebarAppearsTransparent = true
             window.titleVisibility = .hidden
             // macOS 26 透明 NSWindow + SwiftUI 存在已知渲染 bug（内容偶发 180° 颠倒），
             // 主窗口改为不透明，圆角与外观全部由 SwiftUI 主体自绘，规避系统级问题。
             window.isOpaque = true
             window.backgroundColor = PhoneStyle.appBackgroundNS
-            window.isMovableByWindowBackground = true
-            window.setContentSize(NSSize(width: 400, height: 700))
+            window.isMovableByWindowBackground = false
+            window.setContentSize(NSSize(width: 1040, height: 740))
+            window.delegate = self
             window.center()
             window.isReleasedWhenClosed = false
             window.tabbingMode = .disallowed
@@ -754,6 +960,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func saveMainWindowSnapshot(to url: URL) throws {
         guard let view = mainWindow?.contentView else { return }
+        mainWindow?.displayIfNeeded()
         view.layoutSubtreeIfNeeded()
         guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
         view.cacheDisplay(in: view.bounds, to: bitmap)
@@ -772,6 +979,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
             keyEquivalent: ""
         )
+        let updateItem = NSMenuItem(title: "检查软件更新…", action: #selector(checkUpdates), keyEquivalent: "")
+        updateItem.target = self
+        appMenu.addItem(updateItem)
         appMenu.addItem(.separator())
         appMenu.addItem(
             withTitle: "隐藏 DJOneHub",
@@ -781,9 +991,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appMenu.addItem(.separator())
         appMenu.addItem(
             withTitle: "退出 DJOneHub",
-            action: #selector(NSApplication.terminate(_:)),
+            action: #selector(quitWorkspace),
             keyEquivalent: "q"
         )
+        appMenu.items.last?.target = self
         appItem.submenu = appMenu
 
         let editItem = NSMenuItem()
@@ -804,4 +1015,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         return arguments[index + 1]
     }
+}
+
+// Inactive utility windows should execute the first click, not just gain focus.
+final class FirstClickHostingView<Content: View>: NSHostingView<Content> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+final class FirstClickHostingController<Content: View>: NSHostingController<Content> {
+    override func loadView() { view = FirstClickHostingView(rootView: rootView) }
 }

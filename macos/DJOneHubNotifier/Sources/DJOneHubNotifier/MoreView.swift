@@ -892,6 +892,7 @@ struct DeviceStatusCard: View {
             status = modem
         }
         guard let current = try? await calls.apiClient.networkTraffic(), current.available else {
+            traffic = nil
             previous = nil
             rxRate = nil
             txRate = nil
@@ -901,8 +902,8 @@ struct DeviceStatusCard: View {
         if let previous, previous.interface == current.interface {
             let elapsed = Double(current.sampledAtMS - previous.sampledAtMS) / 1000.0
             if elapsed > 0 {
-                rxRate = max(0, Double(current.rxBytes - previous.rxBytes)) / elapsed
-                txRate = max(0, Double(current.txBytes - previous.txBytes)) / elapsed
+                rxRate = Double(current.rxBytes >= previous.rxBytes ? current.rxBytes - previous.rxBytes : 0) / elapsed
+                txRate = Double(current.txBytes >= previous.txBytes ? current.txBytes - previous.txBytes : 0) / elapsed
             }
         }
         previous = current

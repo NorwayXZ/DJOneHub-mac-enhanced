@@ -4,20 +4,26 @@ import AppKit
 // MARK: - 标签页
 
 private enum PhoneTab: String, CaseIterable, Identifiable {
+    case proxy = "蜂窝代理"
     case dial = "拨号"
     case recents = "最近通话"
     case messages = "短信"
     case contacts = "通讯录"
+    case module = "模块与网络"
+    case updates = "软件更新"
     case settings = "设置"
 
     var id: String { rawValue }
 
     var icon: String {
         switch self {
+        case .proxy: return "antenna.radiowaves.left.and.right"
         case .dial: return "circle.grid.3x3.fill"
         case .recents: return "clock.fill"
         case .messages: return "message.fill"
         case .contacts: return "person.crop.circle.fill"
+        case .module: return "externaldrive.connected.to.line.below"
+        case .updates: return "arrow.down.app"
         case .settings: return "gearshape.fill"
         }
     }
@@ -39,14 +45,39 @@ enum PhoneStyle {
 struct PhoneAppView: View {
     @EnvironmentObject private var calls: CallCenter
     @EnvironmentObject private var settings: AppSettings
-    @State private var tab: PhoneTab = .dial
+    @EnvironmentObject private var systemNotifications: SystemNotifications
+    @State private var tab: PhoneTab = .proxy
     @State private var pendingSMSRecipient: String?
 
     var body: some View {
         ZStack {
-            VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                VStack(alignment: .leading, spacing: 24) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("DJOneHub").font(.system(size: 22, weight: .bold, design: .rounded))
+                        Text("蜂窝连接工作台").font(.caption).foregroundStyle(.secondary)
+                    }.padding(.top, 28).padding(.horizontal, 16)
+                    VStack(spacing: 6) {
+                        ForEach(PhoneTab.allCases) { item in
+                            Button { tab = item } label: {
+                                Label(item.rawValue, systemImage: item.icon)
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .frame(maxWidth: .infinity, alignment: .leading).padding(12)
+                                    .foregroundStyle(tab == item ? Color.white : Color.primary)
+                                    .background(tab == item ? Color(red: 0.05, green: 0.48, blue: 0.39) : Color.clear, in: RoundedRectangle(cornerRadius: 10))
+                                    .contentShape(Rectangle())
+                            }.buttonStyle(.plain).modifier(SidebarFocusAppearance())
+                        }
+                    }.padding(.horizontal, 10)
+                    Spacer()
+                    Label("关闭窗口后继续运行", systemImage: "menubar.rectangle")
+                        .font(.caption2).foregroundStyle(.secondary).padding(14)
+                }.frame(width: 185).background(Color(nsColor: .windowBackgroundColor))
+                Divider()
                 Group {
                     switch tab {
+                    case .proxy:
+                        ProxyDashboard()
                     case .dial:
                         DialPadView()
                     case .recents:
@@ -58,12 +89,15 @@ struct PhoneAppView: View {
                             pendingSMSRecipient = phone
                             tab = .messages
                         })
+                    case .module:
+                        ScrollView { MoreView().padding(24) }
+                    case .updates:
+                        SoftwareUpdateView()
                     case .settings:
                         SettingsView()
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                TabBar(selection: $tab)
             }
             .id(settings.language.rawValue)
             if let call = calls.activeCall {
@@ -73,8 +107,17 @@ struct PhoneAppView: View {
                     .transition(.opacity)
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("DJOneHubShowUpdates"))) { _ in tab = .updates }
+        .onReceive(systemNotifications.$destination) { destination in
+            switch destination {
+            case "messages": tab = .messages
+            case "recents": tab = .recents
+            case "settings": tab = .settings
+            default: break
+            }
+        }
         .animation(.easeInOut(duration: 0.22), value: calls.activeCall?.id)
-        .frame(minWidth: 370, minHeight: 600)
+        .frame(minWidth: 880, minHeight: 660)
         // 主体：系统连续圆角，与玻璃窗口形状一致（macOS 26 窗口主体圆角 20pt）
         .background(
             RoundedRectangle(cornerRadius: 20, style: .continuous)
@@ -83,6 +126,17 @@ struct PhoneAppView: View {
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .tint(PhoneStyle.green)
         .preferredColorScheme(settings.appearance.colorScheme)
+    }
+}
+
+struct SidebarFocusAppearance: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 14.0, *) {
+            // The selected row already has its own highlight; suppress the square system halo.
+            content.focusEffectDisabled()
+        } else {
+            content
+        }
     }
 }
 
@@ -101,45 +155,6 @@ struct PhoneCard: ViewModifier {
                     )
                     .shadow(color: .black.opacity(0.08), radius: 8, x: 0, y: 2)
             )
-    }
-}
-
-private struct TabBar: View {
-    @Binding var selection: PhoneTab
-
-    var body: some View {
-        HStack(spacing: 4) {
-            ForEach(PhoneTab.allCases) { tab in
-                Button {
-                    selection = tab
-                } label: {
-                    VStack(spacing: 2) {
-                        Image(systemName: tab.icon)
-                            .font(.system(size: 17, weight: .medium))
-                        Text(L10n.t(tab.rawValue))
-                            .font(.caption2.weight(.semibold))
-                    }
-                    .foregroundStyle(selection == tab ? Color.white : Color.secondary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 6)
-                    .background {
-                        if selection == tab {
-                            Capsule()
-                                .fill(PhoneStyle.green)
-                                .shadow(color: .black.opacity(0.15), radius: 4, x: 0, y: 1)
-                        }
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(5)
-        .background(Capsule().fill(.ultraThinMaterial))
-        .overlay(Capsule().strokeBorder(.white.opacity(0.4), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.12), radius: 12, x: 0, y: 4)
-        .padding(.horizontal, 12)
-        .padding(.bottom, 10)
     }
 }
 
@@ -1885,6 +1900,11 @@ private struct SettingsView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
+                    MoreSectionTitle("macOS 通知中心")
+                    SystemNotificationSettings().modifier(PhoneCard())
+                    MoreSectionTitle("多模块代理")
+                    FleetModeSettings().modifier(PhoneCard())
+
                     MoreSectionTitle(L10n.t("状态"))
                     DeviceStatusCard()
 
@@ -1921,8 +1941,6 @@ private struct SettingsView: View {
                         RingtoneDropdown()
                     }
                     .modifier(PhoneCard())
-
-                    MoreView()
 
                     MoreSectionTitle(L10n.t("服务控制"))
                     VStack(spacing: 0) {
@@ -1961,21 +1979,7 @@ private struct SettingsView: View {
     }
 
     private func quitAllServices() {
-        let uid = getuid()
-        let labels = [
-            "com.jamie.djonehub",
-            "com.jamie.djonehub-wifi-sms-guard",
-            "com.jamie.djonehub-notifier",
-        ]
-        for label in labels {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-            process.arguments = ["bootout", "gui/\(uid)/\(label)"]
-            try? process.run()
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-            NSApp.terminate(nil)
-        }
+        NotificationCenter.default.post(name: Notification.Name("DJOneHubQuitRequested"), object: nil)
     }
 }
 

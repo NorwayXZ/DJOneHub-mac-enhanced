@@ -257,7 +257,7 @@ struct DJOneHubAPI: Sendable {
         return try Self.decoder.decode(RejectResponse.self, from: data)
     }
 
-    private func get<T: Decodable>(path: String) async throws -> T {
+    func get<T: Decodable>(path: String) async throws -> T {
         var request = URLRequest(url: baseURL.appending(path: path))
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.timeoutInterval = 5
@@ -269,7 +269,7 @@ struct DJOneHubAPI: Sendable {
         return try Self.decoder.decode(T.self, from: data)
     }
 
-    private static func requireSuccess(_ response: HTTPURLResponse, data: Data) throws {
+    static func requireSuccess(_ response: HTTPURLResponse, data: Data) throws {
         guard (200..<300).contains(response.statusCode) else {
             let message = (try? decoder.decode(APIErrorPayload.self, from: data))?.error
             throw APIError.http(response.statusCode, message)
@@ -369,7 +369,7 @@ extension DJOneHubAPI {
         try Self.requireSuccess(http, data: data)
     }
 
-    private func postDecoded<Response: Decodable, Body: Encodable>(
+    func postDecoded<Response: Decodable, Body: Encodable>(
         path: String,
         body: Body,
         timeout: TimeInterval = 5,

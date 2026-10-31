@@ -1,0 +1,44 @@
+name: macOS Release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing version tag matching App and backend version'
+        required: true
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.3'
+      - name: Dependencies
+        run: brew install pkgconf
+      - name: Version consistency
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' macos/DJOneHubNotifier/Info.plist)" = "${TAG#v}"
+          grep -F "const appVersion = \"${TAG#v}\"" cmd/djonehub-macos/main.go
+      - name: Build release and update package
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          scripts/build-dmg-universal.sh "$TAG"
+          scripts/package-app-update.sh "$TAG"
+      - name: Publish Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --generate-notes
+          fi
+          gh release upload "$TAG" dist/*.dmg dist/*.dmg.sha256 dist/DJOneHub-macOS-universal-update.zip dist/DJOneHub-macOS-universal-update.zip.sha256 --clobber
