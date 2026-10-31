@@ -116,6 +116,17 @@ final class SystemNotifications: NSObject, ObservableObject, UNUserNotificationC
         }
     }
 
+    func postBandResult(title: String, body: String) {
+        Task {
+            guard await authorize(), enabled else { return }
+            let content = UNMutableNotificationContent()
+            content.title = title
+            content.body = body
+            content.userInfo = ["destination": "settings"]
+            await deliver(id: "djonehub.band", content: content)
+        }
+    }
+
     func sendTest() {
         Task {
             testStatus = "正在发送测试通知…"

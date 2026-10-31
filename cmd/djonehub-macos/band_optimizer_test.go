@@ -66,3 +66,20 @@ func TestChooseBandPrefersStability(t *testing.T) {
 		t.Fatalf("failed speed tests should fall back to signal, got %d", got)
 	}
 }
+
+func TestBandProfileLockState(t *testing.T) {
+	if lockedBandOf("10000000000") != 41 || lockedBandOf(defaultFullBandMask) != 0 || lockedBandOf("") != 0 {
+		t.Fatal("locked band detection")
+	}
+	p := bandCardProfile{Band: 41}
+	if !p.locks() {
+		t.Fatal("tested band should lock")
+	}
+	p.Disabled = true
+	if p.locks() || p.Band != 41 {
+		t.Fatal("switching off must keep the best band but not lock")
+	}
+	if (bandCardProfile{Band: 41, Fallback: true}).locks() || (bandCardProfile{}).locks() {
+		t.Fatal("fallback or untested profiles must not lock")
+	}
+}

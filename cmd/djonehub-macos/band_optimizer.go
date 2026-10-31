@@ -81,7 +81,12 @@ type bandCardProfile struct {
 	SaveData bool         `json:"save_data"`
 	Results  []bandResult `json:"results"`
 	Fallback bool         `json:"fallback"`
+	// Disabled: the user switched the lock off; Band keeps the best result so
+	// it can be switched back on without retesting.
+	Disabled bool `json:"disabled"`
 }
+
+func (p bandCardProfile) locks() bool { return p.Band > 0 && !p.Fallback && !p.Disabled }
 
 type bandProfiles struct {
 	FullMask string                     `json:"full_mask"`
@@ -89,18 +94,22 @@ type bandProfiles struct {
 }
 
 type bandOptimizerState struct {
-	Running    bool             `json:"running"`
-	Phase      string           `json:"phase"`
-	Note       string           `json:"note"`
-	SaveData   bool             `json:"save_data"`
-	Operator   string           `json:"operator"`
-	Candidates []int            `json:"candidates"`
-	Results    []bandResult     `json:"results"`
-	Chosen     int              `json:"chosen"`
-	Error      string           `json:"error"`
-	ICCID      string           `json:"iccid"`
-	Roaming    bool             `json:"roaming"`
-	Radio      bandRadio        `json:"radio"`
+	Running    bool         `json:"running"`
+	Phase      string       `json:"phase"`
+	Note       string       `json:"note"`
+	SaveData   bool         `json:"save_data"`
+	Operator   string       `json:"operator"`
+	Candidates []int        `json:"candidates"`
+	Results    []bandResult `json:"results"`
+	Chosen     int          `json:"chosen"`
+	Error      string       `json:"error"`
+	ICCID      string       `json:"iccid"`
+	Roaming    bool         `json:"roaming"`
+	Radio      bandRadio    `json:"radio"`
+	// LockedBand is read back from the module: the single band it is locked
+	// to, or 0 when several bands are allowed.
+	LockedBand int              `json:"locked_band"`
+	MaskKnown  bool             `json:"mask_known"`
 	Profile    *bandCardProfile `json:"profile"`
 }
 
@@ -156,6 +165,14 @@ func bandMaskFor(bands ...int) string {
 		mask.SetBit(mask, band-1, 1)
 	}
 	return strings.ToUpper(mask.Text(16))
+}
+
+// lockedBandOf returns the single band a mask allows, or 0 for several bands.
+func lockedBandOf(hex string) int {
+	if bands := bandsInMask(hex); len(bands) == 1 {
+		return bands[0]
+	}
+	return 0
 }
 
 func bandsInMask(hex string) []int {
@@ -595,7 +612,7 @@ func (a *app) runBandOptimizer(saveData bool) {
 	if chosen > 0 {
 		note = fmt.Sprintf("已锁定 Band %d；信号丢失 30 秒会自动恢复全部频段", chosen)
 	}
-	b.update(func(s *bandOptimizerState) { s.Chosen = chosen })
+	b.update(func(s *bandOptimizerState) { s.Chosen, s.LockedBand, s.MaskKnown = chosen, chosen, true })
 	finish("done", note, nil)
 }
 
@@ -623,10 +640,13 @@ func (a *app) bandGuardOnce() {
 	iccid := a.currentICCID()
 	radio := a.readBandRadio()
 	online := a.registered()
+	bandResp, _ := a.runATCommand(`AT+QCFG="band"`, 3*time.Second)
+	current := parseLTEBandMask(bandResp)
 	b.mu.Lock()
 	b.loadLocked()
 	b.state.ICCID = iccid
 	b.state.Radio = radio
+	b.state.LockedBand, b.state.MaskKnown = lockedBandOf(current), current != ""
 	full := b.profiles.FullMask
 	profile, known := b.profiles.Cards[iccid]
 	changed := iccid != "" && iccid != b.lastICCID
@@ -641,17 +661,16 @@ func (a *app) bandGuardOnce() {
 	// A different SIM: apply its saved band, or all bands for an unknown SIM.
 	if changed {
 		mask := full
-		if known && profile.Band > 0 && !profile.Fallback {
+		if known && profile.locks() {
 			mask = bandMaskFor(profile.Band)
 		}
-		bandResp, _ := a.runATCommand(`AT+QCFG="band"`, 3*time.Second)
-		if parseLTEBandMask(bandResp) != mask {
+		if current != mask {
 			log.Printf("band guard: SIM %s… inserted, applying LTE mask %s", iccid[:min(6, len(iccid))], mask)
 			_ = a.setLTEBands(mask)
 		}
 		return
 	}
-	if !known || profile.Band == 0 || profile.Fallback {
+	if !known || !profile.locks() {
 		return
 	}
 	if online {
@@ -732,7 +751,7 @@ func (a *app) bandActionAPI(w http.ResponseWriter, r *http.Request) {
 		})
 		go a.runBandOptimizer(saveData)
 		writeJSON(w, 202, b.snapshot())
-	case "reset":
+	case "unlock", "reset":
 		defer a.moduleOperationMu.Unlock()
 		b.mu.Lock()
 		b.loadLocked()
@@ -740,9 +759,9 @@ func (a *app) bandActionAPI(w http.ResponseWriter, r *http.Request) {
 		if full == "" {
 			full = defaultFullBandMask
 		}
-		iccid := b.state.ICCID
+		iccid := a.currentICCID()
 		if p, ok := b.profiles.Cards[iccid]; ok {
-			p.Band = 0
+			p.Disabled = true
 			p.Fallback = false
 			b.profiles.Cards[iccid] = p
 			b.saveLocked()
@@ -752,7 +771,30 @@ func (a *app) bandActionAPI(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 502, err.Error())
 			return
 		}
-		b.update(func(s *bandOptimizerState) { s.Phase, s.Note, s.Chosen = "reset", "已恢复全部频段", 0 })
+		b.update(func(s *bandOptimizerState) { s.ICCID, s.LockedBand, s.MaskKnown = iccid, 0, true })
+		writeJSON(w, 200, b.snapshot())
+	case "lock":
+		defer a.moduleOperationMu.Unlock()
+		iccid := a.currentICCID()
+		b.mu.Lock()
+		b.loadLocked()
+		p, ok := b.profiles.Cards[iccid]
+		b.mu.Unlock()
+		if !ok || p.Band == 0 {
+			writeError(w, 409, "这张卡还没有测出更优的单一频段，请先自动选最优频段")
+			return
+		}
+		if err := a.setLTEBands(bandMaskFor(p.Band)); err != nil {
+			writeError(w, 502, err.Error())
+			return
+		}
+		p.Disabled, p.Fallback = false, false
+		b.mu.Lock()
+		b.profiles.Cards[iccid] = p
+		b.saveLocked()
+		b.lostSince = time.Time{}
+		b.mu.Unlock()
+		b.update(func(s *bandOptimizerState) { s.ICCID, s.LockedBand, s.MaskKnown = iccid, p.Band, true })
 		writeJSON(w, 200, b.snapshot())
 	default:
 		a.moduleOperationMu.Unlock()

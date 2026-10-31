@@ -83,6 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let appSettings: AppSettings
     private var mainWindow: NSWindow?
     private let proxyCenter: ProxyCenter
+    private let bandCenter: BandCenter
     private let updater: AppUpdater
     private let systemNotifications = SystemNotifications()
     private var appStatusItem: NSStatusItem?
@@ -121,6 +122,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             ?? URL(string: "http://127.0.0.1:7575/")!
         api = DJOneHubAPI(baseURL: baseURL)
         proxyCenter = ProxyCenter(api: api)
+        bandCenter = BandCenter(api: api)
         updater = AppUpdater(api: api)
         previewMode = Self.argumentValue("--preview", in: arguments)
         snapshotPath = Self.argumentValue("--snapshot", in: arguments)
@@ -216,10 +218,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self.showMainWindow()
         }
         if !reviewSafe { systemNotifications.start() }
+        bandCenter.onFinish = { [weak self] title, body in self?.systemNotifications.postBandResult(title: title, body: body) }
         proxyTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
                 await self.proxyCenter.refresh()
+                await self.bandCenter.refresh()
             }
         }
         if reviewSafe {
@@ -963,6 +967,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 .environmentObject(ringtoneStore)
                 .environmentObject(appSettings)
                 .environmentObject(proxyCenter)
+                .environmentObject(bandCenter)
                 .environmentObject(updater)
                 .environmentObject(systemNotifications)
             let hosting = FirstClickHostingController(rootView: rootView)
