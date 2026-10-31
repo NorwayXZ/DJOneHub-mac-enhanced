@@ -1,15 +1,14 @@
 # Cellular Proxy Preview
 
-## Current candidate: 1.3.0-proxy-preview.12
+## Current candidate: 1.3.0-proxy-preview.16 and later
 
-- Loopback SOCKS5 remains `127.0.0.1:10909`, with cellular-bound connections and no broadband fallback.
-- DNS uses module DHCP DNS over TCP, with cellular-bound `223.5.5.5:53` fallback. DNS providers receive queried domains.
-- Exit detection tries IPIP and ipify. Approximate geolocation, ISP and persistent IP history are displayed; provider locations can disagree.
-- Native sidebar hit targets, menu-bar proxy status, notification-center integration and GitHub update UI are included.
-- Optional multi-module supervision is experimental; multiple physical modules have not been validated.
-- Network recovery identifies the real USB network interface; AT probing excludes DIAG interfaces. Voice can reuse an existing local ADB server, pinned to USB session/location and transport ID.
-- Hardware validation: one QDC507 passed SOCKS5 remote-DNS HTTPS access while broadband remained the default route. Module voice drivers, calibration and UAC route start/stop passed; live two-way call audio remains unverified.
-- Go race tests, Swift self-test, universal build and DMG integrity checks passed. This is an ad-hoc-signed, not notarized preview, not a stable release.
+- Loopback SOCKS5 remains `127.0.0.1:10909`, with cellular-bound connections and no broadband fallback; the proxy restarts automatically when cellular returns unless stopped by hand.
+- DNS races the module DHCP resolver, `223.5.5.5` and `119.29.29.29` over UDP, all bound to cellular, with a 60s cache. These providers receive queried domains.
+- Exit detection queries myip.ipip.net, ip.3322.net, ddns.oray.com and ifconfig.me in parallel; geolocation (ipwho.is) is filled in afterwards.
+- Reconnect modes: one radio cycle (retry once on an identical IP) or "new segment" (up to 4 cycles until a /24 unused within 6-72h).
+- LTE band optimizer: per-operator candidate bands, per-band signal and 5s throughput test, per-ICCID result, lock/unlock switch, 30s no-service fallback to all bands.
+- Hardware validation (one QDC507, China Mobile): exit check 0.27-0.49s; band optimizer locked Band 41 (about 0.8 to 3.4 MB/s through the proxy); USB unplug/replug recovered in 14s with the proxy restarting automatically. Band fallback, SIM swap and multi-module mode are not yet validated on hardware.
+- Ad-hoc-signed, not notarized preview, not a stable release.
 
 The sections below preserve earlier preview development notes. Their original test limitations describe those earlier versions, not the current candidate.
 
@@ -41,7 +40,7 @@ Clients must send domain names to SOCKS (e.g. socks5h), rather than resolving th
 
 1. Keep broadband connected, connect one module with a data-enabled SIM, enable cellular data.
 2. Confirm system default route stays on broadband. Start proxy and run an explicit IP detection.
-3. Compare a direct request with `curl --socks5-hostname 127.0.0.1:10909 https://api.ipify.org` (direct requests may be affected by existing VPNs).
+3. Compare a direct request with `curl --socks5-hostname 127.0.0.1:10909 https://ip.3322.net` (direct requests may be affected by existing VPNs).
 4. Verify DNS and target sockets on the USB interface with packet capture. Test with VPN/TUN disabled, then enabled.
 5. Unplug the module during transfers: proxy must fail, never use broadband. Replug, restart manually and verify new interface index detection.
 6. Confirm reconnect, observe radio recovery and compare old/new IP. Repeat after cooldown; an unchanged IP is valid.
