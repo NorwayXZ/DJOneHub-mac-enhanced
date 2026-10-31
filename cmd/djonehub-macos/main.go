@@ -504,6 +504,7 @@ func serve(instance *app, listen string) {
 		go instance.startCellularPolicyGuard(ctx)
 		go instance.runProxyAutoStart(ctx)
 		go instance.runBandGuard(ctx)
+		go runLogRotation(ctx)
 	}
 
 	if !instance.demo {
@@ -815,7 +816,7 @@ func (a *app) startSMSPoller(ctx context.Context) {
 			return
 		case <-timer.C:
 			if err := a.pollSMSOnce(); err != nil {
-				log.Printf("SMS poll failed: %v", err)
+				logQuietly("sms-poll", "SMS poll failed: %v", err)
 			}
 			timer.Reset(interval)
 		}
@@ -1075,7 +1076,11 @@ func (a *app) signalRecoveryOnce() {
 		a.lostSignalCount = 0
 	} else {
 		a.lostSignalCount++
-		log.Printf("cellular signal lost %d/3 checks: registration=%d signal=%d dBm", a.lostSignalCount, reg, signal)
+		if a.lostSignalCount <= 3 {
+			log.Printf("cellular signal lost %d/3 checks: registration=%d signal=%d dBm", a.lostSignalCount, reg, signal)
+		} else {
+			logQuietly("signal-lost", "cellular signal still lost: registration=%d", reg)
+		}
 		if a.lostSignalCount >= 3 {
 			a.recoverSignal()
 		}
@@ -1286,7 +1291,7 @@ func (a *app) status(w http.ResponseWriter, _ *http.Request) {
 			a.markUSBATDetached("DJI USB device disconnected")
 		}
 		if err := a.ensureUSBAT(); err != nil {
-			log.Printf("USB AT retry failed: %v", err)
+			logQuietly("usb-at-retry", "USB AT retry failed: %v", err)
 		}
 		if a.usbAT != nil {
 			status, err := a.usbATStatus()

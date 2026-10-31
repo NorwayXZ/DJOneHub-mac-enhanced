@@ -139,10 +139,10 @@ func (a *app) logModuleVoiceConfig() {
 	for _, cmd := range []string{`AT+QCFG="USBCFG"?`, "AT+QPCMV?", "AT+QDAI?"} {
 		resp, err := a.runATCommand(cmd, 3*time.Second)
 		if err != nil {
-			log.Printf("voice usb diag: %s -> error: %v", cmd, err)
+			logQuietly("voice-diag "+cmd, "voice usb diag: %s -> error: %v", cmd, err)
 			continue
 		}
-		log.Printf("voice usb diag: %s -> %s", cmd, strings.TrimSpace(resp))
+		logQuietly("voice-diag "+cmd, "voice usb diag: %s -> %s", cmd, strings.TrimSpace(resp))
 	}
 }
 
