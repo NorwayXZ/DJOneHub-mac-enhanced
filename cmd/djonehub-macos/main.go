@@ -40,7 +40,7 @@ import (
 //go:embed web/*
 var webAssets embed.FS
 
-const appVersion = "1.3.0-proxy-preview.19"
+const appVersion = "1.3.0-proxy-preview.20"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
@@ -81,6 +81,7 @@ type modulePhonebookEntry struct {
 type app struct {
 	proxy             cellularProxy
 	bands             bandOptimizer
+	usage             usageLedger
 	moduleOperationMu sync.Mutex
 	updatePending     atomic.Bool
 	modem             *modem.Manager
@@ -504,6 +505,7 @@ func serve(instance *app, listen string) {
 		go instance.startCellularPolicyGuard(ctx)
 		go instance.runProxyAutoStart(ctx)
 		go instance.runBandGuard(ctx)
+		go instance.runUsageLedger(ctx)
 		go runLogRotation(ctx)
 	}
 
@@ -1145,6 +1147,8 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /api/proxy", a.proxyActionAPI)
 	mux.HandleFunc("GET /api/band", a.bandStatusAPI)
 	mux.HandleFunc("POST /api/band", a.bandActionAPI)
+	mux.HandleFunc("GET /api/usage", a.usageAPI)
+	mux.HandleFunc("POST /api/usage", a.usageAPI)
 	mux.HandleFunc("GET /api/platform", a.platformInfo)
 	mux.HandleFunc("GET /api/health", a.health)
 	mux.HandleFunc("GET /api/status", a.status)

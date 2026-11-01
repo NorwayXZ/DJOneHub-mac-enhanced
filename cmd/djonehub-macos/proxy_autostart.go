@@ -96,6 +96,9 @@ func (a *app) autoStartProxyOnce(ctx context.Context) {
 	if !p.wantsAutoStart() || a.updatePending.Load() {
 		return
 	}
+	if blocked, _ := a.usage.blocked(time.Now()); blocked {
+		return
+	}
 	if _, err := proxyInterface(); err != nil {
 		return
 	}

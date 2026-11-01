@@ -164,6 +164,7 @@ func serveModuleWorker(socket string) error {
 	go a.startSMSPoller(ctx)
 	go a.startCallPoller(ctx)
 	go a.runProxyAutoStart(ctx)
+	go a.runUsageLedger(ctx)
 	routes := a.routes()
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" && (r.URL.Path == "/api/network/cellular-policy" || r.URL.Path == "/api/network/usbnet") {

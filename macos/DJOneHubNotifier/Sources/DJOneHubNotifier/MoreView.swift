@@ -147,6 +147,10 @@ struct MoreView: View {
             }
             .modifier(PhoneCard())
 
+            MoreSectionTitle("流量统计")
+            UsagePanel()
+                .modifier(PhoneCard())
+
             MoreSectionTitle("频段优化")
             BandOptimizerPanel()
                 .modifier(PhoneCard())

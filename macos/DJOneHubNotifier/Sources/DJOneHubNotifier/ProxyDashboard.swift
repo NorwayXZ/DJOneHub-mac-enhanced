@@ -218,6 +218,7 @@ final class ProxyCenter: ObservableObject {
 
 struct ProxyDashboard: View {
     @EnvironmentObject private var proxy: ProxyCenter
+    @EnvironmentObject private var usage: UsageCenter
     @State private var confirmReconnect = false
     @State private var confirmSegment = false
     @AppStorage("djonehub.segmentAvoidHours") private var segmentAvoidHours = 24
@@ -300,7 +301,16 @@ struct ProxyDashboard: View {
                 HStack(spacing: 12) {
                     metric("模块接口", proxy.status?.interface.isEmpty == false ? proxy.status!.interface : "等待识别")
                     metric("活动连接", "\(proxy.status?.connections ?? 0)")
-                    metric("代理流量", ByteCountFormatter.string(fromByteCount: Int64(clamping: (proxy.status?.uploaded ?? 0) &+ (proxy.status?.downloaded ?? 0)), countStyle: .binary))
+                    if let card = usage.status?.currentCard, !proxy.fleetMode {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("\(card.title)本期流量").font(.caption).foregroundStyle(.secondary)
+                            UsageMeter(card: card)
+                        }.frame(maxWidth: .infinity, alignment: .leading).padding(16)
+                            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+                            .help("按 SIM 卡统计的全部蜂窝流量；套餐和每月开始日在 设置 → 流量统计 中设置")
+                    } else {
+                        metric("代理流量", ByteCountFormatter.string(fromByteCount: Int64(clamping: (proxy.status?.uploaded ?? 0) &+ (proxy.status?.downloaded ?? 0)), countStyle: .binary))
+                    }
                 }
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {

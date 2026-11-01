@@ -54,8 +54,8 @@ type proxyState struct {
 	PublicIP      string         `json:"public_ip"`
 	// The Mac's own address in the carrier IPv6 prefix as sites see it; empty without IPv6.
 	PublicIPv6 string `json:"public_ipv6"`
-	PreviousIP    string         `json:"previous_ip"`
-	Phase         string         `json:"phase"`
+	PreviousIP string `json:"previous_ip"`
+	Phase      string `json:"phase"`
 	// Filled after a reconnect finishes: wall time from click to verified exit, and radio cycles used.
 	ReconnectSeconds  float64 `json:"reconnect_seconds"`
 	ReconnectAttempts int     `json:"reconnect_attempts"`
@@ -468,6 +468,10 @@ func (a *app) proxyActionAPI(w http.ResponseWriter, r *http.Request) {
 		policy, err := a.cellularPolicyStatus()
 		if err != nil || policy.ForceOff {
 			writeError(w, 409, "请先在设置中打开“允许 4G 上网”")
+			return
+		}
+		if blocked, note := a.usage.blocked(time.Now()); blocked {
+			writeError(w, 409, note)
 			return
 		}
 		if err := p.start(); err != nil {
