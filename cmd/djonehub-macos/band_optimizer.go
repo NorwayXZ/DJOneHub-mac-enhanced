@@ -500,6 +500,7 @@ func (a *app) runBandOptimizer(saveData bool) {
 	iccid := a.currentICCID()
 	cimi, _ := a.runATCommand("AT+CIMI", 3*time.Second)
 	imsi := parseUSBATIMSI(cimi)
+	noteSIMIMSI(imsi)
 	bandResp, _ := a.runATCommand(`AT+QCFG="band"`, 3*time.Second)
 	neighbours, _ := a.runATCommand(`AT+QENG="neighbourcell"`, 5*time.Second)
 	radio := a.readBandRadio()
@@ -657,6 +658,11 @@ func (a *app) bandGuardOnce() {
 		b.lostSince = time.Time{}
 	}
 	b.mu.Unlock()
+	// The proxy's DNS policy depends on whether this is a mainland SIM.
+	if iccid != "" && (changed || cellularSIMHome.Load() == simHomeUnknown) {
+		cimi, _ := a.runATCommand("AT+CIMI", 3*time.Second)
+		noteSIMIMSI(parseUSBATIMSI(cimi))
+	}
 	if iccid == "" || full == "" {
 		return
 	}
@@ -743,6 +749,7 @@ func (a *app) bandActionAPI(w http.ResponseWriter, r *http.Request) {
 	case "optimize":
 		cimi, _ := a.runATCommand("AT+CIMI", 3*time.Second)
 		imsi := parseUSBATIMSI(cimi)
+		noteSIMIMSI(imsi)
 		saveData := len(imsi) >= 3 && !strings.HasPrefix(imsi, "460")
 		if body.SaveData != nil {
 			saveData = *body.SaveData

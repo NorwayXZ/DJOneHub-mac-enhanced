@@ -25,6 +25,7 @@ struct CellularProxyStatus: Decodable {
     var address: String
     var interface: String
     var publicIP: String
+    var publicIPv6: String? = nil
     var previousIP: String
     var phase: String
     var reconnectSeconds: Double? = nil
@@ -49,7 +50,7 @@ struct CellularProxyStatus: Decodable {
         case ipSource = "ip_source"
         case checkedAt = "checked_at", locationError = "location_error"
         case running, address, interface, phase, error, connections, uploaded, downloaded
-        case publicIP = "public_ip", previousIP = "previous_ip"
+        case publicIP = "public_ip", publicIPv6 = "public_ipv6", previousIP = "previous_ip"
     }
 }
 
@@ -245,7 +246,7 @@ struct ProxyDashboard: View {
                 VStack(alignment: .leading, spacing: 14) {
                     HStack(alignment: .top) {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("蜂窝公网 IPv4").font(.caption).foregroundStyle(.secondary)
+                            Text(proxy.status?.publicIP.contains(":") == true ? "蜂窝公网 IPv6（无 IPv4 出口）" : "蜂窝公网 IPv4").font(.caption).foregroundStyle(.secondary)
                             Text(proxy.status?.publicIP.isEmpty == false ? proxy.status!.publicIP : "尚未检测")
                                 .font(.system(size: 26, weight: .medium, design: .monospaced)).textSelection(.enabled)
                             if let visit = proxy.status?.history?.last, visit.ip == proxy.status?.publicIP,
@@ -260,6 +261,10 @@ struct ProxyDashboard: View {
                             Text(proxy.status?.location?.isEmpty == false ? proxy.status!.location! : "出口归属地：尚未获取")
                                 .font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
                             if let isp = proxy.status?.isp, !isp.isEmpty { Text(isp).font(.caption).foregroundStyle(.secondary) }
+                            if let v6 = proxy.status?.publicIPv6, !v6.isEmpty, v6 != proxy.status?.publicIP, proxy.status?.running == true {
+                                Text("IPv6 出口：" + v6).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
+                                    .help("只支持 IPv6 的网站会从这个地址访问；其余网站仍走上面的 IPv4 出口")
+                            }
                             if let source = proxy.status?.ipSource, !source.isEmpty { Text("检测来源：" + source).font(.caption2).foregroundStyle(.secondary) }
                             if let checked = proxy.status?.checkedAt, let date = ISO8601DateFormatter().date(from: checked) {
                                 Text("检测时间：" + date.formatted(date: .abbreviated, time: .standard)).font(.caption2).foregroundStyle(.secondary)
@@ -336,10 +341,10 @@ struct ProxyDashboard: View {
                 DisclosureGroup("连接方式与使用边界") {
                     VStack(alignment: .leading, spacing: 8) {
                     Text("01   在目标应用中配置 SOCKS5，并启用通过代理解析 DNS。")
-                    Text("02   仅本机 · IPv4 · TCP。UDP / QUIC 与局域网共享暂不支持。")
+                    Text("02   仅本机 · TCP。IPv4 优先；运营商提供 IPv6 时自动兜底（纯 IPv6 卡、只有 IPv6 的网站）。UDP / QUIC 与局域网共享暂不支持，指纹浏览器请把 WebRTC 设为替换或禁用。")
                     Text("03   模块断线后代理失败，不改走宽带；公网 IP 不保证独享或每次变化。")
                     Text("04   保持宽带为系统默认网络；本版本不自动修改系统网关。")
-                    Text("05   DNS：模块 DHCP DNS 与 223.5.5.5 / 119.29.29.29 并行查询，均只走蜂窝；出口检测：myip.ipip.net / ip.3322.net / ddns.oray.com / ifconfig.me 并行；归属地：ipwho.is（会获知出口 IP）。位置为估算，非 GPS。")
+                    Text("05   DNS：只走蜂窝。国内卡为运营商 DNS 与 223.5.5.5 / 119.29.29.29 并行；境外卡只用运营商 DNS，避免 DNS 泄漏检测看到国内解析器；出口检测：myip.ipip.net / ip.3322.net / ddns.oray.com / ifconfig.me 并行；归属地：ipwho.is（会获知出口 IP）。位置为估算，非 GPS。")
                     }.font(.callout).foregroundStyle(.secondary).padding(.top, 8)
                 }
             }.padding(24)

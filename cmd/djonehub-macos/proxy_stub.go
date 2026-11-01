@@ -18,3 +18,5 @@ func boundProxyDial(context.Context, string, string) (net.Conn, error) {
 func boundInterfaceDial(context.Context, string, string, string) (net.Conn, error) {
 	return nil, errors.New("interface binding unavailable")
 }
+
+func cellularHasIPv6(string) bool { return false }

@@ -38,6 +38,8 @@ func (a *app) watchProxyExitOnce(ctx context.Context) {
 		p.state.CheckedAt = time.Now().UTC().Format(time.RFC3339)
 		p.recordHistoryLocked()
 		p.mu.Unlock()
+		// The Mac rotates its temporary IPv6 address; keep the shown one current.
+		p.refreshExitIPv6(ctx, before.Interface, ip)
 		return
 	}
 	p.state.PreviousIP = before.PublicIP

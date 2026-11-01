@@ -121,6 +121,7 @@ func (a *app) autoStartProxyOnce(ctx context.Context) {
 	log.Printf("cellular proxy restarted automatically on %s", p.snapshot().Interface)
 	p.mu.Lock()
 	p.state.PublicIP = ""
+	p.state.PublicIPv6 = ""
 	p.state.IPSource = ""
 	p.state.Location = ""
 	p.state.ISP = ""

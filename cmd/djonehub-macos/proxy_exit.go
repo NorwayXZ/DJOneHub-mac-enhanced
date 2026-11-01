@@ -99,14 +99,95 @@ func probeProxyExit(ctx context.Context, iface, preferred string) (string, strin
 	if fallback != nil {
 		return fallback.ip, fallback.source, nil
 	}
+	// An IPv6-only bearer without NAT64 has no IPv4 exit; its IPv6 one is
+	// still the address sites see.
+	if ip, source, err := probeProxyExitIPv6(context.WithoutCancel(ctx), iface); err == nil {
+		return ip, source, nil
+	}
 	return "", "", errors.New(strings.Join(failures, "; "))
 }
 
+// IPv6-only echo services; asked only when the module provides IPv6.
+var proxyExitIPv6Providers = []proxyExitProvider{
+	{"https://api-ipv6.ip.sb/ip", "api-ipv6.ip.sb", ""},
+	{"https://v6.ident.me", "v6.ident.me", ""},
+	{"https://api6.ipify.org", "api6.ipify.org", ""},
+}
+
+func parseProxyExitIPv6(body string) (string, error) {
+	ip := net.ParseIP(strings.TrimSpace(body))
+	if ip == nil || !isPublicIPv6(ip) {
+		return "", errors.New("invalid public IPv6 response")
+	}
+	return ip.String(), nil
+}
+
+func probeProxyExitIPv6(ctx context.Context, iface string) (string, string, error) {
+	if !cellularHasIPv6(iface) {
+		return "", "", errors.New("module provides no IPv6")
+	}
+	ctx, cancel := context.WithTimeout(ctx, proxyExitTimeout)
+	defer cancel()
+	type answer struct {
+		ip, source string
+		err        error
+	}
+	answers := make(chan answer, len(proxyExitIPv6Providers))
+	for _, provider := range proxyExitIPv6Providers {
+		go func(provider proxyExitProvider) {
+			body, err := fetchProxyExit(ctx, iface, provider.url, true)
+			ip := ""
+			if err == nil {
+				ip, err = parseProxyExitIPv6(body)
+			}
+			answers <- answer{ip, provider.source, err}
+		}(provider)
+	}
+	failures := []string{}
+	for range proxyExitIPv6Providers {
+		a := <-answers
+		if a.err == nil {
+			return a.ip, a.source, nil
+		}
+		failures = append(failures, a.source+": "+a.err.Error())
+	}
+	return "", "", errors.New(strings.Join(failures, "; "))
+}
+
+// refreshExitIPv6 records the IPv6 exit next to the IPv4 one currently shown.
+func (p *cellularProxy) refreshExitIPv6(ctx context.Context, iface, ipv4 string) {
+	if net.ParseIP(ipv4).To4() == nil {
+		return
+	}
+	ip, _, err := probeProxyExitIPv6(ctx, iface)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.state.PublicIP != ipv4 {
+		return
+	}
+	if err != nil {
+		ip = ""
+	}
+	p.state.PublicIPv6 = ip
+}
+
 func probeProxyExitProvider(ctx context.Context, iface string, provider proxyExitProvider) (string, error) {
-	transport := &http.Transport{Proxy: nil, DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) { return cellularDial(ctx, iface, addr) }, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}, DisableKeepAlives: true}
+	body, err := fetchProxyExit(ctx, iface, provider.url, false)
+	if err != nil {
+		return "", err
+	}
+	return parseProxyExitReply(body, provider.prefix)
+}
+
+func fetchProxyExit(ctx context.Context, iface, url string, ipv6Only bool) (string, error) {
+	dial := func(ctx context.Context, _, addr string) (net.Conn, error) { return cellularDial(ctx, iface, addr) }
+	if ipv6Only {
+		dial = func(ctx context.Context, _, addr string) (net.Conn, error) { return cellularDialIPv6(ctx, iface, addr) }
+	}
+	transport := &http.Transport{Proxy: nil, DialContext: dial, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}, DisableKeepAlives: true}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirect rejected") }}
-	request, _ := http.NewRequestWithContext(ctx, "GET", provider.url, nil)
+	request, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
 	request.Header.Set("User-Agent", "curl/8")
 	response, err := client.Do(request)
 	if err != nil {
@@ -123,5 +204,5 @@ func probeProxyExitProvider(ctx context.Context, iface string, provider proxyExi
 	if len(body) > 1024 {
 		return "", errors.New("oversized exit reply")
 	}
-	return parseProxyExitReply(string(body), provider.prefix)
+	return string(body), nil
 }

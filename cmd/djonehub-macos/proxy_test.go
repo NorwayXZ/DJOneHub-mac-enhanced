@@ -19,7 +19,7 @@ func TestSOCKSRejectsUnsupportedRequests(t *testing.T) {
 		want    byte
 	}{
 		{"udp", []byte{5, 3, 0, 1}, 7},
-		{"ipv6", []byte{5, 1, 0, 4}, 8},
+		{"unknown address type", []byte{5, 1, 0, 9}, 8},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			client, server := net.Pipe()

@@ -52,6 +52,8 @@ type proxyState struct {
 	Address       string         `json:"address"`
 	Interface     string         `json:"interface"`
 	PublicIP      string         `json:"public_ip"`
+	// The Mac's own address in the carrier IPv6 prefix as sites see it; empty without IPv6.
+	PublicIPv6 string `json:"public_ipv6"`
 	PreviousIP    string         `json:"previous_ip"`
 	Phase         string         `json:"phase"`
 	// Filled after a reconnect finishes: wall time from click to verified exit, and radio cycles used.
@@ -214,6 +216,12 @@ func (p *cellularProxy) handleWithDial(ctx context.Context, c net.Conn, iface st
 			return
 		}
 		host = string(name)
+	case 4:
+		b := make([]byte, net.IPv6len)
+		if _, err := io.ReadFull(c, b); err != nil {
+			return
+		}
+		host = net.IP(b).String()
 	default:
 		socksReply(c, 8)
 		return
@@ -270,21 +278,158 @@ func cellularDial(ctx context.Context, iface, address string) (net.Conn, error) 
 	var ips []net.IP
 	if ip := net.ParseIP(host); ip != nil {
 		ips = []net.IP{ip}
-	} else if ips, err = resolveCellularIPv4(ctx, iface, host); err != nil {
+	} else if ips, err = resolveCellularIPs(ctx, iface, host); err != nil {
 		return nil, err
 	}
+	withIPv6 := cellularHasIPv6(iface)
+	var v4, v6 []string
 	for _, ip := range ips {
-		if ip.To4() == nil || !ip.IsGlobalUnicast() || ip.IsPrivate() {
-			continue
+		if ip.To4() != nil && ip.IsGlobalUnicast() && !ip.IsPrivate() {
+			v4 = append(v4, net.JoinHostPort(ip.String(), port))
+		} else if withIPv6 && isPublicIPv6(ip) {
+			v6 = append(v6, net.JoinHostPort(ip.String(), port))
 		}
-		c, e := boundProxyDial(ctx, iface, net.JoinHostPort(ip.String(), port))
+	}
+	if len(v4) == 0 && len(v6) == 0 {
+		if !withIPv6 {
+			return nil, errors.New("only public IPv4 destinations are supported")
+		}
+		return nil, errors.New("only public destinations are supported")
+	}
+	return dialCellularFamilies(ctx, iface, v4, v6)
+}
+
+// cellularDialIPv6 connects over IPv6 only, for IPv6 exit detection.
+func cellularDialIPv6(ctx context.Context, iface, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	ips, err := resolveCellularIPs(ctx, iface, host)
+	if err != nil {
+		return nil, err
+	}
+	var v6 []string
+	for _, ip := range ips {
+		if isPublicIPv6(ip) {
+			v6 = append(v6, net.JoinHostPort(ip.String(), port))
+		}
+	}
+	if len(v6) == 0 {
+		return nil, errors.New("no IPv6 address for " + host)
+	}
+	return dialCellularList(ctx, iface, v6)
+}
+
+func isPublicIPv6(ip net.IP) bool {
+	return ip.To4() == nil && ip.IsGlobalUnicast() && !ip.IsPrivate()
+}
+
+// IPv4 stays the primary family so sites keep seeing the one exit IP the App
+// shows. IPv6 starts after a short delay as a fallback (IPv6-only foreign
+// SIMs, IPv6-only sites). Once IPv4 has failed while IPv6 worked, IPv6 leads
+// for a while so every connection does not wait out a dead IPv4 attempt.
+const (
+	cellularFamilyFallbackDelay = time.Second
+	cellularIPv6PreferredFor    = 5 * time.Minute
+)
+
+var (
+	cellularIPv6PreferredUntil atomic.Int64
+	cellularIPv6Wins           atomic.Int32
+)
+
+// A failed IPv4 attempt, or three IPv6 wins in a row while IPv4 was still
+// connecting (a bearer that silently drops IPv4), make IPv6 lead. Any IPv4
+// success hands the lead back, so one slow IPv4 handshake changes nothing.
+func noteCellularFamilyWin(ipv6, ipv4Failed bool) {
+	if !ipv6 {
+		cellularIPv6Wins.Store(0)
+		cellularIPv6PreferredUntil.Store(0)
+		return
+	}
+	if ipv4Failed || cellularIPv6Wins.Add(1) >= 3 {
+		cellularIPv6PreferredUntil.Store(time.Now().Add(cellularIPv6PreferredFor).UnixNano())
+	}
+}
+
+func dialCellularFamilies(ctx context.Context, iface string, v4, v6 []string) (net.Conn, error) {
+	first, second := v4, v6
+	ipv6First := time.Now().UnixNano() < cellularIPv6PreferredUntil.Load()
+	if ipv6First || len(v4) == 0 {
+		first, second = v6, v4
+	}
+	if len(second) == 0 {
+		return dialCellularList(ctx, iface, first)
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type result struct {
+		conn net.Conn
+		err  error
+		ipv6 bool
+	}
+	results := make(chan result, 2)
+	firstIsIPv6 := ipv6First || len(v4) == 0
+	go func() {
+		c, err := dialCellularList(ctx, iface, first)
+		results <- result{c, err, firstIsIPv6}
+	}()
+	fallback := time.NewTimer(cellularFamilyFallbackDelay)
+	defer fallback.Stop()
+	startSecond := func() {
+		go func() {
+			c, err := dialCellularList(ctx, iface, second)
+			results <- result{c, err, !firstIsIPv6}
+		}()
+	}
+	started, pending, ipv4Failed := false, 1, false
+	var errs []string
+	for pending > 0 {
+		select {
+		case <-fallback.C:
+			if !started {
+				started, pending = true, pending+1
+				startSecond()
+			}
+		case r := <-results:
+			pending--
+			if r.err == nil {
+				// While IPv6 leads, its wins must not keep extending the lead;
+				// it lapses and IPv4 gets another chance.
+				if !r.ipv6 || !firstIsIPv6 {
+					noteCellularFamilyWin(r.ipv6, ipv4Failed)
+				}
+				cancel()
+				// The other attempt may still connect; close it when it does.
+				for ; pending > 0; pending-- {
+					if other := <-results; other.conn != nil {
+						other.conn.Close()
+					}
+				}
+				return r.conn, nil
+			}
+			errs = append(errs, r.err.Error())
+			if !r.ipv6 {
+				ipv4Failed = true
+			}
+			if !started {
+				started, pending = true, pending+1
+				startSecond()
+			}
+		}
+	}
+	return nil, errors.New(strings.Join(errs, "; "))
+}
+
+func dialCellularList(ctx context.Context, iface string, addresses []string) (net.Conn, error) {
+	var err error
+	for _, address := range addresses {
+		c, e := boundProxyDial(ctx, iface, address)
 		if e == nil {
 			return c, nil
 		}
 		err = e
-	}
-	if err == nil {
-		err = errors.New("only public IPv4 destinations are supported")
 	}
 	return nil, err
 }
@@ -333,6 +478,7 @@ func (a *app) proxyActionAPI(w http.ResponseWriter, r *http.Request) {
 		// Listener startup is separate from external exit verification.
 		p.mu.Lock()
 		p.state.PublicIP = ""
+		p.state.PublicIPv6 = ""
 		p.state.IPSource = ""
 		p.state.Location = ""
 		p.state.ISP = ""
@@ -454,6 +600,7 @@ func (a *app) reconnectProxy(iface string, mode reconnectMode) {
 	}
 	p.state.PreviousIP = old
 	p.state.PublicIP = ""
+	p.state.PublicIPv6 = ""
 	p.state.IPSource = ""
 	p.state.Location = ""
 	p.state.ISP = ""
@@ -599,6 +746,7 @@ func (p *cellularProxy) monitor(ctx context.Context, iface string) {
 				if ctx.Err() == nil {
 					p.state.Error = "蜂窝网络中断，代理已暂停（不会改走宽带）"
 					p.state.PublicIP = ""
+					p.state.PublicIPv6 = ""
 					p.state.IPSource = ""
 					p.stopLocked()
 				}
@@ -616,12 +764,18 @@ func (p *cellularProxy) recordExit(ctx context.Context, iface, ip, source string
 	p.state.PublicIP = ip
 	p.state.IPSource = source
 	p.state.CheckedAt = time.Now().UTC().Format(time.RFC3339)
+	if net.ParseIP(ip).To4() == nil {
+		p.state.PublicIPv6 = ip
+	} else {
+		p.state.PublicIPv6 = ""
+	}
 	p.state.Location = ""
 	p.state.ISP = ""
 	p.state.LocationError = ""
 	p.mu.Unlock()
 	// The IP is final now; the slower (foreign) geolocation lookup fills in
 	// afterwards so callers and the App are not held up by it.
+	go p.refreshExitIPv6(context.WithoutCancel(ctx), iface, ip)
 	go func() {
 		lookupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()

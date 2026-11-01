@@ -25,6 +25,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"syscall"
 	"unsafe"
 )
@@ -62,7 +63,30 @@ func proxyInterface() (string, error) {
 }
 
 func boundProxyDial(ctx context.Context, iface, address string) (net.Conn, error) {
-	return boundInterfaceDial(ctx, iface, "tcp4", address)
+	network := "tcp4"
+	if host, _, err := net.SplitHostPort(address); err == nil && net.ParseIP(host).To4() == nil {
+		network = "tcp6"
+	}
+	return boundInterfaceDial(ctx, iface, network, address)
+}
+
+// cellularHasIPv6 reports whether the module handed this Mac a global IPv6
+// address (SLAAC from the carrier prefix), i.e. the bearer carries IPv6.
+func cellularHasIPv6(iface string) bool {
+	i, err := net.InterfaceByName(iface)
+	if err != nil {
+		return false
+	}
+	addrs, err := i.Addrs()
+	if err != nil {
+		return false
+	}
+	for _, addr := range addrs {
+		if n, ok := addr.(*net.IPNet); ok && isPublicIPv6(n.IP) {
+			return true
+		}
+	}
+	return false
 }
 func boundInterfaceDial(ctx context.Context, iface, network, address string) (net.Conn, error) {
 	current, err := proxyInterface()
@@ -73,9 +97,13 @@ func boundInterfaceDial(ctx context.Context, iface, network, address string) (ne
 	if err != nil {
 		return nil, err
 	}
-	d := net.Dialer{Control: func(_, _ string, raw syscall.RawConn) error {
+	d := net.Dialer{Control: func(network, _ string, raw syscall.RawConn) error {
 		var bindErr error
 		err := raw.Control(func(fd uintptr) {
+			if strings.HasSuffix(network, "6") {
+				bindErr = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_BOUND_IF, i.Index)
+				return
+			}
 			bindErr = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_BOUND_IF, i.Index)
 		})
 		if err != nil {

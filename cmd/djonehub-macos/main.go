@@ -40,7 +40,7 @@ import (
 //go:embed web/*
 var webAssets embed.FS
 
-const appVersion = "1.3.0-proxy-preview.18"
+const appVersion = "1.3.0-proxy-preview.19"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
@@ -1351,6 +1351,7 @@ func (a *app) usbATStatus() (modem.DeviceStatus, error) {
 		return modem.DeviceStatus{}, cpinErr
 	}
 
+	noteSIMIMSI(parseUSBATIMSI(cimiResp))
 	regStatus := firstNonZeroRegistration(ceregResp, cregResp)
 	mode, duplex, band, channel := parseUSBATQNWInfo(qnwinfoResp)
 	usbnetMode := -1
