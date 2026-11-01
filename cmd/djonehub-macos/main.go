@@ -40,7 +40,7 @@ import (
 //go:embed web/*
 var webAssets embed.FS
 
-const appVersion = "1.3.0-proxy-preview.17"
+const appVersion = "1.3.0-proxy-preview.18"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`

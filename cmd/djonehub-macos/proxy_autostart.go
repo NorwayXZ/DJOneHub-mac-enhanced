@@ -77,12 +77,16 @@ func (p *cellularProxy) wantsAutoStart() bool {
 func (a *app) runProxyAutoStart(ctx context.Context) {
 	ticker := time.NewTicker(proxyAutoStartInterval)
 	defer ticker.Stop()
+	watch := time.NewTicker(proxyExitWatchInterval)
+	defer watch.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			a.autoStartProxyOnce(ctx)
+		case <-watch.C:
+			a.watchProxyExitOnce(ctx)
 		}
 	}
 }

@@ -248,6 +248,15 @@ struct ProxyDashboard: View {
                             Text("蜂窝公网 IPv4").font(.caption).foregroundStyle(.secondary)
                             Text(proxy.status?.publicIP.isEmpty == false ? proxy.status!.publicIP : "尚未检测")
                                 .font(.system(size: 26, weight: .medium, design: .monospaced)).textSelection(.enabled)
+                            if let visit = proxy.status?.history?.last, visit.ip == proxy.status?.publicIP,
+                               let start = ISO8601DateFormatter().date(from: visit.firstSeen) {
+                                TimelineView(.periodic(from: .now, by: 30)) { context in
+                                    Label("已使用 " + Self.usageText(from: start, to: visitEnd(visit, now: context.date))
+                                          + " · 自 " + start.formatted(date: .abbreviated, time: .shortened) + " 起",
+                                          systemImage: "hourglass")
+                                        .font(.callout.weight(.medium)).foregroundStyle(accent)
+                                }
+                            }
                             Text(proxy.status?.location?.isEmpty == false ? proxy.status!.location! : "出口归属地：尚未获取")
                                 .font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
                             if let isp = proxy.status?.isp, !isp.isEmpty { Text(isp).font(.caption).foregroundStyle(.secondary) }
@@ -410,6 +419,21 @@ struct ProxyDashboard: View {
     private func historyTime(_ value: String) -> String {
         ISO8601DateFormatter().date(from: value)?.formatted(date: .abbreviated, time: .shortened) ?? value
     }
+    /// The current IP is still in use while the proxy runs; older visits end at their last successful check.
+    private func visitEnd(_ visit: ProxyIPVisit, now: Date) -> Date {
+        let last = ISO8601DateFormatter().date(from: visit.lastSeen) ?? now
+        let current = proxy.status?.running == true && visit.ip == proxy.status?.publicIP && proxy.status?.history?.last?.firstSeen == visit.firstSeen
+        return current ? max(now, last) : last
+    }
+    static func usageText(from start: Date, to end: Date) -> String {
+        let minutes = max(0, Int(end.timeIntervalSince(start) / 60))
+        switch minutes {
+        case 0: return "不到 1 分钟"
+        case ..<60: return "\(minutes) 分钟"
+        case ..<1440: return "\(minutes / 60) 小时" + (minutes % 60 > 0 ? " \(minutes % 60) 分" : "")
+        default: return "\(minutes / 1440) 天" + ((minutes % 1440) / 60 > 0 ? " \((minutes % 1440) / 60) 小时" : "")
+        }
+    }
     private var historyView: some View {
         let visits = proxy.status?.history ?? []
         let currentIP = proxy.status?.publicIP ?? ""
@@ -441,6 +465,12 @@ struct ProxyDashboard: View {
                                     Text(visit.ip).font(.system(.body, design: .monospaced)).textSelection(.enabled)
                                     if entry.offset == visits.count - 1 { Text("最近").font(.caption).foregroundStyle(accent) }
                                     Spacer()
+                                    if let start = ISO8601DateFormatter().date(from: visit.firstSeen) {
+                                        TimelineView(.periodic(from: .now, by: 30)) { context in
+                                            Text("用了 " + Self.usageText(from: start, to: visitEnd(visit, now: context.date)))
+                                                .font(.caption.weight(.medium)).foregroundStyle(accent)
+                                        }
+                                    }
                                     if visits.prefix(entry.offset).contains(where: { $0.ip == visit.ip }) {
                                         Text("再次出现").font(.caption).foregroundStyle(.orange)
                                     }
@@ -458,7 +488,7 @@ struct ProxyDashboard: View {
                         }
                     }
                 }.frame(height: min(CGFloat(visits.count) * 105, 315))
-                Text("时间表示成功检测到该 IP 的时间范围；停止代理后记录仍保留。")
+                Text("时间为成功检测到该 IP 的范围；代理运行时每 5 分钟自动复查一次出口，当前 IP 的用时实时累计。停止代理后记录仍保留。")
                     .font(.caption2).foregroundStyle(.secondary)
             }
         }.padding(18).background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
