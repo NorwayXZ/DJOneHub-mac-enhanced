@@ -62,14 +62,35 @@ struct UsageCard: Decodable, Identifiable, Hashable {
     }
 }
 
+struct UsageNetwork: Decodable {
+    var registered: Bool
+    var roaming: Bool
+    var homePLMN: String
+    var servingPLMN: String
+    enum CodingKeys: String, CodingKey {
+        case registered, roaming
+        case homePLMN = "home_plmn", servingPLMN = "serving_plmn"
+    }
+
+    /// "中国移动卡 · 漫游接入中国联通网络" style description of the current link.
+    var detail: String {
+        let home = UsageCard.carrierLabel(homePLMN)
+        let card = home.hasSuffix("卡") ? home : home + "卡"
+        guard !servingPLMN.isEmpty else { return card }
+        let serving = servingPLMN.hasPrefix("460") ? UsageCard.carrierLabel(servingPLMN) : "PLMN \(servingPLMN) "
+        return card + (roaming ? " · 漫游接入" : " · ") + serving + "网络"
+    }
+}
+
 struct UsageStatus: Decodable {
     var currentICCID: String
     var blocked: Bool
     var blockedNote: String
     var error: String
     var cards: [UsageCard]
+    var network: UsageNetwork?
     enum CodingKeys: String, CodingKey {
-        case blocked, error, cards
+        case blocked, error, cards, network
         case currentICCID = "current_iccid", blockedNote = "blocked_note"
     }
     var currentCard: UsageCard? { cards.first { $0.current } }

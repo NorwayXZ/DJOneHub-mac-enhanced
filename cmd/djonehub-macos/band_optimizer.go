@@ -106,6 +106,9 @@ type bandOptimizerState struct {
 	ICCID      string       `json:"iccid"`
 	Roaming    bool         `json:"roaming"`
 	Radio      bandRadio    `json:"radio"`
+	// RegStatus is the last EPS registration status read by the band guard
+	// (1 home, 5 roaming).
+	RegStatus int `json:"reg_status"`
 	// LockedBand is read back from the module: the single band it is locked
 	// to, or 0 when several bands are allowed.
 	LockedBand int              `json:"locked_band"`
@@ -361,9 +364,13 @@ func (a *app) readBandRadio() bandRadio {
 	return parseBandRadio(qnw, qcsq)
 }
 
-func (a *app) registered() bool {
+func (a *app) registrationStatus() int {
 	resp, _ := a.runATCommand("AT+CEREG?", 3*time.Second)
-	status := firstNonZeroRegistration(resp)
+	return firstNonZeroRegistration(resp)
+}
+
+func (a *app) registered() bool {
+	status := a.registrationStatus()
 	return status == 1 || status == 5
 }
 
@@ -642,13 +649,15 @@ func (a *app) bandGuardOnce() {
 	b := &a.bands
 	iccid := a.currentICCID()
 	radio := a.readBandRadio()
-	online := a.registered()
+	reg := a.registrationStatus()
+	online := reg == 1 || reg == 5
 	bandResp, _ := a.runATCommand(`AT+QCFG="band"`, 3*time.Second)
 	current := parseLTEBandMask(bandResp)
 	b.mu.Lock()
 	b.loadLocked()
 	b.state.ICCID = iccid
 	b.state.Radio = radio
+	b.state.RegStatus = reg
 	b.state.LockedBand, b.state.MaskKnown = lockedBandOf(current), current != ""
 	full := b.profiles.FullMask
 	profile, known := b.profiles.Cards[iccid]

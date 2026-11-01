@@ -505,6 +505,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             detail = "信号 \(level)/4"
             if let dbm = modem.signalDBM { detail += " · \(dbm) dBm" }
             if let name = modem.operatorName, !name.isEmpty { detail += " · " + name }
+            if usageCenter.status?.network?.roaming == true { detail += " · 漫游" }
         }
         let role = (try? await api.isUsingCellularRoute()) == true ? "4G 正在接管网络" : "4G 供蜂窝代理使用"
         showCellularStatusItem(signalLevel: level, toolTip: "DJOneHub \(role) · \(detail)；点击打开控制面板")

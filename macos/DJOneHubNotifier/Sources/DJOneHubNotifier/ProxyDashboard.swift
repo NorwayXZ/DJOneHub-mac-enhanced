@@ -259,6 +259,9 @@ struct ProxyDashboard: View {
                                         .font(.callout.weight(.medium)).foregroundStyle(accent)
                                 }
                             }
+                            if let network = usage.status?.network, network.registered, !proxy.fleetMode {
+                                roamingBadge(network)
+                            }
                             Text(proxy.status?.location?.isEmpty == false ? proxy.status!.location! : "出口归属地：尚未获取")
                                 .font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
                             if let isp = proxy.status?.isp, !isp.isEmpty { Text(isp).font(.caption).foregroundStyle(.secondary) }
@@ -303,7 +306,12 @@ struct ProxyDashboard: View {
                     metric("活动连接", "\(proxy.status?.connections ?? 0)")
                     if let card = usage.status?.currentCard, !proxy.fleetMode {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("\(card.title)本期流量").font(.caption).foregroundStyle(.secondary)
+                            HStack(spacing: 6) {
+                                Text("\(card.title)本期流量").font(.caption).foregroundStyle(.secondary)
+                                if usage.status?.network?.roaming == true {
+                                    Text("漫游").font(.caption2.weight(.semibold)).foregroundStyle(.orange)
+                                }
+                            }
                             UsageMeter(card: card)
                         }.frame(maxWidth: .infinity, alignment: .leading).padding(16)
                             .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
@@ -440,6 +448,19 @@ struct ProxyDashboard: View {
         let current = proxy.status?.running == true && visit.ip == proxy.status?.publicIP && proxy.status?.history?.last?.firstSeen == visit.firstSeen
         return current ? max(now, last) : last
     }
+    private func roamingBadge(_ network: UsageNetwork) -> some View {
+        HStack(spacing: 8) {
+            Text(network.roaming ? "漫游流量" : "本地流量")
+                .font(.caption.weight(.semibold)).foregroundStyle(.white)
+                .padding(.horizontal, 8).padding(.vertical, 3)
+                .background(network.roaming ? Color.orange : accent, in: Capsule())
+            Text(network.detail).font(.callout).foregroundStyle(.secondary)
+        }
+        .help(network.roaming
+              ? "这张卡正在漫游，流量按卡所属运营商的漫游资费计费"
+              : "这张卡在本地网络上，不是漫游流量")
+    }
+
     static func usageText(from start: Date, to end: Date) -> String {
         let minutes = max(0, Int(end.timeIntervalSince(start) / 60))
         switch minutes {

@@ -83,3 +83,23 @@ func TestUsageFollowsTheSIMAndQuota(t *testing.T) {
 		t.Fatalf("calibrated %d MB", got/usageMiB)
 	}
 }
+
+func TestCellularRoaming(t *testing.T) {
+	for _, tt := range []struct {
+		reg           int
+		imsi, serving string
+		want          bool
+	}{
+		{1, "460002", "46000", false}, // CMCC SIM on CMCC
+		{1, "460002", "46001", false}, // mainland SIM on another mainland network
+		{5, "310260", "46000", true},  // US SIM reported as roaming
+		{1, "454120", "46000", true},  // HK travel profile reported as home
+		{5, "460002", "46000", true},  // the module says roaming
+		{1, "310260", "", false},      // serving network not read yet
+		{2, "310260", "46000", false}, // not registered
+	} {
+		if got := cellularRoaming(tt.reg, tt.imsi, tt.serving); got != tt.want {
+			t.Fatalf("reg %d %s on %s: %v", tt.reg, tt.imsi, tt.serving, got)
+		}
+	}
+}

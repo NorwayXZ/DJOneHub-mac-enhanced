@@ -349,6 +349,26 @@ type usageView struct {
 	BlockedNote  string          `json:"blocked_note"`
 	Error        string          `json:"error"`
 	Cards        []usageCardView `json:"cards"`
+	Network      *usageNetwork   `json:"network,omitempty"`
+}
+
+// usageNetwork tells whether the current SIM's data is roaming data.
+type usageNetwork struct {
+	Registered  bool   `json:"registered"`
+	Roaming     bool   `json:"roaming"`
+	HomePLMN    string `json:"home_plmn"`
+	ServingPLMN string `json:"serving_plmn"`
+}
+
+// cellularRoaming reports roaming data. Travel and other foreign profiles
+// often list the visited networks as equivalent home PLMNs, so the module
+// reports home registration (1) while the carrier still bills roaming; a
+// country (MCC) differing between the SIM and the serving network settles it.
+func cellularRoaming(reg int, imsi, servingPLMN string) bool {
+	if reg == 5 {
+		return true
+	}
+	return reg == 1 && len(imsi) >= 3 && len(servingPLMN) >= 3 && imsi[:3] != servingPLMN[:3]
 }
 
 func (l *usageLedger) view(now time.Time) usageView {
@@ -452,9 +472,26 @@ func (a *app) usageOnce() {
 	}
 }
 
+func (a *app) usageView() usageView {
+	v := a.usage.view(time.Now())
+	bands := a.bands.snapshot()
+	if bands.ICCID == "" || bands.ICCID != v.CurrentICCID {
+		return v
+	}
+	n := &usageNetwork{Registered: bands.RegStatus == 1 || bands.RegStatus == 5, ServingPLMN: bands.Radio.PLMN}
+	for _, card := range v.Cards {
+		if card.Current {
+			n.HomePLMN = card.IMSIPrefix
+		}
+	}
+	n.Roaming = n.Registered && cellularRoaming(bands.RegStatus, n.HomePLMN, n.ServingPLMN)
+	v.Network = n
+	return v
+}
+
 func (a *app) usageAPI(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		writeJSON(w, 200, a.usage.view(time.Now()))
+		writeJSON(w, 200, a.usageView())
 		return
 	}
 	var body struct {
@@ -518,5 +555,5 @@ func (a *app) usageAPI(w http.ResponseWriter, r *http.Request) {
 	l.dirty = true
 	l.saveLocked(true)
 	l.mu.Unlock()
-	writeJSON(w, 200, l.view(time.Now()))
+	writeJSON(w, 200, a.usageView())
 }
