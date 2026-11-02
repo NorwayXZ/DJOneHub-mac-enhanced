@@ -42,7 +42,10 @@ func watchExitIP(ctx context.Context, iface, preferred string) (string, string, 
 func (a *app) watchProxyExitOnce(ctx context.Context) {
 	p := &a.proxy
 	before := p.snapshot()
-	if !before.Running || before.PublicIP == "" || before.Phase == "reconnecting" {
+	// An empty IP means the probe after a (re)start failed while the network
+	// was still coming back; keep trying so the App does not stay at
+	// "not detected" until the user probes by hand.
+	if !before.Running || before.Phase == "reconnecting" {
 		return
 	}
 	// Skip while a reconnect, band test or other AT operation is underway.
@@ -60,6 +63,11 @@ func (a *app) watchProxyExitOnce(ctx context.Context) {
 	// Something else (a probe, reconnect or restart) changed the state meanwhile.
 	if p.listener == nil || p.state.PublicIP != before.PublicIP || p.state.CheckedAt != before.CheckedAt || p.state.Phase == "reconnecting" {
 		p.mu.Unlock()
+		return
+	}
+	if before.PublicIP == "" {
+		p.mu.Unlock()
+		p.recordExit(ctx, before.Interface, ip, source)
 		return
 	}
 	if ip == before.PublicIP {

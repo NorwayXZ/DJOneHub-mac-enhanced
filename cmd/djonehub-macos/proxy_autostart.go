@@ -79,12 +79,17 @@ func (a *app) runProxyAutoStart(ctx context.Context) {
 	defer ticker.Stop()
 	watch := time.NewTicker(proxyExitWatchInterval)
 	defer watch.Stop()
+	var lastRetry time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			a.autoStartProxyOnce(ctx)
+			if s := a.proxy.snapshot(); s.Running && s.PublicIP == "" && time.Since(lastRetry) >= 15*time.Second {
+				lastRetry = time.Now()
+				a.watchProxyExitOnce(ctx)
+			}
 		case <-watch.C:
 			a.watchProxyExitOnce(ctx)
 		}

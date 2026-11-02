@@ -29,7 +29,9 @@ import (
 // and a guard restores all bands if a locked band loses service.
 
 const (
-	bandRegisterTimeout = 45 * time.Second
+	bandRegisterTimeout = 60 * time.Second
+	bandSettleWindow    = 20 * time.Second
+	bandReselectEvery   = 12 * time.Second
 	bandDataTimeout     = 25 * time.Second
 	bandSpeedWindow     = 5 * time.Second
 	bandGuardInterval   = 10 * time.Second
@@ -380,15 +382,32 @@ func (a *app) currentICCID() string {
 }
 
 // waitBand waits until the module is registered on want (0 = any band).
+// A roaming SIM keeps reporting its old registration for ~15 s after a band
+// change, then drops to "searching" (CEREG 2) and stays there until network
+// selection is restarted. So for roaming, the registration is trusted only
+// after that drop (or bandSettleWindow without one), and each drop is nudged
+// with a PS attach plus automatic selection, as the signal watchdog does.
 func (a *app) waitBand(ctx context.Context, want int) (bandRadio, error) {
-	deadline := time.Now().Add(bandRegisterTimeout)
+	start := time.Now()
+	deadline := start.Add(bandRegisterTimeout)
+	settled := a.registrationStatus() != 5
+	var nudged time.Time
 	for time.Now().Before(deadline) {
 		select {
 		case <-ctx.Done():
 			return bandRadio{}, ctx.Err()
 		case <-time.After(3 * time.Second):
 		}
-		if !a.registered() {
+		if reg := a.registrationStatus(); reg != 1 && reg != 5 {
+			settled = true
+			if time.Since(nudged) >= bandReselectEvery {
+				nudged = time.Now()
+				_, _ = a.runATCommand("AT+CGATT=1", 5*time.Second)
+				_, _ = a.runATCommand("AT+COPS=0", 5*time.Second)
+			}
+			continue
+		}
+		if !settled && time.Since(start) < bandSettleWindow {
 			continue
 		}
 		radio := a.readBandRadio()
@@ -496,10 +515,20 @@ func (a *app) runBandOptimizer(saveData bool) {
 				log.Printf("band optimizer: proxy restart: %v", e)
 				return
 			}
-			// Re-registering changed the exit; refresh it instead of showing the old IP.
-			if iface, err := proxyInterface(); err == nil {
-				if ip, source, err := probeProxyExit(parent, iface, ""); err == nil {
-					p.recordExit(parent, iface, ip, source)
+			// Re-registering changed the exit; refresh it instead of showing the
+			// old IP. The data session can take a while to come back (roaming
+			// SIMs re-select the network), so keep trying for a while.
+			for deadline := time.Now().Add(90 * time.Second); time.Now().Before(deadline); {
+				if iface, err := proxyInterface(); err == nil {
+					if ip, source, err := probeProxyExit(parent, iface, ""); err == nil {
+						p.recordExit(parent, iface, ip, source)
+						break
+					}
+				}
+				select {
+				case <-parent.Done():
+					return
+				case <-time.After(3 * time.Second):
 				}
 			}
 		}
@@ -760,7 +789,9 @@ func (a *app) bandActionAPI(w http.ResponseWriter, r *http.Request) {
 		cimi, _ := a.runATCommand("AT+CIMI", 3*time.Second)
 		imsi := parseUSBATIMSI(cimi)
 		noteSIMIMSI(imsi)
-		saveData := len(imsi) >= 3 && !strings.HasPrefix(imsi, "460")
+		// Speed decides the band, so measure by default even when roaming;
+		// the client opts into the signal-only test.
+		saveData := false
 		if body.SaveData != nil {
 			saveData = *body.SaveData
 		}

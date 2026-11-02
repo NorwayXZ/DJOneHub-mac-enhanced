@@ -108,7 +108,6 @@ final class BandCenter: ObservableObject {
 struct BandOptimizerPanel: View {
     @EnvironmentObject private var center: BandCenter
     @State private var saveData = false
-    @State private var saveDataTouched = false
     @State private var confirm = false
     @State private var dismissedBanner = ""
     @State private var showResults = false
@@ -184,10 +183,10 @@ struct BandOptimizerPanel: View {
                 }
             }
 
-            Toggle(isOn: Binding(get: { saveData }, set: { saveData = $0; saveDataTouched = true })) {
+            Toggle(isOn: $saveData) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("省流量测试：只看信号质量，不测速").font(.system(size: 12))
-                    Text(status?.roaming == true ? "当前是漫游卡，默认开启（漫游流量贵）" : "国内卡建议关闭，实测速度更准；每个频段约用 10~20 MB")
+                    Text(status?.roaming == true ? "默认关闭：按实测速度选频段；漫游卡每个频段约用 10~20 MB 漫游流量" : "默认关闭：按实测速度选频段，每个频段约用 10~20 MB")
                         .font(.system(size: 10)).foregroundStyle(.secondary)
                 }
             }.toggleStyle(.switch).controlSize(.small).disabled(running)
@@ -198,7 +197,6 @@ struct BandOptimizerPanel: View {
         }
         .padding(.horizontal, 14).padding(.vertical, 11)
         .task { await center.refresh() }
-        .onChange(of: status?.roaming) { roaming in if !saveDataTouched { saveData = roaming ?? false } }
         .alert(profile == nil ? "自动选最优频段？" : "重新测试频段？", isPresented: $confirm) {
             Button("取消", role: .cancel) {}
             Button("开始") { Task { await center.act("optimize", saveData: saveData) } }
