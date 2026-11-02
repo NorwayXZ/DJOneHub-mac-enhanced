@@ -14,6 +14,14 @@ type proxyIPVisit struct {
 	LastSeen  string `json:"last_seen"`
 	Location  string `json:"location"`
 	ISP       string `json:"isp"`
+	// Scamalytics fraud score (0-100) and risk level, filled in the background.
+	FraudScore   *int   `json:"fraud_score,omitempty"`
+	FraudRisk    string `json:"fraud_risk,omitempty"`
+	FraudChecked string `json:"fraud_checked,omitempty"`
+	// IPQualityScore, only when the user entered an API key.
+	IPQSScore   *int     `json:"ipqs_score,omitempty"`
+	IPQSFlags   []string `json:"ipqs_flags,omitempty"`
+	IPQSChecked string   `json:"ipqs_checked,omitempty"`
 }
 
 // Call with p.mu held. History stays on this Mac, separately from transient proxy state.
@@ -70,14 +78,32 @@ func (p *cellularProxy) recordHistoryLocked() {
 			visit.Location = visits[len(visits)-1].Location
 			visit.ISP = visits[len(visits)-1].ISP
 		}
+		visit.FraudScore = visits[len(visits)-1].FraudScore
+		visit.FraudRisk = visits[len(visits)-1].FraudRisk
+		visit.FraudChecked = visits[len(visits)-1].FraudChecked
+		visit.IPQSScore = visits[len(visits)-1].IPQSScore
+		visit.IPQSFlags = visits[len(visits)-1].IPQSFlags
+		visit.IPQSChecked = visits[len(visits)-1].IPQSChecked
 		visits[len(visits)-1] = visit
 	} else {
+		// An IP seen before keeps its known score until it is refreshed.
+		if known := knownFraud(visits, visit.IP); known != nil {
+			visit.FraudScore, visit.FraudRisk, visit.FraudChecked = known.FraudScore, known.FraudRisk, known.FraudChecked
+		}
+		if known := knownIPQS(visits, visit.IP); known != nil {
+			visit.IPQSScore, visit.IPQSFlags, visit.IPQSChecked = known.IPQSScore, known.IPQSFlags, known.IPQSChecked
+		}
 		visits = append(visits, visit)
 	}
 	if len(visits) > maxProxyIPVisits {
 		visits = visits[len(visits)-maxProxyIPVisits:]
 	}
 	p.state.History = visits
+	p.saveHistoryLocked()
+}
+
+func (p *cellularProxy) saveHistoryLocked() {
+	visits := p.state.History
 	b, err := json.MarshalIndent(visits, "", "  ")
 	if err == nil {
 		err = os.MkdirAll(filepath.Dir(p.historyPath), 0700)

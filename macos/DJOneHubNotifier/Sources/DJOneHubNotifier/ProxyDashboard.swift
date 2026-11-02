@@ -7,9 +7,15 @@ struct ProxyIPVisit: Decodable {
     var lastSeen: String
     var location: String
     var isp: String
+    var fraudScore: Int? = nil
+    var fraudRisk: String? = nil
+    var ipqsScore: Int? = nil
+    var ipqsFlags: [String]? = nil
     enum CodingKeys: String, CodingKey {
         case ip, location, isp
         case firstSeen = "first_seen", lastSeen = "last_seen"
+        case fraudScore = "fraud_score", fraudRisk = "fraud_risk"
+        case ipqsScore = "ipqs_score", ipqsFlags = "ipqs_flags"
     }
 }
 
@@ -265,6 +271,10 @@ struct ProxyDashboard: View {
                             Text(proxy.status?.location?.isEmpty == false ? proxy.status!.location! : "出口归属地：尚未获取")
                                 .font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
                             if let isp = proxy.status?.isp, !isp.isEmpty { Text(isp).font(.caption).foregroundStyle(.secondary) }
+                            if let ip = proxy.status?.publicIP, !ip.isEmpty,
+                               let scored = proxy.status?.history?.last(where: { $0.ip == ip && ($0.fraudScore != nil || $0.ipqsScore != nil) }) {
+                                fraudBadge(scored)
+                            }
                             if let v6 = proxy.status?.publicIPv6, !v6.isEmpty, v6 != proxy.status?.publicIP, proxy.status?.running == true {
                                 Text("IPv6 出口：" + v6).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
                                     .help("只支持 IPv6 的网站会从这个地址访问；其余网站仍走上面的 IPv4 出口")
@@ -511,6 +521,11 @@ struct ProxyDashboard: View {
                                         Text("再次出现").font(.caption).foregroundStyle(.orange)
                                     }
                                 }
+                                if visit.fraudScore != nil || visit.ipqsScore != nil {
+                                    fraudBadge(visit)
+                                } else {
+                                    Text("欺诈值：查询中…").font(.caption).foregroundStyle(.secondary)
+                                }
                                 let segment = Self.segment(of: visit.ip)
                                 let segmentUses = segmentCounts[segment] ?? 1
                                 Text("网段 \(segment).x" + (segmentUses > 1 ? " · 记录中共 \(segmentUses) 个 IP" : ""))
@@ -523,12 +538,55 @@ struct ProxyDashboard: View {
                             Divider()
                         }
                     }
-                }.frame(height: min(CGFloat(visits.count) * 105, 315))
+                }.frame(height: min(CGFloat(visits.count) * 125, 375))
                 Text("时间为成功检测到该 IP 的范围；代理运行时每 5 分钟自动复查一次出口，当前 IP 的用时实时累计。停止代理后记录仍保留。")
                     .font(.caption2).foregroundStyle(.secondary)
             }
         }.padding(18).background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
     }
+    /// 欺诈值标签：Scamalytics 按其风险等级着色；填了 IPQS API Key 时再并排显示 IPQS 分数与命中的标记。
+    private func fraudBadge(_ visit: ProxyIPVisit) -> some View {
+        HStack(spacing: 10) {
+            if let score = visit.fraudScore {
+                let (label, color): (String, Color) = switch visit.fraudRisk ?? "" {
+                case "very high": ("极高风险", .red)
+                case "high": ("高风险", .red)
+                case "medium": ("中风险", .orange)
+                case "low": ("低风险", .green)
+                default: (score >= 75 ? "高风险" : score >= 35 ? "中风险" : "低风险", score >= 75 ? .red : score >= 35 ? .orange : .green)
+                }
+                scoreChip("Scamalytics \(score)", label, color)
+                    .help("Scamalytics 欺诈分数（0~100，越低越干净），经宽带查询，不花蜂窝流量；当前 IP 每 12 小时刷新一次")
+            }
+            if let score = visit.ipqsScore {
+                let (label, color): (String, Color) = score >= 85 ? ("高风险", .red) : score >= 75 ? ("可疑", .orange) : ("干净", .green)
+                let flags = (visit.ipqsFlags ?? []).map(Self.ipqsFlagName).joined(separator: "·")
+                scoreChip("IPQS \(score)", flags.isEmpty ? label : label + " · " + flags, color)
+                    .help("IPQualityScore 欺诈分数（0~100；75 以上可疑，85 以上高风险），使用你在设置里填的 API Key 查询；当前 IP 每 24 小时刷新一次")
+            }
+        }
+    }
+
+    private func scoreChip(_ title: String, _ label: String, _ color: Color) -> some View {
+        HStack(spacing: 5) {
+            Text(title).font(.caption.weight(.semibold).monospacedDigit())
+                .padding(.horizontal, 7).padding(.vertical, 2)
+                .background(color.opacity(0.18), in: Capsule()).foregroundStyle(color)
+            Text(label).font(.caption).foregroundStyle(color)
+        }
+    }
+
+    static func ipqsFlagName(_ flag: String) -> String {
+        switch flag {
+        case "proxy": "代理"
+        case "vpn": "VPN"
+        case "tor": "Tor"
+        case "recent_abuse": "近期滥用"
+        case "bot": "机器人流量"
+        default: flag
+        }
+    }
+
     private func metric(_ title: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title).font(.caption).foregroundStyle(.secondary)

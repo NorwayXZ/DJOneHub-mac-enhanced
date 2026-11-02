@@ -151,6 +151,10 @@ struct MoreView: View {
             UsagePanel()
                 .modifier(PhoneCard())
 
+            MoreSectionTitle("IP 欺诈值")
+            FraudScoreSettingsPanel()
+                .modifier(PhoneCard())
+
             MoreSectionTitle("频段优化")
             BandOptimizerPanel()
                 .modifier(PhoneCard())

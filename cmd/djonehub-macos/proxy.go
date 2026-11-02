@@ -76,6 +76,7 @@ type proxyState struct {
 type cellularProxy struct {
 	lifecycle       context.Context
 	historyLoaded   bool
+	fraudFilling    atomic.Bool
 	historyPath     string
 	autoStartLoaded bool
 	mu              sync.Mutex
@@ -780,6 +781,7 @@ func (p *cellularProxy) recordExit(ctx context.Context, iface, ip, source string
 	// The IP is final now; the slower (foreign) geolocation lookup fills in
 	// afterwards so callers and the App are not held up by it.
 	go p.refreshExitIPv6(context.WithoutCancel(ctx), iface, ip)
+	go p.fillFraudScores(context.WithoutCancel(ctx))
 	go func() {
 		lookupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()

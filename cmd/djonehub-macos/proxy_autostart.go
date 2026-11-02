@@ -80,6 +80,7 @@ func (a *app) runProxyAutoStart(ctx context.Context) {
 	watch := time.NewTicker(proxyExitWatchInterval)
 	defer watch.Stop()
 	var lastRetry time.Time
+	go a.proxy.fillFraudScores(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -92,6 +93,7 @@ func (a *app) runProxyAutoStart(ctx context.Context) {
 			}
 		case <-watch.C:
 			a.watchProxyExitOnce(ctx)
+			go a.proxy.fillFraudScores(ctx)
 		}
 	}
 }
