@@ -19,9 +19,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.3.0-proxy-preview.26</string>
+	<string>1.3.0-proxy-preview.27</string>
 	<key>CFBundleVersion</key>
-	<string>44</string>
+	<string>48</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
 	<key>NSContactsUsageDescription</key>

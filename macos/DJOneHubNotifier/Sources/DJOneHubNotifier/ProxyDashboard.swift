@@ -381,7 +381,7 @@ struct ProxyDashboard: View {
             Button("取消", role: .cancel) {}
             Button("断开并重连", role: .destructive) { Task { await proxy.act("reconnect", confirm: true) } }
         } message: {
-            Text("所选模块的代理连接将中断，短信与来电会暂时不可用；其他模块继续工作。IP 由运营商分配，不保证更换；拿到原 IP 时会自动再试一次；两次操作间隔至少 20 秒。")
+            Text("所选模块的代理连接将中断，短信与来电会暂时不可用；其他模块继续工作。IP 由运营商分配，不保证更换；拿到原 IP 时会自动再试一次；两次操作间隔至少 8 秒。")
         }
         .alert("换到新网段？", isPresented: $confirmSegment) {
             Button("取消", role: .cancel) {}

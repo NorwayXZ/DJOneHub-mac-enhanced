@@ -21,10 +21,15 @@ import (
 const proxyAddress = "127.0.0.1:10909"
 
 const (
-	reconnectCooldown = 20 * time.Second
-	// Like a quick airplane-mode toggle: long enough for the network to drop the
-	// session, short enough to keep switching fast.
+	reconnectCooldown = 8 * time.Second
+	// Like a quick airplane-mode toggle. Measured on a roaming SIM, shorter
+	// pauses do not pay off: with 1 s off re-registration took longer and the
+	// old IP came back more often, so the total was no faster. Re-registration
+	// plus data bring-up (~5 s) cannot be skipped: the module refuses to drop
+	// only the default bearer.
 	radioOffDuration = 3 * time.Second
+	// How often recovery checks whether data works again after the radio is on.
+	reconnectPollInterval = 500 * time.Millisecond
 	// A second cycle runs only when the exact same IP comes back; a new IP in the
 	// same segment counts as success because the carrier's NAT pool decides that.
 	maxReconnectAttempts    = 2
@@ -583,7 +588,9 @@ func (a *app) reconnectProxy(iface string, mode reconnectMode) {
 	}
 	ctx, cancel := context.WithTimeout(parent, 20*time.Second+time.Duration(mode.maxAttempts)*reconnectAttemptTimeout)
 	defer cancel()
-	old, oldSource, oldErr := probeProxyExit(ctx, iface, p.snapshot().IPSource)
+	// The light single-request check is enough to remember the old IP; the
+	// parallel HTTPS probe costs a second or more on a roaming SIM.
+	old, oldSource, oldErr := watchExitIP(ctx, iface, p.snapshot().IPSource)
 	p.stop()
 	p.mu.Lock()
 	if oldErr == nil {
@@ -721,14 +728,18 @@ func (a *app) cycleRadio(parent context.Context, ipSource string) (iface, ip, so
 		select {
 		case <-ctx.Done():
 			return "", "", "", fmt.Errorf("recovery timed out: %v", last)
-		case <-time.After(2 * time.Second):
+		case <-time.After(reconnectPollInterval):
 		}
 		current, err := proxyInterface()
 		if err != nil {
 			last = err
 			continue
 		}
-		ip, source, err := probeProxyExit(ctx, current, ipSource)
+		// Each check is bounded so one stalled request while the data path is
+		// still coming up does not delay noticing that it works.
+		attempt, cancelAttempt := context.WithTimeout(ctx, 3*time.Second)
+		ip, source, err := watchExitIP(attempt, current, ipSource)
+		cancelAttempt()
 		if err != nil {
 			last = err
 			continue

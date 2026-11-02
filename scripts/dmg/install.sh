@@ -19,6 +19,13 @@ echo "DJOneHub 安装：$SRC_APP -> $DEST"
 # 1. 停止旧的服务与通知助手
 launchctl bootout "gui/$UID_NUM/com.jamie.djonehub" >/dev/null 2>&1 || true
 launchctl bootout "gui/$UID_NUM/com.jamie.djonehub-notifier" >/dev/null 2>&1 || true
+# bootout returns before launchd has removed the service; bootstrapping too
+# early fails with "5: Input/output error", so wait for both to be gone.
+for i in {1..50}; do
+  launchctl print "gui/$UID_NUM/com.jamie.djonehub" >/dev/null 2>&1 || \
+    launchctl print "gui/$UID_NUM/com.jamie.djonehub-notifier" >/dev/null 2>&1 || break
+  sleep 0.2
+done
 
 # 2. 复制主程序与运行库
 rm -rf "$RUNTIME"
@@ -92,8 +99,16 @@ cat > "$AGENTS/com.jamie.djonehub-notifier.plist" <<EOF
 </plist>
 EOF
 
-launchctl bootstrap "gui/$UID_NUM" "$AGENTS/com.jamie.djonehub.plist"
-launchctl bootstrap "gui/$UID_NUM" "$AGENTS/com.jamie.djonehub-notifier.plist"
+bootstrap() {
+  for i in {1..10}; do
+    launchctl bootstrap "gui/$UID_NUM" "$AGENTS/$1.plist" 2>/dev/null && return 0
+    launchctl print "gui/$UID_NUM/$1" >/dev/null 2>&1 && return 0
+    sleep 0.5
+  done
+  launchctl bootstrap "gui/$UID_NUM" "$AGENTS/$1.plist"
+}
+bootstrap com.jamie.djonehub
+bootstrap com.jamie.djonehub-notifier
 
 # 5. 等待服务就绪并打开控制台
 for i in {1..150}; do
