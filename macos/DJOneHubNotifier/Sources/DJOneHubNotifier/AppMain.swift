@@ -10,6 +10,7 @@ enum DJOneHubNotifierMain {
             SelfTest.run()
             return
         }
+        if AppInstaller.runIfLauncher() { return }
         let app = NSApplication.shared
         let delegate = AppDelegate(arguments: CommandLine.arguments)
         app.delegate = delegate

@@ -4,6 +4,9 @@ set -eu
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 VERSION=${1:-v1.2.10}
 DMG_NAME="DJOneHub-macOS-universal-${VERSION}.dmg"
+# PARTS holds the runtime and notifier the in-app updater ships; STAGE is what
+# the DMG window shows: DJOneHub.app (runtime embedded) beside /Applications.
+PARTS="${ROOT_DIR}/dist/app-parts-universal"
 STAGE="${ROOT_DIR}/dist/dmg-stage-universal"
 DMG="${ROOT_DIR}/dist/${DMG_NAME}"
 CHECKSUM="${DMG}.sha256"
@@ -67,29 +70,40 @@ for arch in arm64 x86_64; do
 done
 
 echo "==> 3/4 组装安装目录"
-rm -rf "${STAGE}"
-mkdir -p "${STAGE}/DJOneHubNotifier.app/Contents/MacOS" "${STAGE}/DJOneHubNotifier.app/Contents/Resources"
-ditto --norsrc --noextattr --noqtn --noacl "${ROOT_DIR}/dist/release/DJOneHub-macOS-universal-${VERSION}" "${STAGE}/djonehub"
-cp "${BUILD_ROOT}/DJOneHubNotifier-universal" "${STAGE}/DJOneHubNotifier.app/Contents/MacOS/DJOneHubNotifier"
-cp "${NOTIFIER_SRC}/Info.plist" "${STAGE}/DJOneHubNotifier.app/Contents/Info.plist"
-cp "${NOTIFIER_SRC}/Resources/AppIcon.icns" "${STAGE}/DJOneHubNotifier.app/Contents/Resources/AppIcon.icns"
-chmod 755 "${STAGE}/DJOneHubNotifier.app/Contents/MacOS/DJOneHubNotifier"
-codesign --force --deep --sign - "${STAGE}/DJOneHubNotifier.app"
-codesign --verify --deep --strict "${STAGE}/DJOneHubNotifier.app"
-plutil -lint "${STAGE}/DJOneHubNotifier.app/Contents/Info.plist"
+rm -rf "${PARTS}" "${STAGE}"
+mkdir -p "${PARTS}/DJOneHubNotifier.app/Contents/MacOS" "${PARTS}/DJOneHubNotifier.app/Contents/Resources"
+ditto --norsrc --noextattr --noqtn --noacl "${ROOT_DIR}/dist/release/DJOneHub-macOS-universal-${VERSION}" "${PARTS}/djonehub"
+cp "${BUILD_ROOT}/DJOneHubNotifier-universal" "${PARTS}/DJOneHubNotifier.app/Contents/MacOS/DJOneHubNotifier"
+cp "${NOTIFIER_SRC}/Info.plist" "${PARTS}/DJOneHubNotifier.app/Contents/Info.plist"
+cp "${NOTIFIER_SRC}/Resources/AppIcon.icns" "${PARTS}/DJOneHubNotifier.app/Contents/Resources/AppIcon.icns"
+chmod 755 "${PARTS}/DJOneHubNotifier.app/Contents/MacOS/DJOneHubNotifier"
+codesign --force --deep --sign - "${PARTS}/DJOneHubNotifier.app"
+codesign --verify --deep --strict "${PARTS}/DJOneHubNotifier.app"
+plutil -lint "${PARTS}/DJOneHubNotifier.app/Contents/Info.plist"
 for binary in \
-  "${STAGE}/DJOneHubNotifier.app/Contents/MacOS/DJOneHubNotifier" \
-  "${STAGE}/djonehub/bin/djonehub-macos" \
-  "${STAGE}/djonehub/lib/libusb-1.0.0.dylib"
+  "${PARTS}/DJOneHubNotifier.app/Contents/MacOS/DJOneHubNotifier" \
+  "${PARTS}/djonehub/bin/djonehub-macos" \
+  "${PARTS}/djonehub/lib/libusb-1.0.0.dylib"
 do
   for arch in arm64 x86_64; do
     lipo "${binary}" -verify_arch "${arch}"
   done
 done
-cp "${ROOT_DIR}/scripts/dmg/安装 DJOneHub.command" "${STAGE}/安装 DJOneHub.command"
+
+# The DMG app is the same notifier plus the backend runtime and install.sh:
+# opening it installs (or upgrades) into the user's Application Support.
+mkdir -p "${STAGE}"
+LAUNCHER="${STAGE}/DJOneHub.app"
+ditto --norsrc --noextattr --noqtn --noacl "${PARTS}/DJOneHubNotifier.app" "${LAUNCHER}"
+ditto --norsrc --noextattr --noqtn --noacl "${PARTS}/djonehub" "${LAUNCHER}/Contents/Resources/djonehub"
+cp "${ROOT_DIR}/scripts/dmg/install.sh" "${LAUNCHER}/Contents/Resources/install.sh"
+chmod 755 "${LAUNCHER}/Contents/Resources/install.sh"
+codesign --force --deep --sign - "${LAUNCHER}"
+codesign --verify --deep --strict "${LAUNCHER}"
+ln -s /Applications "${STAGE}/Applications"
 cp "${ROOT_DIR}/scripts/dmg/卸载 DJOneHub.command" "${STAGE}/卸载 DJOneHub.command"
 cp "${ROOT_DIR}/scripts/dmg/使用说明.txt" "${STAGE}/使用说明.txt"
-chmod 755 "${STAGE}/安装 DJOneHub.command" "${STAGE}/卸载 DJOneHub.command"
+chmod 755 "${STAGE}/卸载 DJOneHub.command"
 
 if find "${STAGE}" -type f \( -name '*.ko' -o -name '*.armv7' \) | grep -q .; then
   echo "Public DMG unexpectedly contains a module-side runtime." >&2

@@ -1,6 +1,8 @@
 #!/bin/zsh
+# 由 DJOneHub.app 的安装入口调用：install.sh <DJOneHub.app 路径>
+# 把 App 内置的后端运行时和 App 本身装到用户目录，并注册开机自启。
 set -eu
-cd "$(dirname "$0")"
+SRC_APP="$1"
 
 DEST="$HOME/Library/Application Support/DJOneHub"
 RUNTIME="$DEST/runtime"
@@ -12,9 +14,7 @@ if /usr/libexec/PlistBuddy -c 'Print :ProgramArguments' "$AGENTS/com.jamie.djone
   MULTI_MODULE_XML='<string>--multi-module</string>'
 fi
 
-echo "DJOneHub 一键安装"
-echo "安装目录：$DEST"
-echo
+echo "DJOneHub 安装：$SRC_APP -> $DEST"
 
 # 1. 停止旧的服务与通知助手
 launchctl bootout "gui/$UID_NUM/com.jamie.djonehub" >/dev/null 2>&1 || true
@@ -23,13 +23,13 @@ launchctl bootout "gui/$UID_NUM/com.jamie.djonehub-notifier" >/dev/null 2>&1 || 
 # 2. 复制主程序与运行库
 rm -rf "$RUNTIME"
 mkdir -p "$RUNTIME"
-ditto --norsrc --noextattr --noqtn --noacl ./djonehub "$RUNTIME"
+ditto --norsrc --noextattr --noqtn --noacl "$SRC_APP/Contents/Resources/djonehub" "$RUNTIME"
 chmod 755 "$RUNTIME/djonehub" "$RUNTIME/bin/djonehub-macos" "$RUNTIME/lib/libusb-1.0.0.dylib"
 
 # 3. 复制通知助手
 mkdir -p "$NOTIFIER_DIR"
 rm -rf "$NOTIFIER_DIR/DJOneHubNotifier.app"
-ditto --norsrc --noextattr --noqtn --noacl ./DJOneHubNotifier.app "$NOTIFIER_DIR/DJOneHubNotifier.app"
+ditto --norsrc --noextattr --noqtn --noacl "$SRC_APP" "$NOTIFIER_DIR/DJOneHubNotifier.app"
 
 # 4. 注册开机自启
 mkdir -p "$AGENTS" "$HOME/Library/Logs/DJOneHub"
@@ -95,19 +95,14 @@ EOF
 launchctl bootstrap "gui/$UID_NUM" "$AGENTS/com.jamie.djonehub.plist"
 launchctl bootstrap "gui/$UID_NUM" "$AGENTS/com.jamie.djonehub-notifier.plist"
 
-# 5. 等待服务就绪并打开管理页面
-printf '正在启动 DJOneHub'
-ok=0
-for i in {1..50}; do
-  if curl -fsS --max-time 1 http://127.0.0.1:7575/ >/dev/null 2>&1; then ok=1; break; fi
+# 5. 等待服务就绪并打开控制台
+for i in {1..150}; do
+  if curl -fsS --max-time 1 http://127.0.0.1:7575/ >/dev/null 2>&1; then
+    open "$NOTIFIER_DIR/DJOneHubNotifier.app" --args --show-window
+    echo "安装完成"
+    exit 0
+  fi
   sleep 0.2
 done
-if [ "$ok" = 1 ]; then
-  echo "，控制台已打开。"
-  open "$NOTIFIER_DIR/DJOneHubNotifier.app" --args --show-window
-else
-  echo "，未能就绪，请查看 $HOME/Library/Logs/DJOneHub/launchd.log"
-fi
-echo "安装完成：开机自动启动；代理/4G/GPS/提醒等设置请在 App 内调整。"
-echo
-sleep 1
+echo "后台服务未能就绪，请查看 $HOME/Library/Logs/DJOneHub/launchd.log" >&2
+exit 1
