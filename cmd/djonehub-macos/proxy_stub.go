@@ -20,3 +20,5 @@ func boundInterfaceDial(context.Context, string, string, string) (net.Conn, erro
 }
 
 func cellularHasIPv6(string) bool { return false }
+
+func localCellularIPv6(string) string { return "" }

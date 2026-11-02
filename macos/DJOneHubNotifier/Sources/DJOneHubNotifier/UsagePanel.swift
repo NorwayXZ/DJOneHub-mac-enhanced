@@ -7,6 +7,8 @@ struct UsageCycle: Decodable, Hashable {
     var rx: Int64
     var tx: Int64
     var proxy: Int64
+    /// LAN broadcast on the module interface that never reaches the carrier.
+    var local: Int64?
     var percent: Int
 }
 
@@ -255,6 +257,10 @@ struct UsagePanel: View {
             Text(planLine(card)).font(.system(size: 11)).foregroundStyle(.secondary)
             Text("浏览器代理 \(UsageFormat.bytes(card.cycle.proxy)) · 下行 \(UsageFormat.bytes(card.cycle.rx)) · 上行 \(UsageFormat.bytes(card.cycle.tx)) · 累计 \(UsageFormat.bytes(card.total))")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
+            if let local = card.cycle.local, local > 0 {
+                Text("另有 \(UsageFormat.bytes(local)) 局域网广播未计入：macOS 在模块网卡上发的设备发现包，不出模块、不产生流量费")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            }
             if let history = card.history, !history.isEmpty {
                 DisclosureGroup("历史周期") {
                     VStack(alignment: .leading, spacing: 4) {

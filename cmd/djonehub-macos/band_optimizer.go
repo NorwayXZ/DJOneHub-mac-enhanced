@@ -421,6 +421,7 @@ func waitCellularData(ctx context.Context) (string, error) {
 
 // measureCellularSpeed downloads over cellular for bandSpeedWindow and returns MB/s.
 func measureCellularSpeed(ctx context.Context, iface string) (float64, error) {
+	defer beginCellularActivity()()
 	var last error
 	for _, url := range bandSpeedURLs {
 		transport := &http.Transport{Proxy: nil, DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) { return cellularDial(ctx, iface, addr) }, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}, DisableKeepAlives: true}

@@ -180,6 +180,7 @@ func probeProxyExitProvider(ctx context.Context, iface string, provider proxyExi
 }
 
 func fetchProxyExit(ctx context.Context, iface, url string, ipv6Only bool) (string, error) {
+	defer beginCellularActivity()()
 	dial := func(ctx context.Context, _, addr string) (net.Conn, error) { return cellularDial(ctx, iface, addr) }
 	if ipv6Only {
 		dial = func(ctx context.Context, _, addr string) (net.Conn, error) { return cellularDialIPv6(ctx, iface, addr) }

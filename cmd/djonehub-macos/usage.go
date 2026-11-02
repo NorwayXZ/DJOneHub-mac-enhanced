@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -21,6 +22,11 @@ import (
 // 14-byte Ethernet header per packet the carrier never sees. Usage is kept per
 // local day so a billing cycle starting on any day of the month can be
 // summed, and re-summed when the user changes that day.
+//
+// macOS also multicasts discovery traffic (mDNS and the like) on the module's
+// interface all the time. It stops at the module and is never billed, so
+// intervals without any cellular traffic of this app (proxy bytes, exit
+// checks, DNS, speed tests) are kept apart as local traffic.
 
 const (
 	usagePollInterval  = 10 * time.Second
@@ -28,7 +34,34 @@ const (
 	usageKeepDays      = 400
 	usageEthernetBytes = 14
 	usageMiB           = 1 << 20
+	// usageActivityGrace covers TCP teardown and late replies after the
+	// app's last cellular activity.
+	usageActivityGrace = 15 * time.Second
 )
+
+var (
+	cellularActiveOps  atomic.Int32
+	cellularLastActive atomic.Int64
+)
+
+// noteCellularActivity marks traffic this app sends over cellular itself.
+func noteCellularActivity() { cellularLastActive.Store(time.Now().UnixNano()) }
+
+// beginCellularActivity marks a longer cellular transfer (exit check, speed
+// test); call the returned func when it ends.
+func beginCellularActivity() func() {
+	cellularActiveOps.Add(1)
+	noteCellularActivity()
+	return func() {
+		noteCellularActivity()
+		cellularActiveOps.Add(-1)
+	}
+}
+
+// cellularActiveSince reports app cellular activity at or after t.
+func cellularActiveSince(t time.Time) bool {
+	return cellularActiveOps.Load() > 0 || cellularLastActive.Load() >= t.UnixNano()
+}
 
 type interfaceCounterReading struct {
 	Rx, Tx, RxPkts, TxPkts uint64
@@ -38,6 +71,9 @@ type usageBytes struct {
 	Rx    int64 `json:"rx"`
 	Tx    int64 `json:"tx"`
 	Proxy int64 `json:"proxy"`
+	// Local is interface traffic outside any cellular activity of this app:
+	// LAN multicast that never leaves the module. It is not counted as used.
+	Local int64 `json:"local,omitempty"`
 }
 
 func (u usageBytes) total() int64 { return u.Rx + u.Tx }
@@ -46,6 +82,7 @@ func (u *usageBytes) add(o usageBytes) {
 	u.Rx += o.Rx
 	u.Tx += o.Tx
 	u.Proxy += o.Proxy
+	u.Local += o.Local
 }
 
 type simPlan struct {
@@ -89,6 +126,7 @@ type usageLedger struct {
 	dirty    bool
 	saved    time.Time
 	current  string
+	polled   time.Time
 	err      string
 	stopNote string
 }
@@ -240,7 +278,7 @@ func (l *usageLedger) cardLocked(iccid string, now time.Time) *simUsageCard {
 
 // record books the bytes used since the last reading to iccid (the SIM seen
 // most recently; nothing flows while no SIM is present).
-func (l *usageLedger) record(dir, iccid, iface string, reading interfaceCounterReading, proxy uint64, now time.Time) {
+func (l *usageLedger) record(dir, iccid, iface string, reading interfaceCounterReading, proxy uint64, now time.Time, activeSince func(time.Time) bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.loadLocked(dir)
@@ -248,6 +286,11 @@ func (l *usageLedger) record(dir, iccid, iface string, reading interfaceCounterR
 		l.current = iccid
 	}
 	delta := usageDelta(l.file.Counter, iface, reading, proxy)
+	// The first interval after a restart spans unknown activity: count it.
+	if !l.polled.IsZero() && delta.Proxy == 0 && !activeSince(l.polled.Add(-usageActivityGrace)) {
+		delta = usageBytes{Local: delta.Rx + delta.Tx}
+	}
+	l.polled = now
 	l.file.Counter = &usageCounterState{Iface: iface, interfaceCounterReading: reading, Proxy: proxy}
 	l.dirty = true
 	if l.current != "" {
@@ -327,6 +370,7 @@ type usageCycleView struct {
 	Rx      int64  `json:"rx"`
 	Tx      int64  `json:"tx"`
 	Proxy   int64  `json:"proxy"`
+	Local   int64  `json:"local"`
 	Percent int    `json:"percent"`
 }
 
@@ -383,7 +427,7 @@ func (l *usageLedger) view(now time.Time) usageView {
 		for i := 0; i < 13; i++ {
 			start, end := billingCycle(at, card.Plan.CycleDay)
 			u := card.cycleUsage(start, end, true)
-			cycle := usageCycleView{Start: start.Format("2006-01-02"), End: end.Format("2006-01-02"), Used: u.total(), Rx: u.Rx, Tx: u.Tx, Proxy: u.Proxy}
+			cycle := usageCycleView{Start: start.Format("2006-01-02"), End: end.Format("2006-01-02"), Used: u.total(), Rx: u.Rx, Tx: u.Tx, Proxy: u.Proxy, Local: u.Local}
 			if card.Plan.QuotaMB > 0 {
 				cycle.Percent = int(u.total() * 100 / (card.Plan.QuotaMB * usageMiB))
 			}
@@ -450,7 +494,7 @@ func (a *app) usageOnce() {
 	}
 	p := &a.proxy
 	now := time.Now()
-	a.usage.record(a.usageDir(), iccid, iface, reading, p.uploaded.Load()+p.downloaded.Load(), now)
+	a.usage.record(a.usageDir(), iccid, iface, reading, p.uploaded.Load()+p.downloaded.Load(), now, cellularActiveSince)
 	if a.usage.needsIMSI(iccid) && a.tryModuleOperation() {
 		cimi, _ := a.runATCommand("AT+CIMI", 3*time.Second)
 		a.moduleOperationMu.Unlock()

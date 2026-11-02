@@ -70,6 +70,21 @@ func boundProxyDial(ctx context.Context, iface, address string) (net.Conn, error
 	return boundInterfaceDial(ctx, iface, network, address)
 }
 
+// localCellularIPv6 is the source address the kernel picks for IPv6 over
+// iface, which is the IPv6 exit (carriers do not NAT IPv6). Connecting a UDP
+// socket sends nothing.
+func localCellularIPv6(iface string) string {
+	c, err := boundInterfaceDial(context.Background(), iface, "udp6", "[2400:3200::1]:53")
+	if err != nil {
+		return ""
+	}
+	defer c.Close()
+	if addr, ok := c.LocalAddr().(*net.UDPAddr); ok && isPublicIPv6(addr.IP) {
+		return addr.IP.String()
+	}
+	return ""
+}
+
 // cellularHasIPv6 reports whether the module handed this Mac a global IPv6
 // address (SLAAC from the carrier prefix), i.e. the bearer carries IPv6.
 func cellularHasIPv6(iface string) bool {
@@ -97,6 +112,7 @@ func boundInterfaceDial(ctx context.Context, iface, network, address string) (ne
 	if err != nil {
 		return nil, err
 	}
+	noteCellularActivity()
 	d := net.Dialer{Control: func(network, _ string, raw syscall.RawConn) error {
 		var bindErr error
 		err := raw.Control(func(fd uintptr) {

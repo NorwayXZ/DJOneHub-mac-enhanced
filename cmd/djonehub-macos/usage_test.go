@@ -52,12 +52,13 @@ func TestUsageDeltaSurvivesCounterResets(t *testing.T) {
 func TestUsageFollowsTheSIMAndQuota(t *testing.T) {
 	dir := t.TempDir()
 	var l usageLedger
+	always := func(time.Time) bool { return true }
 	now := time.Date(2026, 11, 20, 10, 0, 0, 0, time.Local)
-	l.record(dir, "8986A", "en15", interfaceCounterReading{Rx: 1000}, 0, now)
-	l.record(dir, "8986A", "en15", interfaceCounterReading{Rx: 1000 + 600*usageMiB}, 0, now)
-	l.record(dir, "8901B", "en15", interfaceCounterReading{Rx: 1000 + 700*usageMiB}, 0, now)
+	l.record(dir, "8986A", "en15", interfaceCounterReading{Rx: 1000}, 0, now, always)
+	l.record(dir, "8986A", "en15", interfaceCounterReading{Rx: 1000 + 600*usageMiB}, 0, now, always)
+	l.record(dir, "8901B", "en15", interfaceCounterReading{Rx: 1000 + 700*usageMiB}, 0, now, always)
 	// Back to the first SIM: its usage continues from where it was.
-	l.record(dir, "8986A", "en15", interfaceCounterReading{Rx: 1000 + 1200*usageMiB}, 0, now)
+	l.record(dir, "8986A", "en15", interfaceCounterReading{Rx: 1000 + 1200*usageMiB}, 0, now, always)
 	l.mu.Lock()
 	a, b := l.file.Cards["8986A"], l.file.Cards["8901B"]
 	l.mu.Unlock()
@@ -101,5 +102,25 @@ func TestCellularRoaming(t *testing.T) {
 		if got := cellularRoaming(tt.reg, tt.imsi, tt.serving); got != tt.want {
 			t.Fatalf("reg %d %s on %s: %v", tt.reg, tt.imsi, tt.serving, got)
 		}
+	}
+}
+
+func TestIdleLANTrafficIsNotCounted(t *testing.T) {
+	var l usageLedger
+	dir := t.TempDir()
+	now := time.Date(2026, 11, 20, 10, 0, 0, 0, time.Local)
+	idle := func(time.Time) bool { return false }
+	active := func(time.Time) bool { return true }
+	l.record(dir, "8986A", "en15", interfaceCounterReading{}, 0, now, idle)
+	// mDNS while nothing of ours used cellular: local only.
+	l.record(dir, "8986A", "en15", interfaceCounterReading{Tx: 1000}, 0, now.Add(10*time.Second), idle)
+	l.record(dir, "8986A", "en15", interfaceCounterReading{Tx: 6000}, 0, now.Add(20*time.Second), idle)
+	// Proxy bytes moved: counted even without other activity.
+	l.record(dir, "8986A", "en15", interfaceCounterReading{Rx: 50000, Tx: 7000}, 40000, now.Add(30*time.Second), idle)
+	// An exit check ran.
+	l.record(dir, "8986A", "en15", interfaceCounterReading{Rx: 60000, Tx: 8000}, 40000, now.Add(40*time.Second), active)
+	c := l.file.Cards["8986A"]
+	if c.Total.Tx != 2000 || c.Total.Rx != 60000 || c.Total.Local != 6000 {
+		t.Fatalf("%+v", c.Total)
 	}
 }
