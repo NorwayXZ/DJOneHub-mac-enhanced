@@ -40,7 +40,7 @@ import (
 //go:embed web/*
 var webAssets embed.FS
 
-const appVersion = "1.3.0-proxy-preview.27"
+const appVersion = "1.3.0-proxy-preview.28"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
@@ -1145,6 +1145,9 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /api/update/prepare", a.prepareUpdateAPI)
 	mux.HandleFunc("GET /api/proxy", a.proxyStatusAPI)
 	mux.HandleFunc("POST /api/proxy", a.proxyActionAPI)
+	mux.HandleFunc("GET /api/proxy/links", a.proxyLinksAPI)
+	mux.HandleFunc("GET /api/proxy/rotate", a.proxyRotateAPI)
+	mux.HandleFunc("POST /api/proxy/rotate", a.proxyRotateAPI)
 	mux.HandleFunc("GET /api/band", a.bandStatusAPI)
 	mux.HandleFunc("POST /api/band", a.bandActionAPI)
 	mux.HandleFunc("GET /api/usage", a.usageAPI)

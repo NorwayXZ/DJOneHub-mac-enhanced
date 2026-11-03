@@ -171,7 +171,7 @@ func serveModuleWorker(socket string) error {
 			writeError(w, 409, "请切回单模块模式配置系统网络；多模块工作进程不会修改系统网关")
 			return
 		}
-		if r.Method != "GET" && r.URL.Path != "/api/proxy" && r.URL.Path != "/api/update/prepare" && !workerExclusive() {
+		if r.Method != "GET" && r.URL.Path != "/api/proxy" && r.URL.Path != "/api/proxy/rotate" && r.URL.Path != "/api/update/prepare" && !workerExclusive() {
 			writeError(w, 409, "辅助工具写操作仅限单模块连接；多模块请使用各自代理控制")
 			return
 		}
@@ -334,6 +334,20 @@ func (c *fleetController) handler(fallback http.Handler) http.Handler {
 	})
 	mux.HandleFunc("GET /api/modules/{id}/proxy", func(w http.ResponseWriter, r *http.Request) { c.forward(w, r, r.PathValue("id"), "/api/proxy") })
 	mux.HandleFunc("POST /api/modules/{id}/proxy", func(w http.ResponseWriter, r *http.Request) { c.forward(w, r, r.PathValue("id"), "/api/proxy") })
+	rotate := func(w http.ResponseWriter, r *http.Request) { c.forward(w, r, r.PathValue("id"), "/api/proxy/rotate") }
+	mux.HandleFunc("GET /api/modules/{id}/proxy/rotate", rotate)
+	mux.HandleFunc("POST /api/modules/{id}/proxy/rotate", rotate)
+	mux.HandleFunc("GET /api/proxy/links", func(w http.ResponseWriter, r *http.Request) {
+		links := []proxyLink{}
+		for _, m := range c.snapshot().Modules {
+			link := proxyLink{ID: m.ID, Name: m.Name, Connected: m.Connected, Socks: fmt.Sprintf("127.0.0.1:%d", m.Port), RotateURL: apiBase(r) + "/api/modules/" + m.ID + "/proxy/rotate"}
+			if m.Proxy != nil {
+				link.PublicIP = m.Proxy.PublicIP
+			}
+			links = append(links, link)
+		}
+		writeJSON(w, 200, links)
+	})
 	mux.HandleFunc("POST /api/update/prepare", func(w http.ResponseWriter, r *http.Request) {
 		if err := c.prepareAllWorkers(); err != nil {
 			writeError(w, 409, err.Error())

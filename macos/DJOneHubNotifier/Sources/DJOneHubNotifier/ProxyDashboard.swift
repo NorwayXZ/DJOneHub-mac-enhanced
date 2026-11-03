@@ -311,6 +311,7 @@ struct ProxyDashboard: View {
                 }
                 .padding(18)
                 .background(LinearGradient(colors: [accent.opacity(0.09), Color(nsColor: .controlBackgroundColor)], startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 18))
+                ProxyLinksPanel()
                 HStack(spacing: 12) {
                     metric("模块接口", proxy.status?.interface.isEmpty == false ? proxy.status!.interface : "等待识别")
                     metric("活动连接", "\(proxy.status?.connections ?? 0)")

@@ -530,44 +530,11 @@ func (a *app) proxyActionAPI(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 400, "需要确认：重连会暂时中断代理、短信和来电")
 			return
 		}
-		if a.demo {
-			writeError(w, 409, "演示模式下不能操作射频")
+		if status, err := a.launchReconnect(mode); err != "" {
+			writeError(w, status, err)
 			return
 		}
-		a.callMu.RLock()
-		busy := a.activeCall != nil
-		a.callMu.RUnlock()
-		if busy {
-			writeError(w, 409, errCallActive)
-			return
-		}
-		p.mu.Lock()
-		cooldown := time.Since(p.lastReconnect) < reconnectCooldown
-		p.mu.Unlock()
-		if cooldown {
-			writeError(w, 429, fmt.Sprintf("两次重连至少间隔 %d 秒，请稍后再试", int(reconnectCooldown.Seconds())))
-			return
-		}
-		iface, err := proxyInterface()
-		if err != nil {
-			writeError(w, 502, friendlyProxyError(err))
-			return
-		}
-		p.mu.Lock()
-		p.lastReconnect = time.Now()
-		p.state.Phase = "reconnecting"
-		p.state.ReconnectSeconds = 0
-		p.state.ReconnectAttempts = 0
-		p.state.ReconnectMode = mode.name
-		p.state.ReconnectMax = mode.maxAttempts
-		p.state.ReconnectNote = ""
-		p.state.ReconnectTried = nil
-		p.state.AvoidHours = mode.avoidHours
-		p.state.Error = ""
-		p.mu.Unlock()
-		p.stopRotation.Store(false)
 		unlock = false
-		go func() { defer a.moduleOperationMu.Unlock(); a.reconnectProxy(iface, mode) }()
 		writeJSON(w, 202, p.snapshot())
 		return
 	default:
@@ -576,6 +543,47 @@ func (a *app) proxyActionAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, p.snapshot())
 }
+// launchReconnect starts a reconnect in the background. The caller holds
+// moduleOperationMu; on success the reconnect releases it, otherwise the
+// caller still owns it and gets the status and message to report.
+func (a *app) launchReconnect(mode reconnectMode) (int, string) {
+	p := &a.proxy
+	if a.demo {
+		return 409, "演示模式下不能操作射频"
+	}
+	a.callMu.RLock()
+	busy := a.activeCall != nil
+	a.callMu.RUnlock()
+	if busy {
+		return 409, errCallActive
+	}
+	p.mu.Lock()
+	cooldown := time.Since(p.lastReconnect) < reconnectCooldown
+	p.mu.Unlock()
+	if cooldown {
+		return 429, fmt.Sprintf("两次重连至少间隔 %d 秒，请稍后再试", int(reconnectCooldown.Seconds()))
+	}
+	iface, err := proxyInterface()
+	if err != nil {
+		return 502, friendlyProxyError(err)
+	}
+	p.mu.Lock()
+	p.lastReconnect = time.Now()
+	p.state.Phase = "reconnecting"
+	p.state.ReconnectSeconds = 0
+	p.state.ReconnectAttempts = 0
+	p.state.ReconnectMode = mode.name
+	p.state.ReconnectMax = mode.maxAttempts
+	p.state.ReconnectNote = ""
+	p.state.ReconnectTried = nil
+	p.state.AvoidHours = mode.avoidHours
+	p.state.Error = ""
+	p.mu.Unlock()
+	p.stopRotation.Store(false)
+	go func() { defer a.moduleOperationMu.Unlock(); a.reconnectProxy(iface, mode) }()
+	return 202, ""
+}
+
 func (a *app) reconnectProxy(iface string, mode reconnectMode) {
 	a.moduleVoiceOpMu.Lock()
 	defer a.moduleVoiceOpMu.Unlock()
