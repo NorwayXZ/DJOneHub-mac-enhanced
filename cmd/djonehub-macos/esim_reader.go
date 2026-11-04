@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/damonto/euicc-go/driver"
 	"github.com/iniwex5/vohive/internal/esim"
@@ -66,7 +67,7 @@ func (a *app) lockModuleUnlessReader(w http.ResponseWriter, r *http.Request) (fu
 	if isReaderRequest(r) {
 		return func() {}, true
 	}
-	if !a.tryModuleOperation() {
+	if !a.waitModuleOperation(time.Minute) {
 		writeError(w, 409, errModuleBusy)
 		return nil, false
 	}

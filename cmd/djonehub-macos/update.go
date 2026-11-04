@@ -17,6 +17,20 @@ func (a *app) tryModuleOperation() bool {
 	return true
 }
 
+// waitModuleOperation is tryModuleOperation for actions the user started:
+// background loops such as signal recovery hold the module for a few seconds
+// at a time, so wait for them instead of failing straight away.
+func (a *app) waitModuleOperation(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for !a.tryModuleOperation() {
+		if time.Now().After(deadline) || a.updatePending.Load() {
+			return false
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return true
+}
+
 // endUpdateLease undoes beginUpdateLease when the restart it prepared for
 // did not happen; the proxy watchdog restarts the proxy.
 func (a *app) endUpdateLease() {
