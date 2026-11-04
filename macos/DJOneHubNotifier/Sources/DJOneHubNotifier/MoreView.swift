@@ -38,6 +38,7 @@ struct MoreView: View {
     @State private var useReader = false
     @State private var readerError: String?
     @State private var showMacProfileConfirm = false
+    @State private var esimLoadStarted = Date()
 
     private var profiles: [ESIMProfile] {
         esim?.profiles?.flatMap { $0.profiles ?? [] } ?? []
@@ -209,6 +210,22 @@ struct MoreView: View {
                     Divider().padding(.leading, 12)
                 }
                 switchBanner
+                if !useReader, let issue = esimHealth?.networkIssue {
+                    NetworkIssueBanner(issue: issue).padding([.horizontal, .top], 10)
+                }
+                if esim == nil && !(useReader && readerError != nil) {
+                    BusyBanner(title: L10n.t("正在读取卡片信息"), started: esimLoadStarted,
+                               hint: L10n.t("第一次读卡要逐个读出卡里的号码，约 10–60 秒；读过之后再打开会立即显示。"))
+                        .padding([.horizontal, .top], 10)
+                } else if esim?.refreshing == true {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text(L10n.t("先显示上次读到的信息，正在重新读卡核对…"))
+                            .font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 14).padding(.top, 10)
+                }
                 MoreInfoRow(label: L10n.t("卡片类型"), value: esimCardType)
                 if let firmware = esim?.chipInfo?.firmware, !firmware.isEmpty {
                     Divider().padding(.leading, 12)
@@ -384,6 +401,7 @@ struct MoreView: View {
             .sheet(item: $renameProfile) { profile in
                 ESIMProfileRenameSheet(profile: profile) { name in
                     Task {
+                        Toast.shared.show(L10n.t("正在修改名称…"), .progress)
                         do {
                             try await calls.apiClient.renameESIMProfile(iccid: profile.iccid ?? "", name: name, reader: useReader)
                             message = L10n.t("Profile 名称已修改")
@@ -411,6 +429,7 @@ struct MoreView: View {
                 Button(L10n.t("删除"), role: .destructive) {
                     if let profile = deleteProfile {
                         Task {
+                            Toast.shared.show(L10n.t("正在删除 ") + profile.displayName + "…", .progress)
                             do {
                                 try await calls.apiClient.deleteESIMProfile(iccid: profile.iccid ?? "", reader: useReader)
                                 message = L10n.t("Profile 已删除")
@@ -451,7 +470,10 @@ struct MoreView: View {
                     Button {
                         Task { await runAT() }
                     } label: {
-                        Text(L10n.t("发送"))
+                        HStack(spacing: 6) {
+                            if atBusy { ProgressView().controlSize(.small) }
+                            Text(atBusy ? L10n.t("等待回复…") : L10n.t("发送"))
+                        }
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.regular)
@@ -480,7 +502,19 @@ struct MoreView: View {
                 if let p = try? await calls.apiClient.cellularPolicy() {
                     policy = p
                 }
+                // Keeps registration and the network diagnosis current.
+                if !useReader, switchingTo == nil, let h = try? await calls.apiClient.esimHealth() {
+                    esimHealth = h
+                }
             }
+        }
+        .onChange(of: switchResult?.0) { text in
+            guard let text, let ok = switchResult?.1 else { return }
+            Toast.shared.show(text, ok ? .success : .failure)
+        }
+        .onChange(of: message) { text in
+            guard !text.isEmpty else { return }
+            Toast.shared.show(text, Self.looksLikeFailure(text) ? .failure : .success)
         }
         .confirmationDialog("切换到 iPhone / iPad 模式？", isPresented: $showMobileProfileConfirm, titleVisibility: .visible) {
             Button("关闭 USB 音频并保存") { Task { await applyUSBProfile("mobile") } }
@@ -536,6 +570,7 @@ struct MoreView: View {
     }
 
     private func applyUSBProfile(_ mode: String) async {
+        Toast.shared.show(mode == "mobile" ? "正在保存 iPhone / iPad 模式…" : "正在恢复 Mac 完整模式…", .progress)
         busy = true
         defer { busy = false }
         do {
@@ -555,6 +590,7 @@ struct MoreView: View {
     }
 
     private func reboot() async {
+        Toast.shared.show(L10n.t("正在重启模块…"), .progress)
         do {
             try await calls.apiClient.rebootModule()
             message = L10n.t("已发送模块重启指令")
@@ -634,8 +670,27 @@ struct MoreView: View {
             do { esim = try await calls.apiClient.esimOverview(reader: true); readerError = nil }
             catch { esim = nil; readerError = error.localizedDescription }
         } else {
+            esimLoadStarted = Date()
             esim = try? await calls.apiClient.esimOverview()
+            // Right after a module restart the backend is still connecting: retry.
+            var tries = 0
+            while esim == nil, tries < 30, !Task.isCancelled {
+                tries += 1
+                try? await Task.sleep(for: .seconds(3))
+                esim = try? await calls.apiClient.esimOverview()
+            }
+            // A saved copy was shown: poll until the card has been read again.
+            tries = 0
+            while esim?.refreshing == true, tries < 40, !Task.isCancelled {
+                tries += 1
+                try? await Task.sleep(for: .seconds(3))
+                if let fresh = try? await calls.apiClient.esimOverview() { esim = fresh }
+            }
         }
+    }
+
+    private static func looksLikeFailure(_ text: String) -> Bool {
+        ["失败", "错误", "无法", "不可用", "超时", "未通过", "error", "Error", "请", "没"].contains { text.contains($0) }
     }
 
     private static func sameICCID(_ a: String?, _ b: String?) -> Bool {
@@ -651,6 +706,7 @@ struct MoreView: View {
         switchResult = nil
         switchStarted = Date()
         switchStage = L10n.t("正在给卡发送切换指令（约 10–60 秒）")
+        Toast.shared.show(L10n.t("正在切换到 ") + profile.displayName + "…", .progress)
         defer { switchingTo = nil }
         if useReader {
             // The reader card is offline: the switch is done once the card says so.
@@ -695,8 +751,9 @@ struct MoreView: View {
         }
         await reloadESIM()
         esimHealth = try? await calls.apiClient.esimHealth()
+        let issue = esimHealth?.networkIssue.map { "：" + $0.title + "。" + $0.detail }
         switchResult = (onCard
-            ? L10n.t("已切换到 ") + profile.displayName + L10n.t("，但 5 分钟内没注册上网络：可能没开通、已停机或当地没有信号。")
+            ? L10n.t("已切换到 ") + profile.displayName + (issue ?? L10n.t("，但 5 分钟内没注册上网络：可能没开通、已停机或当地没有信号。"))
             : L10n.t("5 分钟内没读到新号码。可以点「重启模块」再看看。"), false)
     }
 
@@ -892,11 +949,14 @@ struct MoreActionButton: View {
                 running = false
             }
         } label: {
-            Text(running ? L10n.t("处理中…") : title)
-                .font(.system(size: 12, weight: .medium))
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
-                .frame(maxWidth: .infinity)
+            HStack(spacing: 6) {
+                if running { ProgressView().controlSize(.small) }
+                Text(running ? L10n.t("处理中…") : title)
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+            }
+            .frame(maxWidth: .infinity)
         }
         .buttonStyle(.bordered)
         .controlSize(.regular)

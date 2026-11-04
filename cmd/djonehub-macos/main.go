@@ -40,7 +40,7 @@ import (
 //go:embed web/*
 var webAssets embed.FS
 
-const appVersion = "1.3.0-proxy-preview.42"
+const appVersion = "1.3.0-proxy-preview.43"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
@@ -468,6 +468,7 @@ func (a *app) initUSBATESIMManager() {
 	}
 	if a.installESIMManager(esimManager, true) {
 		log.Printf("eSIM manager is available over USB AT with profile switching enabled")
+		go warmESIMOverview(esimManager)
 	}
 }
 
@@ -1080,6 +1081,7 @@ func (a *app) signalRecoveryOnce() {
 			log.Printf("cellular signal recovered: registration=%d signal=%d dBm", reg, signal)
 		}
 		a.lostSignalCount = 0
+		noteNetworkRegistered()
 	} else {
 		a.lostSignalCount++
 		if a.lostSignalCount <= 3 {
@@ -1089,7 +1091,9 @@ func (a *app) signalRecoveryOnce() {
 		}
 		// Without a usable SIM (empty slot, or an eSIM with no enabled
 		// Profile) there is nothing to register, so do not keep rebooting.
-		if a.lostSignalCount >= 3 && a.simReady() {
+		ready := a.simReady()
+		noteNetworkLost(reg, signal, ready)
+		if a.lostSignalCount >= 3 && ready {
 			a.recoverSignal()
 		}
 	}
@@ -1982,7 +1986,7 @@ func smsSubmitOptions(message string) smscodec.SubmitOptions {
 }
 
 func (a *app) executeAT(w http.ResponseWriter, r *http.Request) {
-	if !a.waitModuleOperation(15*time.Second) {
+	if !a.waitModuleOperation(15 * time.Second) {
 		writeError(w, 409, errModuleBusy)
 		return
 	}
@@ -3457,7 +3461,14 @@ func (a *app) esimOverview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "eSIM manager is unavailable")
 		return
 	}
-	overview, err := esimManager.GetEsimOverview()
+	var overview *esim.EsimOverview
+	var refreshing bool
+	var err error
+	if isReaderRequest(r) {
+		overview, err = esimManager.GetEsimOverview()
+	} else {
+		overview, refreshing, err = quickESIMOverview(esimManager)
+	}
 	if err != nil {
 		if isPhysicalSIMESIMProbeError(err) {
 			writeJSON(w, http.StatusOK, map[string]any{
@@ -3470,7 +3481,10 @@ func (a *app) esimOverview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, overview)
+	writeJSON(w, http.StatusOK, struct {
+		*esim.EsimOverview
+		Refreshing bool `json:"refreshing,omitempty"`
+	}{overview, refreshing})
 }
 
 // A normal physical SIM cannot open the GSMA eUICC management AIDs. The
@@ -3492,7 +3506,7 @@ func (a *app) esimHealth(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "eSIM manager is unavailable")
 		return
 	}
-	overview, err := esimManager.GetEsimOverview()
+	overview, _, err := quickESIMOverview(esimManager)
 	if err != nil {
 		if isPhysicalSIMESIMProbeError(err) {
 			writeJSON(w, http.StatusOK, map[string]any{"card_type": "physical_sim"})
@@ -3515,7 +3529,7 @@ func (a *app) esimHealth(w http.ResponseWriter, _ *http.Request) {
 		}
 	}
 	if active == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "message": "eSIM 卡片已识别，但没有已启用的 Profile"})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "message": "eSIM 卡片已识别，但没有已启用的 Profile", "network_issue": currentNetworkIssue()})
 		return
 	}
 
@@ -3540,6 +3554,7 @@ func (a *app) esimHealth(w http.ResponseWriter, _ *http.Request) {
 		"registered":     registered,
 		"signal_dbm":     status.SignalDBM,
 		"network_mode":   status.NetworkMode,
+		"network_issue":  currentNetworkIssue(),
 	})
 }
 

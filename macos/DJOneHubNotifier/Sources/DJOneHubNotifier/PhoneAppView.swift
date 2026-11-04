@@ -104,6 +104,7 @@ struct PhoneAppView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 // Pages load for the selected module; switching modules reloads them.
                 .id(proxy.scopeKey)
+                .overlay { ToastOverlay() }
             }
             .id(settings.language.rawValue)
             if let call = calls.activeCall {

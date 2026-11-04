@@ -1311,6 +1311,15 @@ func cloneOverview(overview *EsimOverview) *EsimOverview {
 	}
 }
 
+// CachedOverview returns the overview already in memory, or nil when the
+// next GetEsimOverview would have to read the card.
+func (m *Manager) CachedOverview() *EsimOverview {
+	if m == nil {
+		return nil
+	}
+	return cloneOverview(m.cachedOverview())
+}
+
 func (m *Manager) cachedOverview() *EsimOverview {
 	m.cacheMu.RLock()
 	defer m.cacheMu.RUnlock()

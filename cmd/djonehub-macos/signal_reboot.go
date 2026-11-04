@@ -10,7 +10,10 @@ import (
 // throttle lives in a file; in memory it reset with every reboot and a module
 // that could not find a network was rebooted every couple of minutes, never
 // getting the time a roaming SIM needs to scan all bands.
-func signalRebootPath() string {
+func signalRebootPath() string { return moduleStatePath("last-signal-reboot") }
+
+// moduleStatePath is where this module's worker keeps a file across restarts.
+func moduleStatePath(name string) string {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return ""
@@ -22,7 +25,7 @@ func signalRebootPath() string {
 		}
 		base = filepath.Join(base, "modules", scopedModuleID)
 	}
-	return filepath.Join(base, "last-signal-reboot")
+	return filepath.Join(base, name)
 }
 
 func lastSignalReboot() time.Time {

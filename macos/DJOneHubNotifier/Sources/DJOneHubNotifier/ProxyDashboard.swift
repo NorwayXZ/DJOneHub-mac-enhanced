@@ -46,8 +46,10 @@ struct CellularProxyStatus: Decodable {
     var connections: Int
     var uploaded: UInt64
     var downloaded: UInt64
+    var networkIssue: NetworkIssue? = nil
     enum CodingKeys: String, CodingKey {
         case location, isp, history
+        case networkIssue = "network_issue"
         case reconnectSeconds = "reconnect_seconds", reconnectAttempts = "reconnect_attempts"
         case autoStart = "auto_start"
         case reconnectMode = "reconnect_mode", reconnectMax = "reconnect_max", reconnectNote = "reconnect_note"
@@ -127,6 +129,8 @@ final class ProxyCenter: ObservableObject {
     @Published var selectedID: String? = UserDefaults.standard.string(forKey: "djonehub.selectedModule")
     @Published var error: String?
     @Published private var busyIDs: Set<String> = []
+    /// The button the user pressed, while it runs: shown with a seconds counter.
+    @Published var activeAction: (title: String, started: Date)?
     var previewOnly = false
     var onStatusChange: ((CellularProxyStatus?) -> Void)?
     let api: DJOneHubAPI
@@ -194,17 +198,48 @@ final class ProxyCenter: ObservableObject {
         // Stopping further segment attempts must work while the reconnect keeps the module busy.
         guard action == "stop_reconnect" || !busyIDs.contains(key), !unavailable else { return }
         busyIDs.insert(key)
-        defer { busyIDs.remove(key) }
+        let title = Self.actionTitle(action)
+        activeAction = (title, Date())
+        Toast.shared.show(title + "…", .progress)
+        defer { busyIDs.remove(key); activeAction = nil }
         do {
             let result = try await api.proxyAction(action, confirm: confirm, moduleID: id, avoidHours: avoidHours)
             if id == selectedID || !fleetMode { status = result; error = nil }
             await refresh()
-        } catch { if id == selectedID || !fleetMode { self.error = error.localizedDescription } }
+            Toast.shared.show(Self.actionDone(action, status: status), status?.error.isEmpty == false ? .failure : .success)
+        } catch {
+            if id == selectedID || !fleetMode { self.error = error.localizedDescription }
+            Toast.shared.show(title + "失败：" + error.localizedDescription, .failure)
+        }
+    }
+    static func actionTitle(_ action: String) -> String {
+        switch action {
+        case "start": return "正在启动蜂窝代理"
+        case "stop": return "正在停止代理"
+        case "probe": return "正在检测出口 IP"
+        case "reconnect": return "正在重连并换 IP"
+        case "reconnect_clean": return "正在换干净 IP"
+        case "reconnect_segment": return "正在换到新网段"
+        case "stop_reconnect": return "正在停止后续尝试"
+        default: return "正在处理"
+        }
+    }
+    static func actionDone(_ action: String, status: CellularProxyStatus?) -> String {
+        if let error = status?.error, !error.isEmpty { return error }
+        let ip = status?.publicIP.isEmpty == false ? status!.publicIP : nil
+        switch action {
+        case "start": return status?.running == true ? "代理已启动" + (ip.map { "，出口 " + $0 } ?? "") : "代理没能启动，请看页面上的提示"
+        case "stop": return "代理已停止"
+        case "probe": return ip.map { "出口 IP：" + $0 } ?? "没检测到出口 IP"
+        case "stop_reconnect": return "已停止后续尝试"
+        default: return ip.map { "完成，现在的出口 IP：" + $0 } ?? "已完成"
+        }
     }
     func confirmSelected() async {
         guard !previewOnly, let module = selected else { return }
-        do { try await api.confirmModule(module.id, generation: module.generation); await refresh() }
-        catch { self.error = error.localizedDescription }
+        Toast.shared.show("正在确认设备绑定…", .progress)
+        do { try await api.confirmModule(module.id, generation: module.generation); await refresh(); Toast.shared.show("已绑定 " + module.name + "，十几秒后可以使用", .success) }
+        catch { self.error = error.localizedDescription; Toast.shared.show("绑定失败：" + error.localizedDescription, .failure) }
     }
     func renameSelected(_ name: String) async {
         guard !previewOnly, let id = selectedID else { return }
@@ -321,6 +356,13 @@ struct ProxyDashboard: View {
                             .help("反复开关射频，直到出口落在最近 \(segmentAvoidHours) 小时内没用过的 /24 网段，最多 4 次")
                         if proxy.busy || proxy.reconnecting { ProgressView().controlSize(.small) }
                     }
+                    if let action = proxy.activeAction {
+                        BusyBanner(title: action.title, started: action.started,
+                                   hint: proxy.reconnecting ? "模块正在重新注册网络，通常 10–60 秒" : nil)
+                    }
+                    if let issue = proxy.status?.networkIssue {
+                        NetworkIssueBanner(issue: issue)
+                    }
                     if proxy.awaitingAutoStart {
                         Text("蜂窝网络中断，代理已暂停；模块恢复后会自动重新开启。点“启动蜂窝代理”可立即重试。")
                             .font(.caption).foregroundStyle(.orange)
@@ -435,7 +477,7 @@ struct ProxyDashboard: View {
                                 Circle().fill(module.proxy?.running == true ? Color.green : Color.gray).frame(width: 7, height: 7)
                             }
                             Text(module.address).font(.system(.caption, design: .monospaced))
-                            Text(!module.connected ? "未连接 · 端口保留" : (module.needsConfirmation ? "需确认设备绑定" : (module.proxy?.publicIP.isEmpty == false ? module.proxy!.publicIP : "已连接 · 等待出口检测")))
+                            Text(!module.connected ? "未连接 · 端口保留" : (module.needsConfirmation ? "需确认设备绑定" : (module.proxy?.networkIssue?.title ?? (module.proxy?.publicIP.isEmpty == false ? module.proxy!.publicIP : "已连接 · 等待出口检测"))))
                                 .font(.caption).foregroundStyle(.secondary)
                         }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
                             .background(accent.opacity(proxy.selectedID == module.id ? 0.13 : 0.03), in: RoundedRectangle(cornerRadius: 12))

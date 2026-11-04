@@ -509,12 +509,14 @@ struct ESIMOverview: Codable, Sendable {
     let message: String?
     let chipInfo: ESIMChipInfo?
     let profiles: [ESIMProfileGroup]?
+    /// Shown from the last saved read while the card is read again.
+    var refreshing: Bool? = nil
 
     enum CodingKeys: String, CodingKey {
         case cardType = "card_type"
         case message
         case chipInfo = "chip_info"
-        case profiles
+        case profiles, refreshing
     }
 }
 
@@ -780,9 +782,11 @@ struct ESIMHealth: Codable, Sendable {
     let registered: Bool?
     let signalDBM: Int?
     let networkMode: String?
+    var networkIssue: NetworkIssue? = nil
 
     enum CodingKeys: String, CodingKey {
         case ok, message, registration, registered, imsi
+        case networkIssue = "network_issue"
         case activeProfile = "active_profile"
         case moduleICCID = "module_iccid"
         case operatorName = "operator"
