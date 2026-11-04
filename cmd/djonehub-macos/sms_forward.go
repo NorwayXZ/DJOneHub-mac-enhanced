@@ -59,25 +59,34 @@ type forwardStore struct {
 	mu       sync.Mutex
 	loaded   bool
 	path     string
+	modTime  time.Time
 	settings forwardSettings
 }
 
 var forwarding forwardStore
 
+// loadLocked reads the file when it changed on disk: in multi-module mode
+// every module worker shares it, and any of them may have saved it.
 func (s *forwardStore) loadLocked() {
-	if s.loaded {
+	if !s.loaded {
+		s.loaded = true
+		if s.path == "" {
+			dir, err := os.UserConfigDir()
+			if err != nil {
+				return
+			}
+			s.path = filepath.Join(dir, "DJOneHub", forwardSettingsFile)
+		}
+	}
+	info, err := os.Stat(s.path)
+	if err != nil || info.ModTime().Equal(s.modTime) {
 		return
 	}
-	s.loaded = true
-	if s.path == "" {
-		dir, err := os.UserConfigDir()
-		if err != nil {
-			return
-		}
-		s.path = filepath.Join(dir, "DJOneHub", forwardSettingsFile)
-	}
 	if b, err := os.ReadFile(s.path); err == nil {
-		_ = json.Unmarshal(b, &s.settings)
+		var next forwardSettings
+		if json.Unmarshal(b, &next) == nil {
+			s.settings, s.modTime = next, info.ModTime()
+		}
 	}
 }
 
@@ -100,18 +109,24 @@ func (s *forwardStore) update(change func(*forwardSettings)) error {
 	if s.path == "" {
 		return errors.New("无法确定设置保存位置")
 	}
-	next := s.settings
-	change(&next)
-	if err := os.MkdirAll(filepath.Dir(s.path), 0700); err != nil {
-		return err
-	}
-	b, _ := json.MarshalIndent(next, "", "  ")
-	if err := os.WriteFile(s.path, b, 0600); err != nil {
-		return err
-	}
-	_ = os.Chmod(s.path, 0600)
-	s.settings = next
-	return nil
+	return withSharedFileLock(s.path, func() error {
+		s.loadLocked()
+		next := s.settings
+		change(&next)
+		b, _ := json.MarshalIndent(next, "", "  ")
+		tmp := s.path + ".tmp"
+		if err := os.WriteFile(tmp, b, 0600); err != nil {
+			return err
+		}
+		if err := os.Rename(tmp, s.path); err != nil {
+			return err
+		}
+		s.settings = next
+		if info, err := os.Stat(s.path); err == nil {
+			s.modTime = info.ModTime()
+		}
+		return nil
+	})
 }
 
 // secretHint shows enough of a token to recognise it, never the whole token.
@@ -125,10 +140,34 @@ func secretHint(value string) string {
 	return value[:4] + "…" + value[len(value)-4:]
 }
 
-func smsForwardText(item receivedSMS) (title, body string) {
+// moduleLabel names this module worker's module in pushed messages, so SMS
+// from several modules can be told apart. Empty with a single module.
+func moduleLabel() string {
+	if scopedModuleID == "" {
+		return ""
+	}
+	r, _ := loadFleetRegistry(filepath.Join(fleetStateDir(), "module-bindings.json"))
+	if len(r.Bindings) < 2 {
+		return "" // only one module ever: nothing to tell apart
+	}
+	for _, b := range r.Bindings {
+		if b.ID == scopedModuleID {
+			if b.Name != "" {
+				return b.Name
+			}
+			return fmt.Sprintf("端口 %d", b.Port)
+		}
+	}
+	return scopedModuleID
+}
+
+func smsForwardText(item receivedSMS, module string) (title, body string) {
 	title = "短信 · " + item.Sender
 	if item.Code != "" {
 		title = "验证码 " + item.Code + " · " + item.Sender
+	}
+	if module != "" {
+		title += " · " + module
 	}
 	body = item.Content + "\n\n" + item.Sender + " · " + item.Timestamp.Local().Format("2006-01-02 15:04:05")
 	return title, body
@@ -141,11 +180,12 @@ func (a *app) forwardNewSMS(items []receivedSMS) {
 		return
 	}
 	now := time.Now()
+	module := moduleLabel()
 	for _, item := range items {
 		if !item.Timestamp.IsZero() && now.Sub(item.Timestamp) > forwardMaxAge {
 			continue
 		}
-		title, body := smsForwardText(item)
+		title, body := smsForwardText(item, module)
 		go func() {
 			for _, err := range sendForward(context.Background(), settings, title, body, 3) {
 				log.Printf("SMS forward from %q failed: %v", item.Sender, err)
@@ -162,6 +202,14 @@ func sendForward(ctx context.Context, s forwardSettings, title, body string, att
 	var wg sync.WaitGroup
 	try := func(name string, send func(context.Context) error) {
 		defer wg.Done()
+		// A push problem must never take the backend (and every module) down.
+		defer func() {
+			if r := recover(); r != nil {
+				mu.Lock()
+				failed[name] = fmt.Errorf("推送出错：%v", r)
+				mu.Unlock()
+			}
+		}()
 		var err error
 		for i := 0; i < attempts; i++ {
 			if i > 0 {
@@ -226,7 +274,10 @@ func sendTelegram(ctx context.Context, s forwardSettings, text string) error {
 func postTelegram(ctx context.Context, client *http.Client, target string, payload []byte) error {
 	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, "POST", target, bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, "POST", target, bytes.NewReader(payload))
+	if err != nil {
+		return errors.New("Telegram 机器人 Token 或接口地址格式不对")
+	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
@@ -252,14 +303,22 @@ func sendWeChat(ctx context.Context, s forwardSettings, title, body string) erro
 	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
 	var req *http.Request
+	var err error
 	if s.WeChatService == "serverchan" {
 		form := url.Values{"title": {title}, "desp": {body}}
-		req, _ = http.NewRequestWithContext(ctx, "POST", serverChanBase+url.PathEscape(s.WeChatKey)+".send", strings.NewReader(form.Encode()))
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req, err = http.NewRequestWithContext(ctx, "POST", serverChanBase+url.PathEscape(s.WeChatKey)+".send", strings.NewReader(form.Encode()))
+		if req != nil {
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		}
 	} else {
 		payload, _ := json.Marshal(map[string]string{"token": s.WeChatKey, "title": title, "content": body, "template": "txt"})
-		req, _ = http.NewRequestWithContext(ctx, "POST", pushplusURL, bytes.NewReader(payload))
-		req.Header.Set("Content-Type", "application/json")
+		req, err = http.NewRequestWithContext(ctx, "POST", pushplusURL, bytes.NewReader(payload))
+		if req != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+	}
+	if err != nil {
+		return errors.New("微信推送的 Token / SendKey 格式不对")
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

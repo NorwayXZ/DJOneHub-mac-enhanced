@@ -38,10 +38,7 @@ func (w *fleetChild) Alive() bool {
 	}
 }
 func (w *fleetChild) Request(method, path string, body []byte) (int, []byte, error) {
-	timeout := 27 * time.Second
-	if method == "GET" && (path == "/api/proxy" || path == "/api/health") {
-		timeout = 1500 * time.Millisecond
-	}
+	timeout := fleetRequestTimeout(method, path)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -129,10 +126,6 @@ func newWorkerApp() *app {
 	return a
 }
 
-func workerExclusive() bool {
-	devices, err := discoverFleetDevices()
-	return err == nil && len(devices) == 1 && devices[0].Session == strconv.FormatUint(scopedUSBSession, 10)
-}
 func serveModuleWorker(socket string) error {
 	if scopedModuleID == "" || strings.ContainsAny(scopedModuleID, "/\\") || !strings.HasPrefix(workerProxyAddress, "127.0.0.1:") || socket == "" {
 		return errors.New("invalid worker identity or endpoint")
@@ -167,12 +160,8 @@ func serveModuleWorker(socket string) error {
 	go a.runUsageLedger(ctx)
 	routes := a.routes()
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "GET" && (r.URL.Path == "/api/network/cellular-policy" || r.URL.Path == "/api/network/usbnet") {
+		if r.Method != "GET" && r.URL.Path == "/api/network/cellular-policy" {
 			writeError(w, 409, "请切回单模块模式配置系统网络；多模块工作进程不会修改系统网关")
-			return
-		}
-		if r.Method != "GET" && r.URL.Path != "/api/proxy" && r.URL.Path != "/api/proxy/rotate" && r.URL.Path != "/api/forwarding/sms" && r.URL.Path != "/api/update/prepare" && !workerExclusive() {
-			writeError(w, 409, "辅助工具写操作仅限单模块连接；多模块请使用各自代理控制")
 			return
 		}
 		routes.ServeHTTP(w, r)
@@ -356,8 +345,13 @@ func (c *fleetController) handler(fallback http.Handler) http.Handler {
 		writeJSON(w, 200, map[string]bool{"ready": true})
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/platform" {
+		// The 4G route policy covers every cellular service on this Mac, so the
+		// supervisor applies it itself instead of one module's worker.
+		if r.URL.Path == "/api/platform" || r.URL.Path == "/api/network/cellular-policy" {
 			fallback.ServeHTTP(w, r)
+			return
+		}
+		if c.route(w, r) {
 			return
 		}
 		c.mu.Lock()

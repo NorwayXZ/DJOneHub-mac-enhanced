@@ -14,12 +14,12 @@ struct FleetModeSettings: View {
                 Label(enabled ? "多模块模式已开启" : "当前使用单模块模式", systemImage: "externaldrive.connected.to.line.below")
                     .font(.headline)
                 Spacer()
-                Button(enabled ? "切回单模块模式" : "启用多模块模式（预览）") { confirm = true }
+                Button(enabled ? "切回单模块模式" : "启用多模块模式") { confirm = true }
                     .disabled(busy || !available || proxy.previewOnly)
             }
             Text("每台模块使用独立后台和固定 SOCKS5 端口，从 10909 开始分配。设备断开后保留端口，不自动换用其他 SIM。")
                 .font(.caption).foregroundStyle(.secondary)
-            Text("多模块首版专注蜂窝代理；通话、短信与设备配置工具仅在单模块连接时使用。实际多模块硬件兼容性尚待验证。")
+            Text("插上第二个模块时会自动切到多模块模式。所有功能对每个模块都可用：左上角切换模块，拨号、短信发送、频段、流量、呼叫转移等页面针对选中的模块；来电、短信列表和推送覆盖全部模块，并标明来自哪个模块。Mac 只有一套麦克风和扬声器，同一时间只能在 Mac 上接听一路通话。")
                 .font(.caption).foregroundStyle(.secondary)
             if busy { ProgressView("正在切换并重启后台…").controlSize(.small) }
             if let error { Text(error).font(.caption).foregroundStyle(.orange) }

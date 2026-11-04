@@ -169,6 +169,7 @@ struct SMSForwardPanel: View {
 
 /// 设置 → 呼叫转移：在运营商网络里设置，Mac 关机也照样转到你的手机。
 struct CallForwardPanel: View {
+    @EnvironmentObject private var proxy: ProxyCenter
     private let api = DJOneHubAPI(baseURL: URL(string: "http://127.0.0.1:7575/")!)
     @State private var status: CallForwardStatus?
     @State private var number = ""
@@ -181,6 +182,9 @@ struct CallForwardPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            if proxy.fleetMode, let module = proxy.selected {
+                Label("当前设置：" + module.name + " 里的卡（左上角切换模块）", systemImage: "simcard").font(.system(size: 12, weight: .medium))
+            }
             Text("在运营商网络里设置转移：来电直接打到你填的手机号，Mac 关机或模块离线也照样转。费用按这张卡的运营商规则计算，漫游时转到国内号码可能按国际长途收费。")
                 .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if let status {

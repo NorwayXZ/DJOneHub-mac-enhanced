@@ -43,9 +43,12 @@ func TestCCFCSetCommands(t *testing.T) {
 }
 
 func TestSMSForwardTextLeadsWithTheCode(t *testing.T) {
-	title, body := smsForwardText(receivedSMS{Sender: "Amazon", Content: "Your code is 123456", Code: "123456", Timestamp: time.Now()})
+	title, body := smsForwardText(receivedSMS{Sender: "Amazon", Content: "Your code is 123456", Code: "123456", Timestamp: time.Now()}, "")
 	if title != "验证码 123456 · Amazon" || !strings.HasPrefix(body, "Your code is 123456") {
 		t.Fatal(title, body)
+	}
+	if title, _ := smsForwardText(receivedSMS{Sender: "10086", Content: "余额"}, "模块 2"); title != "短信 · 10086 · 模块 2" {
+		t.Fatal(title)
 	}
 }
 
@@ -78,5 +81,12 @@ func TestTelegramRejectionIsReportedWithoutTheToken(t *testing.T) {
 	err := sendForward(context.Background(), forwardSettings{TelegramToken: "SECRETTOKEN", TelegramChatID: "1", TelegramAPI: server.URL}, "t", "b", 1)["telegram"]
 	if err == nil || !strings.Contains(err.Error(), "Unauthorized") || strings.Contains(err.Error(), "SECRETTOKEN") {
 		t.Fatal(err)
+	}
+}
+
+func TestMalformedPushSettingsFailWithoutCrashing(t *testing.T) {
+	failed := sendForward(context.Background(), forwardSettings{TelegramToken: "12:ab\ncd", TelegramChatID: "1", TelegramAPI: "http://bad host"}, "t", "b", 1)
+	if failed["telegram"] == nil {
+		t.Fatal("expected an error")
 	}
 }

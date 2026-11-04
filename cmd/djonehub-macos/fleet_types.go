@@ -36,6 +36,10 @@ type fleetBinding struct {
 	Name     string `json:"name"`
 	Port     int    `json:"port"`
 	Identity string `json:"identity"`
+	// Confirmed: the user confirmed this USB position once. A module there is
+	// trusted again after a replug or reboot, so an unattended Mac comes back
+	// with every proxy running.
+	Confirmed bool `json:"confirmed,omitempty"`
 }
 type fleetModule struct {
 	fleetBinding
@@ -67,6 +71,15 @@ func fleetIdentity(d fleetDevice, serialCounts map[string]int) (string, bool) {
 	}
 	return fmt.Sprintf("slot-%08x", d.Location), false
 }
+func (r *fleetRegistry) confirmed(id string) bool {
+	for _, b := range r.Bindings {
+		if b.ID == id {
+			return b.Confirmed
+		}
+	}
+	return false
+}
+
 func (r *fleetRegistry) bind(id string) (fleetBinding, error) {
 	for _, b := range r.Bindings {
 		if b.ID == id {
@@ -162,6 +175,12 @@ type fleetController struct {
 	retryAt        map[string]time.Time
 	paused         bool
 	lastError      string
+	// The module with a call in progress, from the last call status sweep,
+	// and the App's audio host registration replayed to every worker.
+	callOwner     string
+	callOwnerAt   time.Time
+	audioHostBody []byte
+	audioHostSent map[string]string
 }
 
 func newFleetController(path string, inventory fleetInventoryFunc, start fleetStartFunc) (*fleetController, error) {
@@ -221,7 +240,7 @@ func (c *fleetController) reconcile() {
 			continue
 		}
 		next[id] = d
-		if reliable {
+		if reliable || c.registry.confirmed(id) {
 			c.approved[id] = d.Session
 		}
 	}
@@ -281,6 +300,15 @@ func (c *fleetController) confirm(id, expectedSession string) error {
 		return errors.New("设备已经重新连接，请刷新后确认")
 	}
 	c.approved[id] = d.Session
+	for i, b := range c.registry.Bindings {
+		if b.ID == id && !b.Confirmed {
+			c.registry.Bindings[i].Confirmed = true
+			if err := saveFleetRegistry(c.path, c.registry); err != nil {
+				c.registry.Bindings[i].Confirmed = false
+				return err
+			}
+		}
+	}
 	return nil
 }
 func (c *fleetController) snapshot() fleetSnapshot {

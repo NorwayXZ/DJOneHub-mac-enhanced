@@ -187,6 +187,7 @@ func (a *app) applyCallPoll(calls []parsedCall, now time.Time) {
 			log.Printf("voice audio routing stopped")
 		}
 		if callEnded {
+			releaseCallAudio()
 			go func() {
 				time.Sleep(1500 * time.Millisecond)
 				a.stopModuleVoiceRoute()
@@ -237,12 +238,14 @@ func (a *app) applyCallPoll(calls []parsedCall, now time.Time) {
 	}
 	// Match MaVo's verified lifecycle: the call is established first and media
 	// starts only after CLCC reports one active voice call.
-	if scopedUSBSession != 0 && !workerExclusive() {
-		return
-	}
 	a.callMu.RLock()
 	swiftAudioHost := a.swiftAudioHost
 	a.callMu.RUnlock()
+	// Several module workers share one Mac microphone and speaker: only the
+	// worker holding the call-audio lock routes media, other calls stay silent.
+	if selected.State == "active" && scopedUSBSession != 0 && !acquireCallAudio() {
+		return
+	}
 	if selected.State == "active" && swiftAudioHost {
 		if err := a.ensureModuleVoiceRoute(); err != nil {
 			log.Printf("module voice route start for native MaVo host failed: %v", err)

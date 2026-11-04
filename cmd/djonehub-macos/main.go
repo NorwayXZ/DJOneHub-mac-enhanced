@@ -40,7 +40,7 @@ import (
 //go:embed web/*
 var webAssets embed.FS
 
-const appVersion = "1.3.0-proxy-preview.30"
+const appVersion = "1.3.0-proxy-preview.31"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
@@ -507,6 +507,9 @@ func serve(instance *app, listen string) {
 		go instance.runBandGuard(ctx)
 		go instance.runUsageLedger(ctx)
 		go runLogRotation(ctx)
+		if instance.modem == nil && multiModuleAuto {
+			go instance.watchForSecondModule(ctx)
+		}
 	}
 
 	if !instance.demo {
@@ -827,9 +830,6 @@ func (a *app) startSMSPoller(ctx context.Context) {
 }
 
 func (a *app) pollSMSOnce() error {
-	if scopedUSBSession != 0 && !workerExclusive() {
-		return nil
-	}
 	if a.demo || a.modem != nil {
 		return nil
 	}
@@ -2461,7 +2461,8 @@ func blockMacNetworkServiceRoute(name string, info macIPv4ServiceInfo) error {
 }
 
 func (a *app) loadNetworkPolicyLocked() error {
-	if a.networkPolicyLoaded {
+	// Module workers reread it: the supervisor saves it for all of them.
+	if a.networkPolicyLoaded && scopedUSBSession == 0 {
 		return nil
 	}
 	if a.networkPolicyPath == "" {

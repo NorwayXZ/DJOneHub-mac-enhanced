@@ -738,7 +738,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         ringtoneStore.startRinging()
         panel.show(
             .incoming(
-                number: NotificationText.displayNumber(call.number),
+                number: NotificationText.displayNumber(call.number) + (call.moduleName.map { " · " + $0 } ?? ""),
                 startedAt: call.startedAt
             ),
             onReject: { [weak self] in

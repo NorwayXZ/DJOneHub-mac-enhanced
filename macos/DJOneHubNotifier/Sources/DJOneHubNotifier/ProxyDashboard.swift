@@ -148,8 +148,14 @@ final class ProxyCenter: ObservableObject {
     private func applySelection() {
         status = selected?.proxy ?? emptyStatus(selected?.address ?? "127.0.0.1:10909")
     }
+    /// Changes when the pages should reload for another module.
+    var scopeKey: String { fleetMode ? "module-" + (selectedID ?? "") : "single" }
+    private func applyScope() {
+        ModuleScope.current = fleetMode && !previewOnly ? selectedID : nil
+    }
     func select(_ id: String) {
         selectedID = id
+        applyScope()
         if !previewOnly { UserDefaults.standard.set(id, forKey: "djonehub.selectedModule") }
         error = selected?.error.isEmpty == false ? selected?.error : nil
         applySelection()
@@ -159,6 +165,7 @@ final class ProxyCenter: ObservableObject {
         do {
             guard let mode = try? await api.moduleMode(), mode.enabled else {
                 fleetMode = false
+                applyScope()
                 modules = []
                 status = try await api.proxyStatus()
                 error = nil
@@ -167,7 +174,11 @@ final class ProxyCenter: ObservableObject {
             let fleet = try await api.fleetStatus()
             fleetMode = true
             modules = fleet.modules
-            if selectedID == nil { selectedID = modules.first?.id }
+            // Keep the choice while that module is plugged in; otherwise show a connected one.
+            if selected?.connected != true, let connected = modules.first(where: { $0.connected }) ?? modules.first {
+                selectedID = connected.id
+            }
+            applyScope()
             error = !fleet.error.isEmpty ? fleet.error : (selected?.error.isEmpty == false ? selected?.error : nil)
             applySelection()
         } catch {
@@ -265,7 +276,7 @@ struct ProxyDashboard: View {
                                         .font(.callout.weight(.medium)).foregroundStyle(accent)
                                 }
                             }
-                            if let network = usage.status?.network, network.registered, !proxy.fleetMode {
+                            if let network = usage.status?.network, network.registered {
                                 roamingBadge(network)
                             }
                             Text(proxy.status?.location?.isEmpty == false ? proxy.status!.location! : "出口归属地：尚未获取")
@@ -315,7 +326,7 @@ struct ProxyDashboard: View {
                 HStack(spacing: 12) {
                     metric("模块接口", proxy.status?.interface.isEmpty == false ? proxy.status!.interface : "等待识别")
                     metric("活动连接", "\(proxy.status?.connections ?? 0)")
-                    if let card = usage.status?.currentCard, !proxy.fleetMode {
+                    if let card = usage.status?.currentCard {
                         VStack(alignment: .leading, spacing: 8) {
                             HStack(spacing: 6) {
                                 Text("\(card.title)本期流量").font(.caption).foregroundStyle(.secondary)
@@ -431,7 +442,7 @@ struct ProxyDashboard: View {
                     }
                 }
             }
-            Text("每个端口固定绑定一个模块。模块断开时停止对应代理；辅助通话、短信和配置工具目前仅在单模块连接时使用。")
+            Text("每个端口固定绑定一个模块。模块断开时停止对应代理。拨号、短信、频段、流量、呼叫转移等页面都针对左上角选中的模块；来电和短信提醒覆盖全部模块。")
                 .font(.caption).foregroundStyle(.secondary)
         }.padding(16).background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
             .alert("确认这个 USB 设备？", isPresented: $confirmBinding) {

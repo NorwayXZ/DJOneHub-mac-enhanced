@@ -10,9 +10,13 @@ struct CallRecord: Codable, Equatable, Sendable, Identifiable {
     let updatedAt: Date
     let endedAt: Date?
     let missed: Bool
+    /// Set in multi-module mode: the module the call came in on.
+    var moduleID: String? = nil
+    var moduleName: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case id, index, direction, state, number, missed
+        case moduleID = "module_id", moduleName = "module_name"
         case startedAt = "started_at"
         case updatedAt = "updated_at"
         case endedAt = "ended_at"
@@ -38,9 +42,17 @@ struct SMSMessage: Codable, Equatable, Sendable {
     let content: String
     let code: String?
     let timestamp: Date
+    /// Set in multi-module mode: the module that received the message.
+    var moduleID: String? = nil
+    var moduleName: String? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case sender, content, code, timestamp
+        case moduleID = "module_id", moduleName = "module_name"
+    }
 
     var identity: String {
-        "\(sender)\u{0}\(timestamp.timeIntervalSince1970)\u{0}\(content)"
+        "\(sender)\u{0}\(timestamp.timeIntervalSince1970)\u{0}\(content)" + (moduleID.map { "\u{0}" + $0 } ?? "")
     }
 }
 
@@ -182,8 +194,30 @@ private struct APIErrorPayload: Decodable {
     let error: String?
 }
 
+/// The module the App's pages show in multi-module mode. Every request names
+/// it in a header so the backend sends it to that module; the backend itself
+/// merges SMS and call status across modules and sends call control to the
+/// module with the call. nil in single-module mode.
+enum ModuleScope {
+    static let header = "X-DJOneHub-Module"
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var value: String?
+    static var current: String? {
+        get { lock.lock(); defer { lock.unlock() }; return value }
+        set { lock.lock(); value = newValue; lock.unlock() }
+    }
+}
+
 struct DJOneHubAPI: Sendable {
     let baseURL: URL
+
+    func makeRequest(_ path: String) -> URLRequest {
+        var request = URLRequest(url: baseURL.appending(path: path))
+        if let module = ModuleScope.current {
+            request.setValue(module, forHTTPHeaderField: ModuleScope.header)
+        }
+        return request
+    }
 
     private static let decoder: JSONDecoder = {
         let decoder = JSONDecoder()
@@ -204,7 +238,7 @@ struct DJOneHubAPI: Sendable {
     }
 
     func isUsingCellularRoute() async throws -> Bool {
-        var request = URLRequest(url: baseURL.appending(path: "api/network/check-4g"))
+        var request = makeRequest("api/network/check-4g")
         request.httpMethod = "POST"
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.timeoutInterval = 5
@@ -246,7 +280,7 @@ struct DJOneHubAPI: Sendable {
     }
 
     func rejectCall() async throws -> RejectResponse {
-        var request = URLRequest(url: baseURL.appending(path: "api/calls/reject"))
+        var request = makeRequest("api/calls/reject")
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -258,7 +292,7 @@ struct DJOneHubAPI: Sendable {
     }
 
     func get<T: Decodable>(path: String, timeout: TimeInterval = 5) async throws -> T {
-        var request = URLRequest(url: baseURL.appending(path: path))
+        var request = makeRequest(path)
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.timeoutInterval = timeout
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -321,8 +355,11 @@ extension DJOneHubAPI {
         )
     }
 
-    func sendSMS(to phone: String, message: String) async throws -> SMSSendResult {
-        var request = URLRequest(url: baseURL.appending(path: "api/sms/send"))
+    /// module sends from that module (a reply goes out on the SIM that received
+    /// the message); nil uses the selected module.
+    func sendSMS(to phone: String, message: String, module: String? = nil) async throws -> SMSSendResult {
+        var request = makeRequest("api/sms/send")
+        if let module { request.setValue(module, forHTTPHeaderField: ModuleScope.header) }
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(["phone": phone, "message": message])
@@ -344,7 +381,7 @@ extension DJOneHubAPI {
     }
 
     private func send<Body: Encodable>(method: String, path: String, body: Body) async throws {
-        var request = URLRequest(url: baseURL.appending(path: path))
+        var request = makeRequest(path)
         request.httpMethod = method
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(body)
@@ -357,7 +394,7 @@ extension DJOneHubAPI {
     }
 
     private func post<Body: Encodable>(path: String, body: Body) async throws {
-        var request = URLRequest(url: baseURL.appending(path: path))
+        var request = makeRequest(path)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(body)
@@ -375,7 +412,7 @@ extension DJOneHubAPI {
         timeout: TimeInterval = 5,
         unreadablePayloadMessage: String? = nil
     ) async throws -> Response {
-        var request = URLRequest(url: baseURL.appending(path: path))
+        var request = makeRequest(path)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(body)

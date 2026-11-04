@@ -31,29 +31,41 @@ type ipqsSettings struct {
 }
 
 type ipqsStore struct {
-	mu     sync.Mutex
-	loaded bool
-	path   string
-	key    string
+	mu      sync.Mutex
+	loaded  bool
+	path    string
+	modTime time.Time
+	key     string
 }
 
 var ipqs ipqsStore
 
+// loadLocked rereads the key when the file changed, since every module
+// worker shares it in multi-module mode.
 func (s *ipqsStore) loadLocked() {
-	if s.loaded {
+	if !s.loaded {
+		s.loaded = true
+		if s.path == "" {
+			dir, err := os.UserConfigDir()
+			if err != nil {
+				return
+			}
+			s.path = filepath.Join(dir, "DJOneHub", ipqsSettingsFile)
+		}
+	}
+	info, err := os.Stat(s.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			s.key, s.modTime = "", time.Time{}
+		}
 		return
 	}
-	s.loaded = true
-	if s.path == "" {
-		dir, err := os.UserConfigDir()
-		if err != nil {
-			return
-		}
-		s.path = filepath.Join(dir, "DJOneHub", ipqsSettingsFile)
+	if info.ModTime().Equal(s.modTime) {
+		return
 	}
 	var settings ipqsSettings
 	if b, err := os.ReadFile(s.path); err == nil && json.Unmarshal(b, &settings) == nil {
-		s.key = strings.TrimSpace(settings.APIKey)
+		s.key, s.modTime = strings.TrimSpace(settings.APIKey), info.ModTime()
 	}
 }
 
@@ -80,6 +92,9 @@ func (s *ipqsStore) setAPIKey(key string) error {
 	}
 	_ = os.Chmod(s.path, 0600)
 	s.key = key
+	if info, err := os.Stat(s.path); err == nil {
+		s.modTime = info.ModTime()
+	}
 	return nil
 }
 

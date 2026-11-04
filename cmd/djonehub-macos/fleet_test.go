@@ -74,7 +74,7 @@ func TestFleetPortsSurviveReorderAndRestart(t *testing.T) {
 		}
 	}
 }
-func TestFleetAnonymousReplugNeedsFreshConfirmation(t *testing.T) {
+func TestFleetAnonymousModuleIsConfirmedOncePerUSBPosition(t *testing.T) {
 	devices := []fleetDevice{{Session: "11", Location: 1}}
 	c, created := makeFleet(t, &devices)
 	c.reconcile()
@@ -87,20 +87,24 @@ func TestFleetAnonymousReplugNeedsFreshConfirmation(t *testing.T) {
 	}
 	c.reconcile()
 	original := created[id][0]
+	// A replug at the same USB position (or a reboot) is trusted again.
 	devices[0].Session = "12"
 	c.reconcile()
-	if original.Alive() || !c.snapshot().Modules[0].NeedsConfirmation {
-		t.Fatal("new session inherited old approval")
-	}
-	if err := c.confirm(id, "11"); err == nil {
-		t.Fatal("stale confirmation accepted")
-	}
-	if err := c.confirm(id, "12"); err != nil {
-		t.Fatal(err)
+	if original.Alive() || c.snapshot().Modules[0].NeedsConfirmation {
+		t.Fatal("confirmed USB position asked again")
 	}
 	c.reconcile()
 	if len(created[id]) != 2 || c.registry.Bindings[0].Port != 10909 {
 		t.Fatal("port changed on replug")
+	}
+	if restored, _ := loadFleetRegistry(c.path); !restored.Bindings[0].Confirmed {
+		t.Fatal("confirmation not saved")
+	}
+	// Another USB position is a new module and still needs one confirmation.
+	devices = append(devices, fleetDevice{Session: "13", Location: 2})
+	c.reconcile()
+	if !c.snapshot().Modules[1].NeedsConfirmation {
+		t.Fatal("new position trusted without confirmation")
 	}
 }
 func TestFleetUnplugOrCrashDoesNotRestartOtherModule(t *testing.T) {

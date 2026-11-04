@@ -43,6 +43,7 @@ func (p *cellularProxy) loadHistoryLocked() {
 				base = filepath.Join(dir, "DJOneHub")
 			}
 			p.historyPath = filepath.Join(base, "modules", scopedModuleID, "proxy-ip-history.json")
+			seedModuleState(filepath.Dir(p.historyPath), filepath.Join(dir, "DJOneHub"), scopedModuleID)
 		}
 	}
 	b, err := os.ReadFile(p.historyPath)

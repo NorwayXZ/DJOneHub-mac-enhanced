@@ -86,7 +86,7 @@ final class SystemNotifications: NSObject, ObservableObject, UNUserNotificationC
     static func messageContent(_ message: SMSMessage, reveal: Bool) -> UNMutableNotificationContent {
         let content = UNMutableNotificationContent()
         content.title = "新短信"
-        content.subtitle = message.sender.isEmpty ? "未知发送方" : message.sender
+        content.subtitle = (message.sender.isEmpty ? "未知发送方" : message.sender) + (message.moduleName.map { " · " + $0 } ?? "")
         content.body = reveal ? String(message.content.prefix(240)) : "收到一条新短信，点击打开 DJOneHub 查看。"
         content.categoryIdentifier = "DJONEHUB_SMS"
         content.threadIdentifier = "djonehub.sms"
@@ -108,7 +108,7 @@ final class SystemNotifications: NSObject, ObservableObject, UNUserNotificationC
             guard await authorize(), enabled else { return }
             let content = UNMutableNotificationContent()
             content.title = "未接来电"
-            content.body = NotificationText.displayNumber(call.number)
+            content.body = NotificationText.displayNumber(call.number) + (call.moduleName.map { " · " + $0 } ?? "")
             content.categoryIdentifier = "DJONEHUB_MISSED"
             content.threadIdentifier = "djonehub.calls"
             content.userInfo = ["destination": "recents"]

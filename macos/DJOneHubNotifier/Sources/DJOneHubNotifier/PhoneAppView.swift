@@ -46,6 +46,7 @@ struct PhoneAppView: View {
     @EnvironmentObject private var calls: CallCenter
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var systemNotifications: SystemNotifications
+    @EnvironmentObject private var proxy: ProxyCenter
     @State private var tab: PhoneTab = .proxy
     @State private var pendingSMSRecipient: String?
 
@@ -57,6 +58,9 @@ struct PhoneAppView: View {
                         Text("DJOneHub").font(.system(size: 22, weight: .bold, design: .rounded))
                         Text("蜂窝连接工作台").font(.caption).foregroundStyle(.secondary)
                     }.padding(.top, 28).padding(.horizontal, 16)
+                    if proxy.fleetMode && !proxy.modules.isEmpty {
+                        ModuleSwitcher().padding(.horizontal, 10).padding(.top, -10)
+                    }
                     VStack(spacing: 6) {
                         ForEach(PhoneTab.allCases) { item in
                             Button { tab = item } label: {
@@ -98,6 +102,8 @@ struct PhoneAppView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // Pages load for the selected module; switching modules reloads them.
+                .id(proxy.scopeKey)
             }
             .id(settings.language.rawValue)
             if let call = calls.activeCall {
@@ -668,6 +674,8 @@ private struct Conversation: Identifiable {
     let sender: String
     let lastContent: String
     let lastTime: Date
+    /// Multi-module mode: the module that last received from this sender.
+    var module: String? = nil
     var id: String { sender }
 }
 
@@ -739,8 +747,14 @@ private struct MessagesView: View {
             }
         }
         return latest
-            .map { Conversation(sender: $0.key, lastContent: $0.value.content, lastTime: $0.value.date) }
+            .map { Conversation(sender: $0.key, lastContent: $0.value.content, lastTime: $0.value.date, module: latestReceived(from: $0.key)?.moduleName) }
             .sorted { $0.lastTime > $1.lastTime }
+    }
+
+    private func latestReceived(from sender: String) -> SMSMessage? {
+        received
+            .filter { $0.sender == sender || ($0.sender.isEmpty && sender == "未知号码") }
+            .max { $0.timestamp < $1.timestamp }
     }
 
     private func threadItems(for sender: String) -> [ThreadItem] {
@@ -928,7 +942,7 @@ private struct MessagesView: View {
         guard !trimmed.isEmpty else { return }
         Task {
             do {
-                _ = try await calls.apiClient.sendSMS(to: sender, message: trimmed)
+                _ = try await calls.apiClient.sendSMS(to: sender, message: trimmed, module: latestReceived(from: sender)?.moduleID)
                 sent.append(SentSMS(phone: sender, content: trimmed, sentAt: Date()))
             } catch {
                 self.error = error.localizedDescription
@@ -1360,8 +1374,15 @@ private struct ConversationRow: View {
                 size: 38
             )
             VStack(alignment: .leading, spacing: 3) {
-                Text(contacts.displayName(for: conversation.sender))
-                    .font(.body.weight(.semibold))
+                HStack(spacing: 6) {
+                    Text(contacts.displayName(for: conversation.sender))
+                        .font(.body.weight(.semibold))
+                    if let module = conversation.module {
+                        Text(module).font(.caption2.weight(.medium)).foregroundStyle(.secondary)
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(Color.secondary.opacity(0.12), in: Capsule())
+                    }
+                }
                 Text(conversation.lastContent)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -2658,5 +2679,45 @@ private struct CallRoundButton: View {
                 .font(.caption)
                 .foregroundStyle(.primary.opacity(0.85))
         }
+    }
+}
+
+/// 多模块时左上角的模块切换：各页面都针对这里选中的模块。
+struct ModuleSwitcher: View {
+    @EnvironmentObject private var proxy: ProxyCenter
+
+    var body: some View {
+        Menu {
+            ForEach(proxy.modules) { module in
+                Button {
+                    proxy.select(module.id)
+                } label: {
+                    Text(module.name + " · " + Self.state(module))
+                }
+                .disabled(!module.connected)
+            }
+        } label: {
+            HStack(spacing: 8) {
+                Circle().fill(proxy.selected?.connected == true ? Color.green : Color.secondary).frame(width: 8, height: 8)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(proxy.selected?.name ?? "选择模块").font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                    Text("\(proxy.modules.filter(\.connected).count) 个模块已连接 · 点此切换").font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.up.chevron.down").font(.system(size: 10)).foregroundStyle(.secondary)
+            }
+            .padding(10)
+            .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+            .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+    }
+
+    static func state(_ module: FleetModule) -> String {
+        if !module.connected { return "未连接" }
+        if module.needsConfirmation { return "需确认绑定" }
+        if let ip = module.proxy?.publicIP, !ip.isEmpty { return ip }
+        return "已连接"
     }
 }

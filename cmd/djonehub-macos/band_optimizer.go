@@ -307,6 +307,16 @@ func (b *bandOptimizer) loadLocked() {
 	if b.path == "" {
 		if dir, err := os.UserConfigDir(); err == nil {
 			b.path = filepath.Join(dir, "DJOneHub", "band-profiles.json")
+			// Each module keeps its own results (bands depend on the module's
+			// place as well as the SIM), starting from the single-module file.
+			if scopedModuleID != "" {
+				shared := b.path
+				b.path = filepath.Join(fleetStateDir(), "modules", scopedModuleID, "band-profiles.json")
+				if _, err := os.Stat(b.path); os.IsNotExist(err) {
+					b.path, shared = shared, b.path
+					defer func() { b.path = shared }()
+				}
+			}
 		}
 	}
 	if data, err := os.ReadFile(b.path); err == nil {
