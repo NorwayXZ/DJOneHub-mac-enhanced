@@ -227,6 +227,9 @@ final class ProxyCenter: ObservableObject {
         case "segment_reused": return "未换到新网段：运营商只分配了最近用过的网段"
         case "stopped": return "已停止后续尝试，保留当前 IP"
         case "recovered_unverified": return "网络已恢复，未能可靠比较前后 IP"
+        case "clean": return "已换到干净 IP"
+        case "clean_failed": return "试了多次没换到干净 IP，保留最后一个"
+        case "clean_unknown": return "欺诈值查询失败，保留当前 IP"
         case "failed": return "恢复未完成，请检查模块"
         default: return "尚未执行重连"
         }
@@ -238,6 +241,7 @@ struct ProxyDashboard: View {
     @EnvironmentObject private var usage: UsageCenter
     @State private var confirmReconnect = false
     @State private var confirmSegment = false
+    @State private var confirmClean = false
     @AppStorage("djonehub.segmentAvoidHours") private var segmentAvoidHours = 24
     @State private var confirmBinding = false
     @State private var renameModule = false
@@ -311,6 +315,8 @@ struct ProxyDashboard: View {
                                 .frame(minWidth: 130)
                         }.buttonStyle(.borderedProminent).tint(accent).disabled(disabled)
                         Button("重连并尝试换 IP", systemImage: "arrow.triangle.2.circlepath") { confirmReconnect = true }.disabled(disabled)
+                        Button("换干净 IP", systemImage: "checkmark.shield") { confirmClean = true }.disabled(disabled)
+                            .help("换 IP 后自动查欺诈值，超过上限就继续换，最多 6 次；上限在 模块与网络 → IP 欺诈值 中设置")
                         Button("换到新网段", systemImage: "square.stack.3d.up") { confirmSegment = true }.disabled(disabled)
                             .help("反复开关射频，直到出口落在最近 \(segmentAvoidHours) 小时内没用过的 /24 网段，最多 4 次")
                         if proxy.busy || proxy.reconnecting { ProgressView().controlSize(.small) }
@@ -351,14 +357,14 @@ struct ProxyDashboard: View {
                         }.fixedSize().font(.caption)
                     }
                     Text(proxy.result).foregroundStyle(.secondary)
-                    if let note = proxy.status?.reconnectNote, !note.isEmpty, proxy.status?.reconnectMode == "segment" {
+                    if let note = proxy.status?.reconnectNote, !note.isEmpty, ["segment", "clean"].contains(proxy.status?.reconnectMode ?? "") {
                         Text(note).font(.callout).foregroundStyle(proxy.reconnecting ? Color.orange : Color.secondary)
                     }
-                    if proxy.reconnecting && proxy.status?.reconnectMode == "segment" {
+                    if proxy.reconnecting && ["segment", "clean"].contains(proxy.status?.reconnectMode ?? "") {
                         Button("停止后续尝试") { Task { await proxy.act("stop_reconnect") } }
                             .help("当前这次开关射频完成后停止，保留拿到的 IP")
                     }
-                    if let tried = proxy.status?.reconnectTried, tried.count > 1 || (proxy.status?.reconnectMode == "segment" && !tried.isEmpty) {
+                    if let tried = proxy.status?.reconnectTried, tried.count > 1 || (["segment", "clean"].contains(proxy.status?.reconnectMode ?? "") && !tried.isEmpty) {
                         Text("本次拿到过：" + tried.joined(separator: " → ")).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
                     }
                     if let old = proxy.status?.previousIP, !old.isEmpty {
@@ -394,6 +400,12 @@ struct ProxyDashboard: View {
             Button("断开并重连", role: .destructive) { Task { await proxy.act("reconnect", confirm: true) } }
         } message: {
             Text("所选模块的代理连接将中断，短信与来电会暂时不可用；其他模块继续工作。IP 由运营商分配，不保证更换；拿到原 IP 时会自动再试一次；两次操作间隔至少 8 秒。")
+        }
+        .alert("换到干净 IP？", isPresented: $confirmClean) {
+            Button("取消", role: .cancel) {}
+            Button("开始", role: .destructive) { Task { await proxy.act("reconnect_clean", confirm: true) } }
+        } message: {
+            Text("每换一次就查一次新 IP 的欺诈值（填了 IPQS Key 时用 IPQS，否则用 Scamalytics），超过上限就继续换，最多 6 次，约 1–3 分钟。期间代理、短信和来电会中断。每次 IPQS 查询消耗 1 次额度。")
         }
         .alert("换到新网段？", isPresented: $confirmSegment) {
             Button("取消", role: .cancel) {}

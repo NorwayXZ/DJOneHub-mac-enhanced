@@ -1927,6 +1927,8 @@ private struct SettingsView: View {
                     SMSForwardPanel().modifier(PhoneCard())
                     MoreSectionTitle("呼叫转移")
                     CallForwardPanel().modifier(PhoneCard())
+                    MoreSectionTitle("SIM 保号")
+                    SIMKeepAlivePanel().modifier(PhoneCard())
                     MoreSectionTitle("多模块代理")
                     FleetModeSettings().modifier(PhoneCard())
 

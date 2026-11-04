@@ -83,7 +83,7 @@ struct SMSForwardPanel: View {
                 SecureField("机器人 Token（在 @BotFather 创建机器人后得到）", text: $token).textFieldStyle(.roundedBorder)
                 TextField("Chat ID（给 @userinfobot 发消息可查到）", text: $chatID).textFieldStyle(.roundedBorder)
                 TextField("接口地址（可不填；连不上 Telegram 时填反代地址）", text: $telegramAPI).textFieldStyle(.roundedBorder)
-                Text("先在 Telegram 里给你的机器人发一句话，它才能给你发消息。宽带连不上 Telegram 时会自动改走 4G 发送。")
+                Text("先在 Telegram 里给你的机器人发一句话，它才能给你发消息。宽带连不上 Telegram 时会自动改走 4G。")
                     .font(.system(size: 10)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             } save: {
                 ["channel": "telegram", "telegram_token": token, "telegram_chat_id": chatID, "telegram_api": telegramAPI]
@@ -100,6 +100,10 @@ struct SMSForwardPanel: View {
                     .font(.system(size: 10)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             } save: {
                 ["channel": "wechat", "wechat_service": service, "wechat_key": key]
+            }
+            if settings?.telegramConfigured == true {
+                Label("Telegram 可双向遥控：直接回复推送来的短信，就从收到它的卡回短信；发 /ip 看出口 IP，/rotate 换 IP，/clean 换干净 IP，/send 号码 内容 发短信，/help 看全部。只听你这个 Chat ID 的指令。", systemImage: "arrow.left.arrow.right")
+                    .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             if let (text, ok) = message {
                 Text(text).font(.system(size: 11)).foregroundStyle(ok ? Color.green : Color.orange).fixedSize(horizontal: false, vertical: true)

@@ -186,8 +186,9 @@ func (a *app) forwardNewSMS(items []receivedSMS) {
 			continue
 		}
 		title, body := smsForwardText(item, module)
+		remember := func(id int64) { rememberSMSPush(id, scopedModuleID, item.Sender) }
 		go func() {
-			for _, err := range sendForward(context.Background(), settings, title, body, 3) {
+			for _, err := range sendForward(context.Background(), settings, title, body, 3, remember) {
 				log.Printf("SMS forward from %q failed: %v", item.Sender, err)
 			}
 		}()
@@ -196,7 +197,8 @@ func (a *app) forwardNewSMS(items []receivedSMS) {
 
 // sendForward delivers one message to every configured channel, retrying
 // each up to attempts times, and returns one error per failed channel.
-func sendForward(ctx context.Context, s forwardSettings, title, body string, attempts int) map[string]error {
+// onTelegram, when given, receives the id of the Telegram message.
+func sendForward(ctx context.Context, s forwardSettings, title, body string, attempts int, onTelegram ...func(int64)) map[string]error {
 	failed := map[string]error{}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -229,7 +231,19 @@ func sendForward(ctx context.Context, s forwardSettings, title, body string, att
 	}
 	if s.telegramOn() {
 		wg.Add(1)
-		go try("telegram", func(ctx context.Context) error { return sendTelegram(ctx, s, title+"\n\n"+body) })
+		go try("telegram", func(ctx context.Context) error {
+			text := title + "\n\n" + body
+			if len(onTelegram) > 0 {
+				text += "\n\n↩ 直接回复这条消息，就从收到它的卡回短信"
+			}
+			id, err := sendTelegram(ctx, s, text, 0)
+			for _, f := range onTelegram {
+				if err == nil {
+					f(id)
+				}
+			}
+			return err
+		})
 	}
 	if s.weChatOn() {
 		wg.Add(1)
@@ -239,44 +253,75 @@ func sendForward(ctx context.Context, s forwardSettings, title, body string, att
 	return failed
 }
 
-// sendTelegram tries the Mac's broadband first. api.telegram.org is often
-// unreachable from mainland broadband, so it then retries over the cellular
-// interface, which works with a roaming SIM whose exit is abroad.
-func sendTelegram(ctx context.Context, s forwardSettings, text string) error {
+// telegramSOCKS, when set, names a local SOCKS5 proxy (a module's) that the
+// multi-module supervisor, which owns no cellular interface, can reach
+// Telegram through.
+var telegramSOCKS func() string
+
+type telegramRejected struct{ msg string }
+
+func (e telegramRejected) Error() string { return e.msg }
+
+// telegramCall calls a Bot API method and decodes its result into into. It
+// tries the Mac's broadband first; api.telegram.org is often unreachable from
+// mainland broadband, so it then goes over the cellular interface, or a
+// module's SOCKS5 proxy. A reply from Telegram itself is never retried.
+func telegramCall(ctx context.Context, s forwardSettings, method string, params any, timeout time.Duration, into any) error {
 	base := strings.TrimRight(s.TelegramAPI, "/")
 	if base == "" {
 		base = telegramAPIBase
 	}
-	payload, _ := json.Marshal(map[string]any{"chat_id": s.TelegramChatID, "text": text, "disable_web_page_preview": true})
-	target := base + "/bot" + s.TelegramToken + "/sendMessage"
-	err := postTelegram(ctx, http.DefaultClient, target, payload)
-	if err == nil || s.TelegramAPI != "" {
+	payload, _ := json.Marshal(params)
+	target := base + "/bot" + s.TelegramToken + "/" + method
+	err := postTelegram(ctx, http.DefaultClient, target, payload, timeout, into)
+	var rejected telegramRejected
+	if err == nil || s.TelegramAPI != "" || errors.As(err, &rejected) || ctx.Err() != nil {
 		return err
 	}
-	iface, ifaceErr := proxyInterface()
-	if ifaceErr != nil {
+	var transport *http.Transport
+	if iface, ifaceErr := proxyInterface(); ifaceErr == nil && !coordinatorOnly {
+		transport = &http.Transport{
+			Proxy:       nil,
+			DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) { return cellularDial(ctx, iface, addr) },
+		}
+	} else if telegramSOCKS != nil && telegramSOCKS() != "" {
+		transport = &http.Transport{Proxy: http.ProxyURL(&url.URL{Scheme: "socks5h", Host: telegramSOCKS()})}
+	} else {
 		return err
 	}
-	defer beginCellularActivity()()
-	transport := &http.Transport{
-		Proxy:             nil,
-		DialContext:       func(ctx context.Context, _, addr string) (net.Conn, error) { return cellularDial(ctx, iface, addr) },
-		TLSClientConfig:   &tls.Config{MinVersion: tls.VersionTLS12},
-		DisableKeepAlives: true,
-	}
+	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	transport.DisableKeepAlives = true
 	defer transport.CloseIdleConnections()
-	if cellErr := postTelegram(ctx, &http.Client{Transport: transport}, target, payload); cellErr != nil {
+	defer beginCellularActivity()()
+	if cellErr := postTelegram(ctx, &http.Client{Transport: transport}, target, payload, timeout, into); cellErr != nil {
+		if errors.As(cellErr, &rejected) {
+			return cellErr
+		}
 		return fmt.Errorf("宽带：%v；4G：%v", err, cellErr)
 	}
 	return nil
 }
 
-func postTelegram(ctx context.Context, client *http.Client, target string, payload []byte) error {
-	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
+// sendTelegram posts text to the configured chat, as a reply when replyTo is
+// set, and returns the new message's id.
+func sendTelegram(ctx context.Context, s forwardSettings, text string, replyTo int64) (int64, error) {
+	params := map[string]any{"chat_id": s.TelegramChatID, "text": text, "disable_web_page_preview": true}
+	if replyTo != 0 {
+		params["reply_to_message_id"] = replyTo
+	}
+	var sent struct {
+		MessageID int64 `json:"message_id"`
+	}
+	err := telegramCall(ctx, s, "sendMessage", params, 12*time.Second, &sent)
+	return sent.MessageID, err
+}
+
+func postTelegram(ctx context.Context, client *http.Client, target string, payload []byte, timeout time.Duration, into any) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, "POST", target, bytes.NewReader(payload))
 	if err != nil {
-		return errors.New("Telegram 机器人 Token 或接口地址格式不对")
+		return telegramRejected{"Telegram 机器人 Token 或接口地址格式不对"}
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
@@ -286,15 +331,19 @@ func postTelegram(ctx context.Context, client *http.Client, target string, paylo
 	}
 	defer resp.Body.Close()
 	var reply struct {
-		OK          bool   `json:"ok"`
-		Description string `json:"description"`
+		OK          bool            `json:"ok"`
+		Description string          `json:"description"`
+		Result      json.RawMessage `json:"result"`
 	}
-	_ = json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&reply)
+	_ = json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&reply)
 	if !reply.OK {
 		if reply.Description == "" {
 			reply.Description = fmt.Sprintf("HTTP %d", resp.StatusCode)
 		}
-		return errors.New("Telegram 拒绝：" + reply.Description)
+		return telegramRejected{"Telegram 拒绝：" + reply.Description}
+	}
+	if into != nil && len(reply.Result) > 0 {
+		return json.Unmarshal(reply.Result, into)
 	}
 	return nil
 }

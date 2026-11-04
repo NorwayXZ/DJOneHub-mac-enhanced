@@ -12,7 +12,21 @@ struct IPQSSettings: Decodable {
     }
 }
 
+struct CleanIPSettings: Codable, Equatable {
+    var maxIPQS: Int
+    var maxScamalytics: Int
+    var source: String? = nil
+    enum CodingKeys: String, CodingKey {
+        case source
+        case maxIPQS = "max_ipqs", maxScamalytics = "max_scamalytics"
+    }
+}
+
 extension DJOneHubAPI {
+    func cleanIPSettings() async throws -> CleanIPSettings { try await get(path: "api/fraud/clean") }
+    func setCleanIPSettings(_ value: CleanIPSettings) async throws -> CleanIPSettings {
+        try await postDecoded(path: "api/fraud/clean", body: CleanIPSettings(maxIPQS: value.maxIPQS, maxScamalytics: value.maxScamalytics))
+    }
     func ipqsSettings() async throws -> IPQSSettings {
         try await get(path: "api/fraud/ipqs")
     }
@@ -30,6 +44,7 @@ struct FraudScoreSettingsPanel: View {
     @State private var editing = false
     @State private var busy = false
     @State private var message: String?
+    @State private var clean: CleanIPSettings?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -62,9 +77,36 @@ struct FraudScoreSettingsPanel: View {
                 }
             }
             if let message { Text(message).font(.system(size: 10)).foregroundStyle(.orange) }
+            if let value = clean {
+                Divider()
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("干净 IP 标准（代理页「换干净 IP」用）").font(.system(size: 13, weight: .medium))
+                    HStack(spacing: 18) {
+                        Stepper("IPQS ≤ \(value.maxIPQS)", value: limitBinding(\.maxIPQS), in: 1...100, step: 5)
+                        Stepper("Scamalytics ≤ \(value.maxScamalytics)", value: limitBinding(\.maxScamalytics), in: 1...100, step: 5)
+                    }.font(.system(size: 12))
+                    Text(value.source == "ipqs" ? "已填 IPQS Key：按 IPQS 判断（75 以上 IPQS 视为可疑）。" : "没填 IPQS Key：按 Scamalytics 判断。")
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                }
+            }
         }
         .padding(.horizontal, 14).padding(.vertical, 12)
-        .task { settings = try? await api.ipqsSettings() }
+        .task {
+            settings = try? await api.ipqsSettings()
+            clean = try? await api.cleanIPSettings()
+        }
+    }
+
+    private func limitBinding(_ key: WritableKeyPath<CleanIPSettings, Int>) -> Binding<Int> {
+        Binding(get: { clean?[keyPath: key] ?? 0 }, set: { newValue in
+            guard var next = clean else { return }
+            next[keyPath: key] = newValue
+            clean = next
+            Task {
+                do { clean = try await api.setCleanIPSettings(next) }
+                catch { message = error.localizedDescription }
+            }
+        })
     }
 
     private func save(_ key: String) async {

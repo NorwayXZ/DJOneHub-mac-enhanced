@@ -40,7 +40,7 @@ import (
 //go:embed web/*
 var webAssets embed.FS
 
-const appVersion = "1.3.0-proxy-preview.32"
+const appVersion = "1.3.0-proxy-preview.33"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
@@ -386,6 +386,7 @@ func main() {
 			}
 			log.Printf("modem discovery skipped: %v", err)
 			go instance.startSMSPoller(context.Background())
+			go instance.runSIMKeepAlive(context.Background())
 			go instance.startCallPoller(context.Background())
 			go instance.startGPSPoller(context.Background())
 			go instance.startSignalRecovery(context.Background())
@@ -510,6 +511,7 @@ func serve(instance *app, listen string) {
 		if instance.modem == nil && multiModuleAuto {
 			go instance.watchForSecondModule(ctx)
 		}
+		go runTelegramBot(ctx, localBot{handler: instance.routes()})
 	}
 
 	if !instance.demo {
@@ -1148,6 +1150,10 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("GET /api/proxy", a.proxyStatusAPI)
 	mux.HandleFunc("POST /api/proxy", a.proxyActionAPI)
 	mux.HandleFunc("GET /api/proxy/links", a.proxyLinksAPI)
+	mux.HandleFunc("GET /api/fraud/clean", a.cleanIPAPI)
+	mux.HandleFunc("GET /api/sim/keepalive", a.simKeepAliveAPI)
+	mux.HandleFunc("POST /api/sim/keepalive", a.simKeepAliveAPI)
+	mux.HandleFunc("POST /api/fraud/clean", a.cleanIPAPI)
 	mux.HandleFunc("GET /api/forwarding/sms", a.smsForwardAPI)
 	mux.HandleFunc("POST /api/forwarding/sms", a.smsForwardAPI)
 	mux.HandleFunc("GET /api/forwarding/calls", a.callForwardAPI)
@@ -1902,6 +1908,8 @@ func (a *app) sendSMS(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
+	// Any SMS sent from the SIM also keeps it alive.
+	noteSIMActivity(a.currentICCID(), time.Now())
 	writeJSON(w, http.StatusOK, map[string]any{"sent": true, "segments": segments})
 }
 

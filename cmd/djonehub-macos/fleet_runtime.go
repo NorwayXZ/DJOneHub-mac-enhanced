@@ -155,6 +155,7 @@ func serveModuleWorker(socket string) error {
 		}
 	}()
 	go a.startSMSPoller(ctx)
+	go a.runSIMKeepAlive(ctx)
 	go a.startCallPoller(ctx)
 	go a.runProxyAutoStart(ctx)
 	go a.runUsageLedger(ctx)
@@ -215,6 +216,7 @@ func serveFleetSupervisor(listen string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	c.reconcile()
+	go runTelegramBot(ctx, fleetBot{c})
 	go func() {
 		ticker := time.NewTicker(3 * time.Second)
 		defer ticker.Stop()

@@ -78,7 +78,11 @@ func (a *app) proxyRotateAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	before := a.proxy.snapshot().PublicIP
-	if status, msg := a.launchReconnect(ipReconnectMode()); msg != "" {
+	mode := ipReconnectMode()
+	if r.URL.Query().Get("clean") == "1" {
+		mode = cleanReconnectMode()
+	}
+	if status, msg := a.launchReconnect(mode); msg != "" {
 		a.moduleOperationMu.Unlock()
 		writeJSON(w, status, rotateResult{PreviousIP: before, Error: msg})
 		return

@@ -521,10 +521,13 @@ func (a *app) proxyActionAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		p.recordExit(r.Context(), iface, ip, source)
-	case "reconnect", "reconnect_segment":
+	case "reconnect", "reconnect_segment", "reconnect_clean":
 		mode := ipReconnectMode()
-		if body.Action == "reconnect_segment" {
+		switch body.Action {
+		case "reconnect_segment":
 			mode = segmentReconnectMode(body.AvoidHours)
+		case "reconnect_clean":
+			mode = cleanReconnectMode()
 		}
 		if !body.Confirm {
 			writeError(w, 400, "需要确认：重连会暂时中断代理、短信和来电")
@@ -694,6 +697,26 @@ func (a *app) reconnectProxy(iface string, mode reconnectMode) {
 		if comparable && ip == old && more {
 			log.Printf("cellular reconnect: carrier returned the same IP, cycling radio once more")
 			continue
+		}
+		if mode.name == "clean" {
+			p.recordExit(ctx, current, ip, source)
+			label, clean, err := p.cleanVerdict(ctx, ip)
+			if err == nil && !clean && more {
+				progress(attempt, fmt.Sprintf("第 %d/%d 次：%s 欺诈值 %s，超过上限，继续换", attempt, mode.maxAttempts, ip, label), "")
+				continue
+			}
+			phase, note := "clean", fmt.Sprintf("已换到干净 IP %s（%s）", ip, label)
+			switch {
+			case err != nil:
+				phase, note = "clean_unknown", "欺诈值查询失败，保留 "+ip
+			case !clean && p.stopRotation.Load():
+				phase, note = "stopped", fmt.Sprintf("已停止后续尝试，保留 %s（%s）", ip, label)
+			case !clean:
+				phase, note = "clean_failed", fmt.Sprintf("试了 %d 次没换到干净 IP，保留 %s（%s）", attempt, ip, label)
+			}
+			progress(attempt, note, "")
+			finish(phase, attempt, nil)
+			return
 		}
 		p.recordExit(ctx, current, ip, source)
 		phase := "changed"
