@@ -40,7 +40,7 @@ import (
 //go:embed web/*
 var webAssets embed.FS
 
-const appVersion = "1.3.0-proxy-preview.29"
+const appVersion = "1.3.0-proxy-preview.30"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
@@ -757,12 +757,13 @@ func usbSpeedName(speed int) string {
 }
 
 func (a *app) recordSMS(sender, content string, timestamp time.Time) {
-	a.mergeSMS([]receivedSMS{{
+	added, _ := a.mergeSMS([]receivedSMS{{
 		Sender: sender, Content: content, Timestamp: timestamp,
 	}})
+	a.forwardNewSMS(added)
 }
 
-func (a *app) mergeSMS(messages []receivedSMS) (newCount int, total int) {
+func (a *app) mergeSMS(messages []receivedSMS) (added []receivedSMS, total int) {
 	a.smsMu.Lock()
 	defer a.smsMu.Unlock()
 	seen := make(map[string]bool, len(a.sms)+len(messages))
@@ -779,7 +780,7 @@ func (a *app) mergeSMS(messages []receivedSMS) (newCount int, total int) {
 		}
 		seen[key] = true
 		a.sms = append(a.sms, item)
-		newCount++
+		added = append(added, item)
 	}
 	sort.SliceStable(a.sms, func(i, j int) bool {
 		return a.sms[i].Timestamp.After(a.sms[j].Timestamp)
@@ -787,7 +788,7 @@ func (a *app) mergeSMS(messages []receivedSMS) (newCount int, total int) {
 	if len(a.sms) > 500 {
 		a.sms = a.sms[:500]
 	}
-	return newCount, len(a.sms)
+	return added, len(a.sms)
 }
 
 func smsCacheKey(item receivedSMS) string {
@@ -844,7 +845,8 @@ func (a *app) pollSMSOnce() error {
 		a.setSMSPollStatus(err)
 		return err
 	}
-	newCount, total := a.mergeSMS(messages)
+	added, total := a.mergeSMS(messages)
+	a.forwardNewSMS(added)
 	if a.smsAutoCleanupME && len(messages) > 0 {
 		before, after, cleanupErr := a.clearUSBATSMSMemory("ME")
 		if cleanupErr != nil {
@@ -854,8 +856,8 @@ func (a *app) pollSMSOnce() error {
 		}
 	}
 	a.setSMSPollStatus(nil)
-	if newCount > 0 {
-		log.Printf("SMS poll cached %d new message(s), total %d", newCount, total)
+	if len(added) > 0 {
+		log.Printf("SMS poll cached %d new message(s), total %d", len(added), total)
 	}
 	return nil
 }
@@ -1146,6 +1148,10 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("GET /api/proxy", a.proxyStatusAPI)
 	mux.HandleFunc("POST /api/proxy", a.proxyActionAPI)
 	mux.HandleFunc("GET /api/proxy/links", a.proxyLinksAPI)
+	mux.HandleFunc("GET /api/forwarding/sms", a.smsForwardAPI)
+	mux.HandleFunc("POST /api/forwarding/sms", a.smsForwardAPI)
+	mux.HandleFunc("GET /api/forwarding/calls", a.callForwardAPI)
+	mux.HandleFunc("POST /api/forwarding/calls", a.callForwardAPI)
 	mux.HandleFunc("GET /api/proxy/rotate", a.proxyRotateAPI)
 	mux.HandleFunc("POST /api/proxy/rotate", a.proxyRotateAPI)
 	mux.HandleFunc("GET /api/band", a.bandStatusAPI)

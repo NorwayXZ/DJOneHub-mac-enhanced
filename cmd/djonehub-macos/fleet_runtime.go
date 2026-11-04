@@ -171,7 +171,7 @@ func serveModuleWorker(socket string) error {
 			writeError(w, 409, "请切回单模块模式配置系统网络；多模块工作进程不会修改系统网关")
 			return
 		}
-		if r.Method != "GET" && r.URL.Path != "/api/proxy" && r.URL.Path != "/api/proxy/rotate" && r.URL.Path != "/api/update/prepare" && !workerExclusive() {
+		if r.Method != "GET" && r.URL.Path != "/api/proxy" && r.URL.Path != "/api/proxy/rotate" && r.URL.Path != "/api/forwarding/sms" && r.URL.Path != "/api/update/prepare" && !workerExclusive() {
 			writeError(w, 409, "辅助工具写操作仅限单模块连接；多模块请使用各自代理控制")
 			return
 		}

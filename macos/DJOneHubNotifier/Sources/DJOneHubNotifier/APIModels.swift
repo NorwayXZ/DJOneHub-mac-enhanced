@@ -257,10 +257,10 @@ struct DJOneHubAPI: Sendable {
         return try Self.decoder.decode(RejectResponse.self, from: data)
     }
 
-    func get<T: Decodable>(path: String) async throws -> T {
+    func get<T: Decodable>(path: String, timeout: TimeInterval = 5) async throws -> T {
         var request = URLRequest(url: baseURL.appending(path: path))
         request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.timeoutInterval = 5
+        request.timeoutInterval = timeout
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw APIError.invalidResponse

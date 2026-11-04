@@ -1902,6 +1902,10 @@ private struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     MoreSectionTitle("macOS 通知中心")
                     SystemNotificationSettings().modifier(PhoneCard())
+                    MoreSectionTitle("短信转发")
+                    SMSForwardPanel().modifier(PhoneCard())
+                    MoreSectionTitle("呼叫转移")
+                    CallForwardPanel().modifier(PhoneCard())
                     MoreSectionTitle("多模块代理")
                     FleetModeSettings().modifier(PhoneCard())
 
