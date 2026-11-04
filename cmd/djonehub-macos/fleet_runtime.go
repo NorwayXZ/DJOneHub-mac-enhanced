@@ -157,6 +157,7 @@ func serveModuleWorker(socket string) error {
 	go a.startSMSPoller(ctx)
 	go a.runSIMKeepAlive(ctx)
 	go a.startCallPoller(ctx)
+	go a.startSignalRecovery(ctx)
 	go a.runProxyAutoStart(ctx)
 	go a.runUsageLedger(ctx)
 	routes := a.routes()

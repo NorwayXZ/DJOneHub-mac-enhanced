@@ -40,7 +40,7 @@ import (
 //go:embed web/*
 var webAssets embed.FS
 
-const appVersion = "1.3.0-proxy-preview.39"
+const appVersion = "1.3.0-proxy-preview.40"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
@@ -1088,7 +1088,9 @@ func (a *app) signalRecoveryOnce() {
 		} else {
 			logQuietly("signal-lost", "cellular signal still lost: registration=%d", reg)
 		}
-		if a.lostSignalCount >= 3 {
+		// Without a usable SIM (empty slot, or an eSIM with no enabled
+		// Profile) there is nothing to register, so do not keep rebooting.
+		if a.lostSignalCount >= 3 && a.simReady() {
 			a.recoverSignal()
 		}
 	}
@@ -3802,4 +3804,9 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+func (a *app) simReady() bool {
+	resp, err := a.usbAT.Command("AT+CPIN?", 3*time.Second)
+	return err == nil && strings.Contains(resp, "READY")
 }
