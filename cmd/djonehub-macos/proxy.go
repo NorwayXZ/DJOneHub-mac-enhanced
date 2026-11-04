@@ -543,6 +543,7 @@ func (a *app) proxyActionAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, p.snapshot())
 }
+
 // launchReconnect starts a reconnect in the background. The caller holds
 // moduleOperationMu; on success the reconnect releases it, otherwise the
 // caller still owns it and gets the status and message to report.

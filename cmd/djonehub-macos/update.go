@@ -16,6 +16,7 @@ func (a *app) tryModuleOperation() bool {
 	}
 	return true
 }
+
 // endUpdateLease undoes beginUpdateLease when the restart it prepared for
 // did not happen; the proxy watchdog restarts the proxy.
 func (a *app) endUpdateLease() {
