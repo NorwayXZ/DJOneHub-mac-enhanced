@@ -40,7 +40,7 @@ import (
 //go:embed web/*
 var webAssets embed.FS
 
-const appVersion = "1.3.0-proxy-preview.38"
+const appVersion = "1.3.0-proxy-preview.39"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
@@ -906,6 +906,7 @@ func (a *app) ensureUSBAT() error {
 	a.port = dev.Description()
 	a.discoveryError = ""
 	log.Printf("USB AT bridge opened on DJI %s", dev.Description())
+	a.ensureMacUSBNet()
 	if scopedUSBSession != 0 {
 		a.initUSBATESIMManager()
 		return nil
