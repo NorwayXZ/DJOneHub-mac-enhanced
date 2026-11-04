@@ -636,7 +636,8 @@ extension DJOneHubAPI {
     }
 
     func switchESIM(iccid: String) async throws -> ESIMSwitchResult {
-        try await postDecoded(path: "api/esim/switch", body: ["iccid": iccid])
+        // Switching over AT+CSIM plus the module restart takes up to ~2 minutes.
+        try await postDecoded(path: "api/esim/switch", body: ["iccid": iccid], timeout: 150)
     }
 
     func esimHealth() async throws -> ESIMHealth {

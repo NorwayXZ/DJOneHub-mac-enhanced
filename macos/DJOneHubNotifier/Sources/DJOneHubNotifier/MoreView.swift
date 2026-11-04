@@ -28,6 +28,11 @@ struct MoreView: View {
     @State private var message = ""
     @State private var busy = false
     @State private var showMobileProfileConfirm = false
+    // Progress of an eSIM switch, shown inside the eSIM section.
+    @State private var switchingTo: ESIMProfile?
+    @State private var switchStage = ""
+    @State private var switchStarted: Date?
+    @State private var switchResult: (String, Bool)?
     @State private var showMacProfileConfirm = false
 
     private var profiles: [ESIMProfile] {
@@ -190,6 +195,7 @@ struct MoreView: View {
 
             MoreSectionTitle(L10n.t("eSIM / 卡片"))
             VStack(spacing: 0) {
+                switchBanner
                 MoreInfoRow(label: L10n.t("卡片类型"), value: esimCardType)
                 if let firmware = esim?.chipInfo?.firmware, !firmware.isEmpty {
                     Divider().padding(.leading, 12)
@@ -278,7 +284,12 @@ struct MoreView: View {
                                 }
                             }
                             HStack(spacing: 8) {
-                                if !profile.enabled {
+                                if switchingTo?.id == profile.id {
+                                    HStack(spacing: 6) {
+                                        ProgressView().controlSize(.small)
+                                        Text(L10n.t("切换中…")).font(.caption).foregroundStyle(.secondary)
+                                    }
+                                } else if !profile.enabled {
                                     Button {
                                         Task { await switchProfile(profile) }
                                     } label: {
@@ -288,7 +299,7 @@ struct MoreView: View {
                                     }
                                     .buttonStyle(.bordered)
                                     .controlSize(.small)
-                                    .disabled(busy)
+                                    .disabled(busy || switchingTo != nil)
                                 }
                                 Button {
                                     renameProfile = profile
@@ -548,17 +559,86 @@ struct MoreView: View {
         }
     }
 
+    @ViewBuilder
+    private var switchBanner: some View {
+        if let target = switchingTo {
+            HStack(alignment: .top, spacing: 10) {
+                ProgressView().controlSize(.small)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(L10n.t("正在切换到 ") + target.displayName).font(.footnote.weight(.semibold))
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        Text(switchStage + " · \(Int(context.date.timeIntervalSince(switchStarted ?? context.date))) 秒")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+            }
+            .padding(12)
+            .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+            .padding([.horizontal, .top], 10)
+        } else if let (text, ok) = switchResult {
+            HStack(spacing: 8) {
+                Image(systemName: ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    .foregroundStyle(ok ? Color.green : Color.orange)
+                Text(text).font(.footnote).fixedSize(horizontal: false, vertical: true)
+                Spacer()
+                Button { switchResult = nil } label: { Image(systemName: "xmark") }
+                    .buttonStyle(.plain).foregroundStyle(.secondary)
+            }
+            .padding(12)
+            .background((ok ? Color.green : Color.orange).opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+            .padding([.horizontal, .top], 10)
+        }
+    }
+
+    private static func sameICCID(_ a: String?, _ b: String?) -> Bool {
+        let trim = { (s: String?) in (s ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "Ff ")) }
+        return !trim(a).isEmpty && trim(a) == trim(b)
+    }
+
+    /// Switches the card, then follows the module restart until the new
+    /// Profile is registered, so the user sees every stage.
     private func switchProfile(_ profile: ESIMProfile) async {
         guard let iccid = profile.iccid else { return }
-        busy = true
-        defer { busy = false }
+        switchingTo = profile
+        switchResult = nil
+        switchStarted = Date()
+        switchStage = L10n.t("正在给卡发送切换指令（约 10–60 秒）")
+        defer { switchingTo = nil }
         do {
             _ = try await calls.apiClient.switchESIM(iccid: iccid)
-            message = L10n.t("已切换 Profile，模块正在重启并重新读取新卡…")
-            esim = try? await calls.apiClient.esimOverview()
+        } catch let error as URLError where error.code == .timedOut {
+            // The backend keeps switching even if this request gave up.
         } catch {
-            message = error.localizedDescription
+            switchResult = (L10n.t("切换失败：") + error.localizedDescription, false)
+            return
         }
+        switchStage = L10n.t("卡已切换，模块正在重启并注册新号码（约 1–3 分钟）")
+        let deadline = Date().addingTimeInterval(300)
+        var onCard = false
+        while Date() < deadline {
+            try? await Task.sleep(for: .seconds(5))
+            guard let health = try? await calls.apiClient.esimHealth() else { continue }
+            if Self.sameICCID(health.moduleICCID, iccid) {
+                if !onCard {
+                    onCard = true
+                    switchStage = L10n.t("模块已读到新号码，正在注册网络")
+                }
+                if health.registered == true {
+                    esimHealth = health
+                    esim = try? await calls.apiClient.esimOverview()
+                    let seconds = Int(Date().timeIntervalSince(switchStarted ?? Date()))
+                    let network = [OperatorName.display(health.operatorName), health.registration].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+                    switchResult = (L10n.t("已切换到 ") + profile.displayName + (network.isEmpty ? "" : "，" + network) + L10n.t("，用时 \(seconds) 秒。代理会自动恢复。"), true)
+                    return
+                }
+            }
+        }
+        esim = try? await calls.apiClient.esimOverview()
+        esimHealth = try? await calls.apiClient.esimHealth()
+        switchResult = (onCard
+            ? L10n.t("已切换到 ") + profile.displayName + L10n.t("，但 5 分钟内没注册上网络：可能没开通、已停机或当地没有信号。")
+            : L10n.t("5 分钟内没读到新号码。可以点「重启模块」再看看。"), false)
     }
 
     @ViewBuilder

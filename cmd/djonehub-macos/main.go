@@ -40,7 +40,7 @@ import (
 //go:embed web/*
 var webAssets embed.FS
 
-const appVersion = "1.3.0-proxy-preview.36"
+const appVersion = "1.3.0-proxy-preview.37"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
@@ -3571,7 +3571,9 @@ func (a *app) switchESIM(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "USB AT eSIM/卡片当前暂不允许切换 Profile")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	// Not tied to the request: a client giving up must not stop the eUICC
+	// half-way through a switch.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	result, rebootRequested, rebootResponse, rebootWarning, err := a.enableProfile(ctx, esimManager, body.ICCID, body.AID)
 	if err != nil {
