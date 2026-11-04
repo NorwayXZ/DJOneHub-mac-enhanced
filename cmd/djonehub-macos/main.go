@@ -40,7 +40,7 @@ import (
 //go:embed web/*
 var webAssets embed.FS
 
-const appVersion = "1.3.0-proxy-preview.35"
+const appVersion = "1.3.0-proxy-preview.36"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
@@ -3710,9 +3710,22 @@ func (a *app) downloadESIMProfile(w http.ResponseWriter, r *http.Request) {
 		ConfirmationCode string `json:"confirmation_code"`
 		AID              string `json:"aid"`
 		IMEI             string `json:"imei"`
+		// ActivationCode is the QR code text, LPA:1$SM-DP+$MatchingID[...].
+		ActivationCode string `json:"activation_code"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
+	}
+	if code := strings.TrimSpace(body.ActivationCode); code != "" {
+		smdp, matchingID, err := parseActivationCode(code)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		body.SMDP, body.MatchingID = smdp, matchingID
+	}
+	if strings.TrimSpace(body.IMEI) == "" && !a.demo {
+		body.IMEI = a.moduleIMEI()
 	}
 	body.SMDP = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(body.SMDP, "https://"), "http://"))
 	if body.SMDP == "" {
@@ -3720,7 +3733,7 @@ func (a *app) downloadESIMProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.TrimSpace(body.IMEI) == "" {
-		writeError(w, http.StatusBadRequest, "imei is required for USB AT eSIM download")
+		writeError(w, http.StatusBadRequest, "读不到模块 IMEI，请手动填写")
 		return
 	}
 	if a.demo {

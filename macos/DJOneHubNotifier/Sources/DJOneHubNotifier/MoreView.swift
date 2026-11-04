@@ -406,18 +406,14 @@ struct MoreView: View {
             }
             .sheet(isPresented: $showDownload) {
                 ESIMDownloadSheet { smdp, matchingID, confirmationCode, imei, aid in
-                    Task {
-                        do {
-                            let result = try await calls.apiClient.downloadESIMProfile(
-                                smdp: smdp, matchingID: matchingID,
-                                confirmationCode: confirmationCode, imei: imei, aid: aid
-                            )
-                            message = result.message ?? L10n.t("Profile 下载完成")
-                            esim = try? await calls.apiClient.esimOverview()
-                        } catch {
-                            message = error.localizedDescription
-                        }
-                    }
+                    let result = try await calls.apiClient.downloadESIMProfile(
+                        smdp: smdp, matchingID: matchingID,
+                        confirmationCode: confirmationCode, imei: imei, aid: aid
+                    )
+                    let done = result.message ?? L10n.t("Profile 下载完成")
+                    message = done
+                    esim = try? await calls.apiClient.esimOverview()
+                    return done
                 }
             }
 
@@ -1025,67 +1021,6 @@ struct ESIMProfileNoteSheet: View {
         }
     }
 }
-
-struct ESIMDownloadSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    let onDownload: (String, String, String, String, String) -> Void
-    @State private var smdp = ""
-    @State private var matchingID = ""
-    @State private var confirmationCode = ""
-    @State private var imei = ""
-    @State private var aid = ""
-
-    private var canSubmit: Bool {
-        !smdp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !imei.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(L10n.t("下载新的 Profile"))
-                .font(.title3.weight(.semibold))
-            Text(L10n.t("将向 SM-DP+ 服务器下载并写入新的 eSIM Profile。写入期间请勿拔出模块。"))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            TextField(L10n.t("SM-DP+ 地址"), text: $smdp)
-                .textFieldStyle(.roundedBorder)
-            TextField(L10n.t("Matching ID（可选）"), text: $matchingID)
-                .textFieldStyle(.roundedBorder)
-            TextField(L10n.t("确认码（可选）"), text: $confirmationCode)
-                .textFieldStyle(.roundedBorder)
-            TextField(L10n.t("IMEI（必填）"), text: $imei)
-                .textFieldStyle(.roundedBorder)
-            TextField(L10n.t("AID（可选）"), text: $aid)
-                .textFieldStyle(.roundedBorder)
-            HStack(spacing: 10) {
-                Spacer()
-                Button(L10n.t("取消")) {
-                    dismiss()
-                }
-                .keyboardShortcut(.cancelAction)
-                Button {
-                    onDownload(
-                        smdp.trimmingCharacters(in: .whitespacesAndNewlines),
-                        matchingID.trimmingCharacters(in: .whitespacesAndNewlines),
-                        confirmationCode.trimmingCharacters(in: .whitespacesAndNewlines),
-                        imei.trimmingCharacters(in: .whitespacesAndNewlines),
-                        aid.trimmingCharacters(in: .whitespacesAndNewlines)
-                    )
-                    dismiss()
-                } label: {
-                    Text(L10n.t("开始下载"))
-                        .frame(minWidth: 70)
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(!canSubmit)
-            }
-        }
-        .frame(width: 340)
-        .padding(20)
-    }
-}
-
 
 // MARK: - GPS 定位开关与详情（并入「通用」板块）
 

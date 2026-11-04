@@ -829,7 +829,10 @@ extension DJOneHubAPI {
                 "confirmation_code": confirmationCode,
                 "imei": imei,
                 "aid": aid,
-            ]
+            ],
+            // Writing a Profile over AT takes minutes; a short timeout would
+            // cancel the download half-way.
+            timeout: 420
         )
     }
 }
