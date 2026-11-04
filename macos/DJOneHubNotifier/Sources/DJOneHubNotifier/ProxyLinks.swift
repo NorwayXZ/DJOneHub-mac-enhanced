@@ -55,7 +55,7 @@ struct ProxyLinksPanel: View {
                 .padding(12)
                 .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
             }
-            Text("代理类型选 SOCKS5，主机 127.0.0.1，端口填上面冒号后的数字，不用账号密码。换 IP 链接用 GET 或 POST 都行，不需要请求体；调用一次通常 8–25 秒（看运营商），换好后返回新旧 IP；两次至少间隔 8 秒。链接只在这台 Mac 上能用。")
+            Text("代理类型选 SOCKS5，主机 127.0.0.1，端口填上面冒号后的数字，不用账号密码。换 IP 链接用 GET 或 POST 都行，不需要请求体；最多 12 秒就回复（指纹浏览器一般只等 15 秒），换得快直接返回新旧 IP，慢的先回“已开始切换”，指纹浏览器会自己检测新 IP；两次至少间隔 8 秒。链接只在这台 Mac 上能用。")
                 .font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
         .padding(18)

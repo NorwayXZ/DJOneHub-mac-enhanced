@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestProxyLinksUseTheRequestAddress(t *testing.T) {
@@ -33,4 +34,12 @@ func TestRotateLinkReportsWhyItCannotStart(t *testing.T) {
 		t.Fatal("module lock left held")
 	}
 	a.moduleOperationMu.Unlock()
+}
+
+func TestRotateWaitStaysUnderFingerprintBrowserTimeouts(t *testing.T) {
+	for query, want := range map[string]time.Duration{"": 12 * time.Second, "?wait=0": 0, "?wait=20": 20 * time.Second, "?wait=90": 24 * time.Second, "?wait=-3": 0, "?wait=x": 12 * time.Second} {
+		if got := rotateWait(httptest.NewRequest("GET", "http://127.0.0.1:7575/api/proxy/rotate"+query, nil)); got != want {
+			t.Fatal(query, got)
+		}
+	}
 }

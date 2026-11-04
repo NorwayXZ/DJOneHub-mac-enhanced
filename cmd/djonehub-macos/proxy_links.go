@@ -3,12 +3,27 @@ package main
 import (
 	"net"
 	"net/http"
+	"strconv"
 	"time"
 )
 
-// rotateWaitLimit keeps a switch link answer inside the multi-module worker
-// request timeout (27 s); a slower reconnect is reported as still running.
-const rotateWaitLimit = 24 * time.Second
+// A switch link answers within rotateWaitDefault: fingerprint browsers give
+// the refresh request about 15 s (CloakBrowser Manager exactly 15) and then
+// confirm the new exit through the proxy themselves. ?wait=N (seconds) asks
+// to wait longer, up to rotateWaitMax, which stays inside the multi-module
+// worker request timeout (27 s). A slower reconnect is reported as running.
+const (
+	rotateWaitDefault = 12 * time.Second
+	rotateWaitMax     = 24 * time.Second
+)
+
+func rotateWait(r *http.Request) time.Duration {
+	n, err := strconv.Atoi(r.URL.Query().Get("wait"))
+	if err != nil {
+		return rotateWaitDefault
+	}
+	return min(max(time.Duration(n)*time.Second, 0), rotateWaitMax)
+}
 
 // proxyLink is what a fingerprint browser needs for one module: the SOCKS5
 // address and the link that switches its exit IP.
@@ -28,6 +43,7 @@ type rotateResult struct {
 	PreviousIP string  `json:"previous_ip,omitempty"`
 	IP         string  `json:"ip,omitempty"`
 	Seconds    float64 `json:"seconds,omitempty"`
+	Message    string  `json:"message,omitempty"`
 	Error      string  `json:"error,omitempty"`
 }
 
@@ -67,7 +83,7 @@ func (a *app) proxyRotateAPI(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, rotateResult{PreviousIP: before, Error: msg})
 		return
 	}
-	deadline := time.NewTimer(rotateWaitLimit)
+	deadline := time.NewTimer(rotateWait(r))
 	defer deadline.Stop()
 	tick := time.NewTicker(300 * time.Millisecond)
 	defer tick.Stop()
@@ -76,7 +92,7 @@ func (a *app) proxyRotateAPI(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case <-deadline.C:
-			writeJSON(w, 202, rotateResult{Pending: true, Phase: "reconnecting", PreviousIP: before, Error: "仍在切换，稍后在 App 里查看结果"})
+			writeJSON(w, 202, rotateResult{OK: true, Pending: true, Phase: "reconnecting", PreviousIP: before, Message: "已开始切换，新 IP 稍后出现；加 ?wait=24 可等更久"})
 			return
 		case <-tick.C:
 		}
