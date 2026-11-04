@@ -37,10 +37,15 @@ type keepAlivePlan struct {
 	LastError  string `json:"last_error,omitempty"`
 	LastSeen   string `json:"last_seen,omitempty"`
 	LastRemind string `json:"last_remind,omitempty"`
+	// Profile is the eSIM Profile name, for numbers on an eSIM card.
+	Profile string `json:"profile,omitempty"`
 }
 
 type keepAliveFile struct {
 	Plans map[string]keepAlivePlan `json:"plans"`
+	// Returns: per eSIM card (EID), the Profile to switch back to after a
+	// keep-alive run on another Profile.
+	Returns map[string]esimReturn `json:"returns,omitempty"`
 }
 
 var keepAlive = settingsFile[keepAliveFile]{name: "sim-keepalive.json"}
@@ -119,7 +124,11 @@ func (a *app) runSIMKeepAlive(ctx context.Context) {
 }
 
 func (a *app) keepAliveOnce(now time.Time) {
-	iccid := a.currentICCID()
+	if rotatingICCID() != "" {
+		return // an eSIM run is switching Profiles right now
+	}
+	normalizePlanKeys()
+	iccid := a.simICCID()
 	if iccid != "" {
 		_ = updatePlan(iccid, func(p *keepAlivePlan) { p.LastSeen = now.UTC().Format(time.RFC3339) })
 		if keepAlive.get().Plans[iccid].due(now) {
@@ -128,6 +137,7 @@ func (a *app) keepAliveOnce(now time.Time) {
 			}
 		}
 	}
+	a.keepAliveESIM(now, iccid)
 	a.remindAbsentSIMs(now)
 }
 
@@ -200,6 +210,36 @@ func (a *app) remindAbsentSIMs(now time.Time) {
 	}
 }
 
+// simICCID is the SIM's ICCID as keep-alive plans key it. The module pads an
+// odd-length ICCID with a trailing F (AT+QCCID) that the eSIM card's Profile
+// list does not have, so the padding is dropped.
+func (a *app) simICCID() string { return normICCID(a.currentICCID()) }
+
+func normICCID(iccid string) string {
+	return strings.TrimRight(strings.TrimSpace(iccid), "Ff")
+}
+
+// normalizePlanKeys merges plans saved under a padded ICCID.
+func normalizePlanKeys() {
+	padded := false
+	for iccid := range keepAlive.get().Plans {
+		padded = padded || normICCID(iccid) != iccid
+	}
+	if !padded {
+		return
+	}
+	_ = keepAlive.update(func(f *keepAliveFile) {
+		for iccid, plan := range f.Plans {
+			if key := normICCID(iccid); key != iccid {
+				delete(f.Plans, iccid)
+				if existing, ok := f.Plans[key]; !ok || (!existing.Enabled && plan.Enabled) {
+					f.Plans[key] = plan
+				}
+			}
+		}
+	})
+}
+
 func (a *app) ownNumber() string {
 	response, err := a.runATCommand("AT+CNUM", 3*time.Second)
 	if err != nil {
@@ -227,25 +267,52 @@ type keepAliveCard struct {
 	Current bool          `json:"current"`
 	Plan    keepAlivePlan `json:"plan"`
 	NextDue string        `json:"next_due,omitempty"`
+	// OnCard: another Profile on the eSIM card in this module.
+	OnCard  bool   `json:"on_card,omitempty"`
+	Profile string `json:"profile,omitempty"`
 }
 
 type keepAliveView struct {
 	CurrentICCID string          `json:"current_iccid"`
 	OwnNumber    string          `json:"own_number"`
 	Cards        []keepAliveCard `json:"cards"`
+	// Rotating is the eSIM Profile being kept alive right now.
+	Rotating string `json:"rotating,omitempty"`
 }
 
 func (a *app) keepAliveView() keepAliveView {
-	view := keepAliveView{CurrentICCID: a.currentICCID(), Cards: []keepAliveCard{}}
+	normalizePlanKeys()
+	view := keepAliveView{CurrentICCID: a.simICCID(), Cards: []keepAliveCard{}}
 	if view.CurrentICCID != "" {
 		view.OwnNumber = a.ownNumber()
 		if view.OwnNumber != "" {
 			_ = updatePlan(view.CurrentICCID, func(p *keepAlivePlan) { p.Phone = view.OwnNumber })
 		}
 	}
+	view.Rotating = rotatingICCID()
+	names := map[string]string{}
+	onCard := map[string]bool{}
+	if view.Rotating == "" {
+		for _, p := range a.cardProfiles(view.CurrentICCID) {
+			names[p.ICCID] = p.Name
+			onCard[p.ICCID] = p.ICCID != view.CurrentICCID
+		}
+	}
 	plans := keepAlive.get().Plans
+	fresh := func(iccid string, current bool) keepAliveCard {
+		card := keepAliveCard{ICCID: iccid, Current: current, Plan: keepAlivePlan{Days: defaultKeepAliveDay, Text: defaultKeepAliveMsg}}
+		if current {
+			card.Plan.Phone = view.OwnNumber
+		}
+		return card
+	}
 	if _, ok := plans[view.CurrentICCID]; !ok && view.CurrentICCID != "" {
-		view.Cards = append(view.Cards, keepAliveCard{ICCID: view.CurrentICCID, Current: true, Plan: keepAlivePlan{Days: defaultKeepAliveDay, Text: defaultKeepAliveMsg, Phone: view.OwnNumber}})
+		view.Cards = append(view.Cards, fresh(view.CurrentICCID, true))
+	}
+	for iccid, other := range onCard {
+		if _, ok := plans[iccid]; !ok && other {
+			view.Cards = append(view.Cards, fresh(iccid, false))
+		}
 	}
 	for iccid, plan := range plans {
 		card := keepAliveCard{ICCID: iccid, Current: iccid == view.CurrentICCID, Plan: plan}
@@ -254,9 +321,19 @@ func (a *app) keepAliveView() keepAliveView {
 		}
 		view.Cards = append(view.Cards, card)
 	}
+	for i := range view.Cards {
+		c := &view.Cards[i]
+		c.OnCard = onCard[c.ICCID]
+		if c.Profile = names[c.ICCID]; c.Profile == "" {
+			c.Profile = c.Plan.Profile
+		}
+	}
 	sort.SliceStable(view.Cards, func(i, j int) bool {
 		if view.Cards[i].Current != view.Cards[j].Current {
 			return view.Cards[i].Current
+		}
+		if view.Cards[i].OnCard != view.Cards[j].OnCard {
+			return view.Cards[i].OnCard
 		}
 		return view.Cards[i].ICCID < view.Cards[j].ICCID
 	})
@@ -265,7 +342,8 @@ func (a *app) keepAliveView() keepAliveView {
 
 // simKeepAliveAPI: GET lists the plans (the SIM in this module first).
 // POST {iccid, enabled, every_days, to, text} saves a plan; {action:"run"}
-// sends the keep-alive SMS from the SIM in this module now; {action:"delete",
+// sends the keep-alive SMS from the SIM in this module now (with the iccid of
+// another Profile on its eSIM card: switches to it, sends, switches back); {action:"delete",
 // iccid} forgets a SIM.
 func (a *app) simKeepAliveAPI(w http.ResponseWriter, r *http.Request) {
 	if a.demo {
@@ -287,9 +365,18 @@ func (a *app) simKeepAliveAPI(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	current := a.currentICCID()
+	current := a.simICCID()
 	switch body.Action {
 	case "run":
+		if body.ICCID != "" && body.ICCID != current {
+			// Another Profile on this eSIM card: switch, send, switch back.
+			if err := a.startProfileKeepAlive(body.ICCID, true); err != nil {
+				writeError(w, 409, err.Error())
+				return
+			}
+			writeJSON(w, 202, a.keepAliveView())
+			return
+		}
 		if current == "" {
 			writeError(w, 409, "读不到 SIM 卡，请确认卡已插好")
 			return

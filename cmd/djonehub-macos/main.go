@@ -40,7 +40,7 @@ import (
 //go:embed web/*
 var webAssets embed.FS
 
-const appVersion = "1.3.0-proxy-preview.34"
+const appVersion = "1.3.0-proxy-preview.35"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
@@ -1909,7 +1909,7 @@ func (a *app) sendSMS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Any SMS sent from the SIM also keeps it alive.
-	noteSIMActivity(a.currentICCID(), time.Now())
+	noteSIMActivity(a.simICCID(), time.Now())
 	writeJSON(w, http.StatusOK, map[string]any{"sent": true, "segments": segments})
 }
 
@@ -3573,12 +3573,31 @@ func (a *app) switchESIM(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 	defer cancel()
-	result, err := esimManager.SwitchProfileWithResult(ctx, body.ICCID, body.AID)
+	result, rebootRequested, rebootResponse, rebootWarning, err := a.enableProfile(ctx, esimManager, body.ICCID, body.AID)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"switch_accepted":         result.SwitchAccepted,
+		"phase":                   result.Phase,
+		"target_iccid":            result.TargetICCID,
+		"recovery_pending":        result.RecoveryPending,
+		"module_reboot_requested": rebootRequested,
+		"module_reboot_response":  rebootResponse,
+		"module_reboot_warning":   rebootWarning,
+		"reconnect_wait_seconds":  10,
+	})
+}
 
+// enableProfile switches the eUICC to iccid and restarts the module so the
+// new Profile becomes its subscriber identity. The caller holds the module
+// operation lock.
+func (a *app) enableProfile(ctx context.Context, esimManager *esim.Manager, iccid, aid string) (esim.SwitchProfileResult, bool, string, string, error) {
+	result, err := esimManager.SwitchProfileWithResult(ctx, iccid, aid)
+	if err != nil {
+		return result, false, "", "", err
+	}
 	// Enabling a Profile resets the eUICC, but the DJI modem can keep the
 	// previous SIM session (and therefore its CNUM) until its own firmware is
 	// restarted.  Reload it here so the newly enabled Profile actually becomes
@@ -3600,16 +3619,7 @@ func (a *app) switchESIM(w http.ResponseWriter, r *http.Request) {
 	if rebootRequested && !a.demo {
 		go a.recoverLinkAfterSwitch()
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"switch_accepted":         result.SwitchAccepted,
-		"phase":                   result.Phase,
-		"target_iccid":            result.TargetICCID,
-		"recovery_pending":        result.RecoveryPending,
-		"module_reboot_requested": rebootRequested,
-		"module_reboot_response":  rebootResponse,
-		"module_reboot_warning":   rebootWarning,
-		"reconnect_wait_seconds":  10,
-	})
+	return result, rebootRequested, rebootResponse, rebootWarning, nil
 }
 
 func (a *app) renameESIMProfile(w http.ResponseWriter, r *http.Request) {

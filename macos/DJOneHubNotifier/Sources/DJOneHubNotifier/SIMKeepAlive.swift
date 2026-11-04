@@ -20,19 +20,22 @@ struct KeepAliveCard: Codable, Identifiable {
     var current: Bool
     var plan: KeepAlivePlan
     var nextDue: String?
+    var onCard: Bool?
+    var profile: String?
     var id: String { iccid }
-    enum CodingKeys: String, CodingKey { case iccid, current, plan; case nextDue = "next_due" }
+    enum CodingKeys: String, CodingKey { case iccid, current, plan, profile; case nextDue = "next_due", onCard = "on_card" }
 }
 
 struct KeepAliveStatus: Codable {
     var currentICCID: String
     var ownNumber: String
     var cards: [KeepAliveCard]
-    enum CodingKeys: String, CodingKey { case cards; case currentICCID = "current_iccid", ownNumber = "own_number" }
+    var rotating: String?
+    enum CodingKeys: String, CodingKey { case cards, rotating; case currentICCID = "current_iccid", ownNumber = "own_number" }
 }
 
 extension DJOneHubAPI {
-    func keepAliveStatus() async throws -> KeepAliveStatus { try await get(path: "api/sim/keepalive", timeout: 15) }
+    func keepAliveStatus() async throws -> KeepAliveStatus { try await get(path: "api/sim/keepalive", timeout: 40) }
     func saveKeepAlive(iccid: String, enabled: Bool, days: Int, to: String, text: String) async throws -> KeepAliveStatus {
         struct Body: Encodable { var iccid: String; var enabled: Bool; var every_days: Int; var to: String; var text: String }
         return try await postDecoded(path: "api/sim/keepalive", body: Body(iccid: iccid, enabled: enabled, every_days: days, to: to, text: text), timeout: 15)
@@ -91,7 +94,14 @@ struct SIMKeepAlivePanel: View {
             } else {
                 HStack(spacing: 6) { ProgressView().controlSize(.small); Text("正在读取…").font(.caption).foregroundStyle(.secondary) }
             }
-            let others = (status?.cards ?? []).filter { !$0.current }
+            let sameCard = (status?.cards ?? []).filter { $0.onCard == true }
+            if !sameCard.isEmpty {
+                Text("同一张 eSIM 卡上的其他号码").font(.system(size: 12, weight: .medium))
+                ForEach(sameCard) { card in eSIMRow(card) }
+                Text("这些号码平时没启用。到期后会在凌晨 3–6 点自动切过去发保号短信，再切回来（代理会断开几分钟）。「立即保号」现在就做一次。")
+                    .font(.system(size: 10)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            let others = (status?.cards ?? []).filter { !$0.current && $0.onCard != true }
             if !others.isEmpty {
                 Text("其他卡").font(.system(size: 12, weight: .medium))
                 ForEach(others) { card in
@@ -109,6 +119,23 @@ struct SIMKeepAlivePanel: View {
         }
         .padding(.horizontal, 14).padding(.vertical, 12)
         .task { await load() }
+    }
+
+    private func eSIMRow(_ card: KeepAliveCard) -> some View {
+        let rotating = status?.rotating == card.iccid
+        return HStack(spacing: 8) {
+            Toggle("", isOn: Binding(get: { card.plan.enabled }, set: { on in Task { await saveProfile(card, enabled: on) } }))
+                .toggleStyle(.switch).controlSize(.mini).labelsHidden().disabled(busy)
+            Text((card.profile ?? "eSIM") + " · " + short(card.iccid)).font(.system(size: 11))
+            Spacer()
+            if rotating {
+                ProgressView().controlSize(.small)
+                Text("正在切换并发送…").font(.system(size: 10)).foregroundStyle(.secondary)
+            } else {
+                Text(lastLine(card)).font(.system(size: 10)).foregroundStyle(card.plan.lastError?.isEmpty == false || overdue(card) ? Color.orange : Color.secondary)
+                Button("立即保号") { Task { await runProfile(card.iccid) } }.controlSize(.mini).disabled(busy || status?.rotating?.isEmpty == false)
+            }
+        }
     }
 
     private func currentTitle(_ card: KeepAliveCard) -> String {
@@ -151,6 +178,26 @@ struct SIMKeepAlivePanel: View {
         defer { busy = false }
         do { apply(try await api.keepAliveAction("run")); message = ("保号短信已发出", true) }
         catch { message = (error.localizedDescription, false) }
+    }
+    private func saveProfile(_ card: KeepAliveCard, enabled: Bool) async {
+        busy = true
+        defer { busy = false }
+        let days = (card.plan.everyDays ?? 0) > 0 ? card.plan.everyDays! : 90
+        do { apply(try await api.saveKeepAlive(iccid: card.iccid, enabled: enabled, days: days, to: card.plan.to ?? "", text: card.plan.text ?? "保号")); message = ("已保存", true) }
+        catch { message = (error.localizedDescription, false) }
+    }
+    private func runProfile(_ iccid: String) async {
+        busy = true
+        do { apply(try await api.keepAliveAction("run", iccid: iccid)); message = ("已开始：切换号码 → 发保号短信 → 切回，约 5–10 分钟", true) }
+        catch { message = (error.localizedDescription, false) }
+        busy = false
+        // Follow the run; the module restarts twice, so reads may fail meanwhile.
+        for _ in 0..<80 {
+            try? await Task.sleep(for: .seconds(10))
+            guard let next = try? await api.keepAliveStatus() else { continue }
+            apply(next)
+            if next.rotating?.isEmpty != false { message = nil; break }
+        }
     }
     private func remove(_ iccid: String) async {
         busy = true

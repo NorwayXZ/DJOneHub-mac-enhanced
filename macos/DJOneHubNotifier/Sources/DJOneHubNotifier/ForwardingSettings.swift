@@ -102,7 +102,7 @@ struct SMSForwardPanel: View {
                 ["channel": "wechat", "wechat_service": service, "wechat_key": key]
             }
             if settings?.telegramConfigured == true {
-                Label("Telegram 可双向遥控：直接回复推送来的短信，就从收到它的卡回短信；发 /ip 看出口 IP，/rotate 换 IP，/clean 换干净 IP，/send 号码 内容 发短信，/help 看全部。只听你这个 Chat ID 的指令。", systemImage: "arrow.left.arrow.right")
+                Label("Telegram 可双向遥控：直接回复推送来的短信，就从收到它的卡回短信；发 /ip 看出口 IP，/rotate 换 IP，/clean 换干净 IP，/send 号码 内容 发短信，/esim 看和切换 eSIM 号码，/help 看全部。只听你这个 Chat ID 的指令。", systemImage: "arrow.left.arrow.right")
                     .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             if let (text, ok) = message {

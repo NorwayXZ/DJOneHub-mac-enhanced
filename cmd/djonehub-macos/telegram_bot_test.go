@@ -13,6 +13,9 @@ type fakeBotBackend struct {
 	mods  []botModule
 	calls []string
 	proxy proxyState
+	esim  string
+	// switched is the exit IP the proxy reports after an eSIM switch.
+	switched string
 }
 
 func (f *fakeBotBackend) modules() []botModule { return f.mods }
@@ -21,6 +24,13 @@ func (f *fakeBotBackend) call(module, method, path string, body []byte) (int, []
 	if path == "/api/proxy" {
 		b, _ := json.Marshal(f.proxy)
 		return 200, b, nil
+	}
+	if path == "/api/esim" {
+		return 200, []byte(f.esim), nil
+	}
+	if path == "/api/esim/switch" {
+		f.proxy.PublicIP = f.switched
+		return 200, []byte(`{"switch_accepted":true}`), nil
 	}
 	if strings.HasPrefix(path, "/api/proxy/rotate") {
 		return 200, []byte(`{"ok":true,"phase":"changed","previous_ip":"1.1.1.1","ip":"2.2.2.2","seconds":8}`), nil
@@ -118,5 +128,45 @@ func TestCleanLimitsDefault(t *testing.T) {
 	}
 	if i, _ := (cleanSettings{MaxIPQS: 50}).limits(); i != 50 {
 		t.Fatal(i)
+	}
+}
+
+const xesimOverview = `{"profiles":[{"eid":"8904","aid_hex":"A0000005591010FFFFFFFF8900000177","profiles":[
+ {"iccid":"8932000000000000901","name":"ESIM_ACCESS_CARRIER","state":0},
+ {"iccid":"8901000000000007510","name":"I320_RedPocket","state":1}]}]}`
+
+func TestESIMCommandListsAndSwitchesProfiles(t *testing.T) {
+	esimSwitchSettle = 0
+	f := &fakeBotBackend{mods: []botModule{{ID: "a", Name: "模块", Connected: true}}, esim: xesimOverview, switched: "9.9.9.9"}
+	f.proxy.PublicIP, f.proxy.Interface = "1.1.1.1", "en15"
+	list := handleBotMessage(context.Background(), f, botMessage("/esim", 0))
+	if !strings.Contains(list, "1. ▫️ ESIM_ACCESS_CARRIER（…000901）") || !strings.Contains(list, "2. ✅ I320_RedPocket") {
+		t.Fatal(list)
+	}
+	if reply := handleBotMessage(context.Background(), f, botMessage("/esim 2", 0)); !strings.Contains(reply, "已经在用") {
+		t.Fatal(reply)
+	}
+	reply := handleBotMessage(context.Background(), f, botMessage("/esim 1", 0))
+	if !strings.Contains(reply, "已切换到 ESIM_ACCESS_CARRIER") || !strings.Contains(reply, "1.1.1.1 → 9.9.9.9") {
+		t.Fatal(reply)
+	}
+	var switched string
+	for _, c := range f.calls {
+		if strings.Contains(c, "POST /api/esim/switch") {
+			switched = c
+		}
+	}
+	if !strings.Contains(switched, `"iccid":"8932000000000000901"`) || !strings.Contains(switched, `"aid":"A0000005591010FFFFFFFF8900000177"`) {
+		t.Fatal(f.calls)
+	}
+}
+
+func TestESIMCommandNeedsModuleNumberWithSeveralModules(t *testing.T) {
+	f := &fakeBotBackend{mods: []botModule{{ID: "a", Name: "模块 1", Connected: true}, {ID: "b", Name: "模块 2", Connected: true}}, esim: `{"card_type":"physical_sim"}`}
+	if reply := handleBotMessage(context.Background(), f, botMessage("/esim 2", 0)); !strings.Contains(reply, "/esim 模块 号码") {
+		t.Fatal(reply)
+	}
+	if reply := handleBotMessage(context.Background(), f, botMessage("/esim", 0)); !strings.Contains(reply, "1. 模块 1：实体卡") {
+		t.Fatal(reply)
 	}
 }

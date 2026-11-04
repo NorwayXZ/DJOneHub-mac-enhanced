@@ -24,7 +24,7 @@ func fleetRequestTimeout(method, path string) time.Duration {
 	case method == "GET" && (path == "/api/sms" || path == "/api/calls/status"):
 		return 4 * time.Second
 	case strings.HasPrefix(path, "/api/forwarding/calls"), strings.HasPrefix(path, "/api/voice/provision"),
-		strings.HasPrefix(path, "/api/esim/download"), strings.HasPrefix(path, "/api/module/setup"), strings.HasPrefix(path, "/api/band"):
+		strings.HasPrefix(path, "/api/esim/download"), strings.HasPrefix(path, "/api/esim/switch"), strings.HasPrefix(path, "/api/module/setup"), strings.HasPrefix(path, "/api/band"):
 		// Carrier and module operations that legitimately take minutes.
 		return 7 * time.Minute
 	}

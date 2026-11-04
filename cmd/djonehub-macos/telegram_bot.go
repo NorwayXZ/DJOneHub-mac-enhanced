@@ -176,7 +176,8 @@ const botHelp = `可以这样用：
 • /ip ：各模块的出口 IP 和欺诈值
 • /rotate ：换 IP（多个模块时 /rotate 2 换 2 号模块）
 • /clean ：换到干净 IP（同样可加模块号）
-• /send 号码 内容 ：发短信（多个模块时 /send 2 号码 内容）`
+• /send 号码 内容 ：发短信（多个模块时 /send 2 号码 内容）
+• /esim ：eSIM 卡上的号码；/esim 2 切换到 2 号（多个模块时 /esim 模块 号码）`
 
 func handleBotMessage(ctx context.Context, backend botBackend, u tgUpdate) string {
 	m := u.Message
@@ -208,6 +209,8 @@ func handleBotMessage(ctx context.Context, backend botBackend, u tgUpdate) strin
 			return "没有这个模块。发 /ip 看模块编号。"
 		}
 		return botRotate(ctx, backend, module, command == "/clean")
+	case "/esim":
+		return botESIM(ctx, backend, args)
 	case "/send":
 		module, rest := botModule{}, args
 		if mods := connectedModules(backend); len(mods) > 1 && len(args) > 2 {
