@@ -40,7 +40,7 @@ import (
 //go:embed web/*
 var webAssets embed.FS
 
-const appVersion = "1.3.0-proxy-preview.33"
+const appVersion = "1.3.0-proxy-preview.34"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
@@ -3596,6 +3596,9 @@ func (a *app) switchESIM(w http.ResponseWriter, r *http.Request) {
 			rebootWarning = rebootErr.Error()
 			log.Printf("eSIM profile switched but module restart was not confirmed: %v", rebootErr)
 		}
+	}
+	if rebootRequested && !a.demo {
+		go a.recoverLinkAfterSwitch()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"switch_accepted":         result.SwitchAccepted,
