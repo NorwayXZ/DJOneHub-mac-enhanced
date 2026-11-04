@@ -86,6 +86,10 @@ type bandCardProfile struct {
 	// Disabled: the user switched the lock off; Band keeps the best result so
 	// it can be switched back on without retesting.
 	Disabled bool `json:"disabled"`
+	// Manual: the user picked Band from the results instead of the test's
+	// choice, which stays in Best (0 = all bands).
+	Manual bool `json:"manual,omitempty"`
+	Best   int  `json:"best"`
 }
 
 func (p bandCardProfile) locks() bool { return p.Band > 0 && !p.Fallback && !p.Disabled }
@@ -651,7 +655,7 @@ func (a *app) runBandOptimizer(saveData bool) {
 		chosen = 0
 	}
 	b.mu.Lock()
-	b.profiles.Cards[iccid] = bandCardProfile{Band: chosen, TestedAt: time.Now().UTC().Format(time.RFC3339), SaveData: saveData, Results: results}
+	b.profiles.Cards[iccid] = bandCardProfile{Band: chosen, Best: chosen, TestedAt: time.Now().UTC().Format(time.RFC3339), SaveData: saveData, Results: results}
 	b.saveLocked()
 	b.lastICCID = iccid
 	b.lostSince = time.Time{}
@@ -768,6 +772,8 @@ func (a *app) bandActionAPI(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Action   string `json:"action"`
 		SaveData *bool  `json:"save_data"`
+		// Band, with "lock": lock this band rather than the test's choice.
+		Band int `json:"band"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -840,8 +846,19 @@ func (a *app) bandActionAPI(w http.ResponseWriter, r *http.Request) {
 		b.loadLocked()
 		p, ok := b.profiles.Cards[iccid]
 		b.mu.Unlock()
-		if !ok || p.Band == 0 {
-			writeError(w, 409, "这张卡还没有测出更优的单一频段，请先自动选最优频段")
+		if body.Band != 0 {
+			if body.Band < 1 || body.Band > 255 {
+				writeError(w, 400, "频段号无效")
+				return
+			}
+			if !ok {
+				p = bandCardProfile{TestedAt: time.Now().UTC().Format(time.RFC3339)}
+			} else if !p.Manual {
+				p.Best = p.Band
+			}
+			p.Band, p.Manual = body.Band, true
+		} else if !ok || p.Band == 0 {
+			writeError(w, 409, "这张卡还没有测出更优的单一频段，请先自动选最优频段，或在测试结果里手动锁定一个频段")
 			return
 		}
 		if err := a.setLTEBands(bandMaskFor(p.Band)); err != nil {

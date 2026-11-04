@@ -33,9 +33,13 @@ struct BandCardProfile: Decodable {
     var saveData: Bool
     var fallback: Bool
     var disabled: Bool?
+    var manual: Bool?
+    var best: Int?
     var results: [BandResult]?
+    /// The band the test chose (0 = all bands), even after a manual pick.
+    var recommended: Int { manual == true ? (best ?? 0) : band }
     enum CodingKeys: String, CodingKey {
-        case band, fallback, disabled, results
+        case band, fallback, disabled, manual, best, results
         case testedAt = "tested_at", saveData = "save_data"
     }
 }
@@ -64,12 +68,12 @@ struct BandOptimizerStatus: Decodable {
 
 extension DJOneHubAPI {
     func bandStatus() async throws -> BandOptimizerStatus { try await get(path: "api/band") }
-    func bandAction(_ action: String, saveData: Bool? = nil) async throws -> BandOptimizerStatus {
+    func bandAction(_ action: String, saveData: Bool? = nil, band: Int? = nil) async throws -> BandOptimizerStatus {
         struct Body: Encodable {
-            var action: String; var saveData: Bool?
-            enum CodingKeys: String, CodingKey { case action; case saveData = "save_data" }
+            var action: String; var saveData: Bool?; var band: Int?
+            enum CodingKeys: String, CodingKey { case action, band; case saveData = "save_data" }
         }
-        return try await postDecoded(path: "api/band", body: Body(action: action, saveData: saveData), timeout: 20)
+        return try await postDecoded(path: "api/band", body: Body(action: action, saveData: saveData, band: band), timeout: 20)
     }
 }
 
@@ -90,10 +94,10 @@ final class BandCenter: ObservableObject {
         status = next
         if wasRunning && !next.running { onFinish?(Self.finishTitle(next), next.note) }
     }
-    func act(_ action: String, saveData: Bool? = nil) async {
+    func act(_ action: String, saveData: Bool? = nil, band: Int? = nil) async {
         busy = true
         defer { busy = false }
-        do { status = try await api.bandAction(action, saveData: saveData); error = nil }
+        do { status = try await api.bandAction(action, saveData: saveData, band: band); error = nil }
         catch { self.error = error.localizedDescription }
     }
     static func finishTitle(_ s: BandOptimizerStatus) -> String {
@@ -160,13 +164,13 @@ struct BandOptimizerPanel: View {
                 }
                 Spacer()
                 if center.busy && !running { ProgressView().controlSize(.small) }
-                Toggle("锁定最优频段", isOn: Binding(
+                Toggle("锁定频段", isOn: Binding(
                     get: { lockedBand > 0 },
                     set: { on in Task { await center.act(on ? "lock" : "unlock") } }
                 ))
                 .labelsHidden().toggleStyle(.switch)
                 .disabled(running || center.busy || status?.maskKnown != true || (lockedBand == 0 && (profile?.band ?? 0) == 0))
-                .help(lockedBand > 0 ? "关闭后恢复全部频段，保留测试结果，随时可再打开" : "打开后锁定这张卡测得的最优频段")
+                .help(lockedBand > 0 ? "关闭后恢复全部频段，保留测试结果，随时可再打开" : (profile?.manual == true ? "打开后锁定你上次选的 Band \(profile?.band ?? 0)" : "打开后锁定这张卡测得的最优频段"))
             }
             .padding(10)
             .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
@@ -176,7 +180,14 @@ struct BandOptimizerPanel: View {
             }
             if !shownResults.isEmpty {
                 DisclosureGroup(isExpanded: Binding(get: { running || showResults }, set: { showResults = $0 })) {
-                    VStack(spacing: 4) { ForEach(shownResults) { row($0) } }.padding(.top, 4)
+                    VStack(spacing: 4) {
+                        ForEach(shownResults) { row($0) }
+                        if !running {
+                            Text("“推荐”是测试按速度选的；觉得实际体验不好，可以点任意一行的“锁定”改用那个频段，或点“全部频段”那行恢复自动选择。切换时代理会断开几秒，出口 IP 可能变化。")
+                                .font(.system(size: 10)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 2)
+                        }
+                    }.padding(.top, 4)
                 } label: {
                     Text(running ? "测试进度" : "上次测试结果" + (testedWhen.isEmpty ? "" : "（\(testedWhen)）"))
                         .font(.system(size: 12, weight: .medium))
@@ -217,6 +228,10 @@ struct BandOptimizerPanel: View {
     private var modeDetail: String {
         guard let p = profile else { return "还没测试这张卡。点“自动选最优频段”找出最快的频段。" }
         if p.fallback { return "Band \(p.band) 曾因信号丢失，已自动切回全部频段；打开开关可重新锁定。" }
+        if lockedBand > 0 && p.manual == true {
+            let measured = speedGain(p.results ?? [], band: lockedBand).map { "（\($0)）" } ?? ""
+            return "你手动锁定了这个频段" + measured + "；测试推荐的是" + (p.recommended > 0 ? "Band \(p.recommended)" : "全部频段") + "。关闭开关即恢复全部频段。"
+        }
         if lockedBand > 0 {
             return (speedGain(p.results ?? [], band: lockedBand) ?? "这张卡测得的最优频段") + "。关闭开关即恢复全部频段，测试结果会保留。"
         }
@@ -260,7 +275,8 @@ struct BandOptimizerPanel: View {
         }
     }
     private func row(_ r: BandResult) -> some View {
-        let picked = r.band == (running ? -1 : (status?.phase == "done" ? status?.chosen : profile?.band))
+        let picked = r.band == (running ? -1 : (status?.phase == "done" && profile == nil ? status?.chosen : profile?.recommended))
+        let inUse = status?.maskKnown == true && (r.band == 0 ? lockedBand == 0 : lockedBand == r.band)
         return HStack(spacing: 8) {
             Text(r.band == 0 ? "全部频段" : "Band \(r.band)").font(.system(size: 12, weight: picked ? .bold : .regular))
                 .frame(width: 72, alignment: .leading)
@@ -277,7 +293,24 @@ struct BandOptimizerPanel: View {
                 Text(r.detail.isEmpty ? "失败" : r.detail).font(.caption).foregroundStyle(.orange)
             }
             Spacer(minLength: 0)
-            if picked { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green) }
+            if picked {
+                Text("推荐").font(.system(size: 10, weight: .semibold)).foregroundStyle(.green)
+                    .padding(.horizontal, 5).padding(.vertical, 1).background(Color.green.opacity(0.12), in: Capsule())
+            }
+            if !running {
+                if inUse {
+                    Label("使用中", systemImage: "checkmark.circle.fill").font(.system(size: 11, weight: .medium)).foregroundStyle(.green)
+                        .frame(width: 70, alignment: .trailing)
+                } else if r.band == 0 || r.status == "ok" {
+                    Button(r.band == 0 ? "改用" : "锁定") {
+                        Task { await center.act(r.band == 0 ? "unlock" : "lock", band: r.band == 0 ? nil : r.band) }
+                    }
+                    .controlSize(.small).disabled(center.busy || status?.maskKnown != true)
+                    .frame(width: 70, alignment: .trailing)
+                } else {
+                    Color.clear.frame(width: 70, height: 1)
+                }
+            }
         }
     }
 }
