@@ -33,6 +33,10 @@ struct MoreView: View {
     @State private var switchStage = ""
     @State private var switchStarted: Date?
     @State private var switchResult: (String, Bool)?
+    // Which card the eSIM section manages: the module's or a USB reader's.
+    @State private var readers: [CardReader] = []
+    @State private var useReader = false
+    @State private var readerError: String?
     @State private var showMacProfileConfirm = false
 
     private var profiles: [ESIMProfile] {
@@ -61,6 +65,11 @@ struct MoreView: View {
     }
 
     private var esimCardType: String {
+        if useReader {
+            if let readerError { return readerError }
+            if esim == nil { return L10n.t("查询中…") }
+            return L10n.t("读卡器里的 eSIM 卡")
+        }
         if let message = esim?.message { return message }
         if let name = esim?.chipInfo?.skuName { return name }
         return L10n.t("查询中…")
@@ -195,6 +204,10 @@ struct MoreView: View {
 
             MoreSectionTitle(L10n.t("eSIM / 卡片"))
             VStack(spacing: 0) {
+                if !readers.isEmpty {
+                    cardSourcePicker
+                    Divider().padding(.leading, 12)
+                }
                 switchBanner
                 MoreInfoRow(label: L10n.t("卡片类型"), value: esimCardType)
                 if let firmware = esim?.chipInfo?.firmware, !firmware.isEmpty {
@@ -228,7 +241,7 @@ struct MoreView: View {
                     .padding(.horizontal, 14)
                     .padding(.vertical, 6)
                 }
-                if let health = esimHealth {
+                if !useReader, let health = esimHealth {
                     if let message = health.message, health.activeProfile == nil {
                         Divider().padding(.leading, 12)
                         Text(message)
@@ -372,9 +385,9 @@ struct MoreView: View {
                 ESIMProfileRenameSheet(profile: profile) { name in
                     Task {
                         do {
-                            try await calls.apiClient.renameESIMProfile(iccid: profile.iccid ?? "", name: name)
+                            try await calls.apiClient.renameESIMProfile(iccid: profile.iccid ?? "", name: name, reader: useReader)
                             message = L10n.t("Profile 名称已修改")
-                            esim = try? await calls.apiClient.esimOverview()
+                            await reloadESIM()
                         } catch {
                             message = error.localizedDescription
                         }
@@ -399,9 +412,9 @@ struct MoreView: View {
                     if let profile = deleteProfile {
                         Task {
                             do {
-                                try await calls.apiClient.deleteESIMProfile(iccid: profile.iccid ?? "")
+                                try await calls.apiClient.deleteESIMProfile(iccid: profile.iccid ?? "", reader: useReader)
                                 message = L10n.t("Profile 已删除")
-                                esim = try? await calls.apiClient.esimOverview()
+                                await reloadESIM()
                             } catch {
                                 message = error.localizedDescription
                             }
@@ -419,11 +432,11 @@ struct MoreView: View {
                 ESIMDownloadSheet { smdp, matchingID, confirmationCode, imei, aid in
                     let result = try await calls.apiClient.downloadESIMProfile(
                         smdp: smdp, matchingID: matchingID,
-                        confirmationCode: confirmationCode, imei: imei, aid: aid
+                        confirmationCode: confirmationCode, imei: imei, aid: aid, reader: useReader
                     )
                     let done = result.message ?? L10n.t("Profile 下载完成")
-                    message = done
-                    esim = try? await calls.apiClient.esimOverview()
+                    switchResult = (done + (useReader ? L10n.t("（写在读卡器里的卡上）") : ""), true)
+                    await reloadESIM()
                     return done
                 }
             }
@@ -508,15 +521,17 @@ struct MoreView: View {
         async let t: NetworkTrafficSnapshot? = try? calls.apiClient.networkTraffic()
         async let p: CellularPolicyStatus? = try? calls.apiClient.cellularPolicy()
         async let u: USBProfileStatus? = try? calls.apiClient.usbProfile()
-        async let e: ESIMOverview? = try? calls.apiClient.esimOverview()
+        async let r: [CardReader]? = try? calls.apiClient.cardReaders()
         async let h: ESIMHealth? = try? calls.apiClient.esimHealth()
         async let n: [String: ESIMNote]? = try? calls.apiClient.esimNotes()
         modem = await m
         traffic = await t
         policy = await p
         usbProfile = await u
-        esim = await e
+        readers = await r ?? []
+        if readers.isEmpty { useReader = false }
         esimHealth = await h
+        await reloadESIM()
         esimNotes = await n ?? [:]
     }
 
@@ -591,6 +606,38 @@ struct MoreView: View {
         }
     }
 
+    private var cardSourcePicker: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Picker(L10n.t("管理哪张卡"), selection: $useReader) {
+                Text(L10n.t("模块里的卡")).tag(false)
+                Text(L10n.t("读卡器里的卡")).tag(true)
+            }
+            .pickerStyle(.segmented)
+            .disabled(switchingTo != nil)
+            if useReader, let reader = readers.first(where: \.cardPresent) ?? readers.first {
+                Text(reader.name + (reader.cardPresent ? L10n.t(" · 已插卡") : L10n.t(" · 没有卡")) + L10n.t("。读卡器里的卡不联网，适合先把号码写好再插进模块。"))
+                    .font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .onChange(of: useReader) { _ in
+            esim = nil
+            switchResult = nil
+            Task { await reloadESIM() }
+        }
+    }
+
+    /// Reloads the eSIM overview of the card being managed.
+    private func reloadESIM() async {
+        if useReader {
+            readers = (try? await calls.apiClient.cardReaders()) ?? readers
+            do { esim = try await calls.apiClient.esimOverview(reader: true); readerError = nil }
+            catch { esim = nil; readerError = error.localizedDescription }
+        } else {
+            esim = try? await calls.apiClient.esimOverview()
+        }
+    }
+
     private static func sameICCID(_ a: String?, _ b: String?) -> Bool {
         let trim = { (s: String?) in (s ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "Ff ")) }
         return !trim(a).isEmpty && trim(a) == trim(b)
@@ -605,6 +652,18 @@ struct MoreView: View {
         switchStarted = Date()
         switchStage = L10n.t("正在给卡发送切换指令（约 10–60 秒）")
         defer { switchingTo = nil }
+        if useReader {
+            // The reader card is offline: the switch is done once the card says so.
+            do {
+                _ = try await calls.apiClient.switchESIM(iccid: iccid, reader: true)
+                await reloadESIM()
+                let seconds = Int(Date().timeIntervalSince(switchStarted ?? Date()))
+                switchResult = (L10n.t("读卡器里的卡已启用 ") + profile.displayName + L10n.t("，用时 \(seconds) 秒。插进模块后就用这个号码。"), true)
+            } catch {
+                switchResult = (L10n.t("切换失败：") + error.localizedDescription, false)
+            }
+            return
+        }
         do {
             _ = try await calls.apiClient.switchESIM(iccid: iccid)
         } catch let error as URLError where error.code == .timedOut {
@@ -626,7 +685,7 @@ struct MoreView: View {
                 }
                 if health.registered == true {
                     esimHealth = health
-                    esim = try? await calls.apiClient.esimOverview()
+                    await reloadESIM()
                     let seconds = Int(Date().timeIntervalSince(switchStarted ?? Date()))
                     let network = [OperatorName.display(health.operatorName), health.registration].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
                     switchResult = (L10n.t("已切换到 ") + profile.displayName + (network.isEmpty ? "" : "，" + network) + L10n.t("，用时 \(seconds) 秒。代理会自动恢复。"), true)
@@ -634,7 +693,7 @@ struct MoreView: View {
                 }
             }
         }
-        esim = try? await calls.apiClient.esimOverview()
+        await reloadESIM()
         esimHealth = try? await calls.apiClient.esimHealth()
         switchResult = (onCard
             ? L10n.t("已切换到 ") + profile.displayName + L10n.t("，但 5 分钟内没注册上网络：可能没开通、已停机或当地没有信号。")

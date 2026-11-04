@@ -40,7 +40,7 @@ import (
 //go:embed web/*
 var webAssets embed.FS
 
-const appVersion = "1.3.0-proxy-preview.37"
+const appVersion = "1.3.0-proxy-preview.38"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
@@ -1220,6 +1220,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("PATCH /api/esim/profile", a.renameESIMProfile)
 	mux.HandleFunc("DELETE /api/esim/profile", a.deleteESIMProfile)
 	mux.HandleFunc("POST /api/esim/download", a.downloadESIMProfile)
+	mux.HandleFunc("GET /api/esim/readers", a.cardReadersAPI)
 	if runtime.GOOS == "windows" || a.webConsole {
 		assets, err := fs.Sub(webAssets, "web")
 		if err != nil {
@@ -3413,7 +3414,7 @@ func (a *app) saveModuleESIMNote(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"message": "模块资料已保存", "index": index})
 }
 
-func (a *app) esimOverview(w http.ResponseWriter, _ *http.Request) {
+func (a *app) esimOverview(w http.ResponseWriter, r *http.Request) {
 	if a.demo {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"chip_info": map[string]any{
@@ -3446,7 +3447,10 @@ func (a *app) esimOverview(w http.ResponseWriter, _ *http.Request) {
 		})
 		return
 	}
-	esimManager, _ := a.currentESIMManager()
+	esimManager, ok := a.esimManagerFor(w, r)
+	if !ok {
+		return
+	}
 	if esimManager == nil {
 		writeError(w, http.StatusServiceUnavailable, "eSIM manager is unavailable")
 		return
@@ -3538,12 +3542,16 @@ func (a *app) esimHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (a *app) switchESIM(w http.ResponseWriter, r *http.Request) {
-	if !a.tryModuleOperation() {
-		writeError(w, 409, errModuleBusy)
+	unlock, ok := a.lockModuleUnlessReader(w, r)
+	if !ok {
 		return
 	}
-	defer a.moduleOperationMu.Unlock()
-	esimManager, switchAllowed := a.currentESIMManager()
+	defer unlock()
+	_, switchAllowed := a.currentESIMManager()
+	esimManager, ok := a.esimManagerFor(w, r)
+	if !ok {
+		return
+	}
 	if !a.demo && esimManager == nil {
 		writeError(w, http.StatusServiceUnavailable, "eSIM manager is unavailable")
 		return
@@ -3565,6 +3573,18 @@ func (a *app) switchESIM(w http.ResponseWriter, r *http.Request) {
 			"phase":           "done",
 			"target_iccid":    body.ICCID,
 		})
+		return
+	}
+	if isReaderRequest(r) {
+		// The reader card is offline: no module restart, nothing to recover.
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		result, err := esimManager.SwitchProfileWithResult(ctx, body.ICCID, body.AID)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"switch_accepted": result.SwitchAccepted, "phase": result.Phase, "target_iccid": result.TargetICCID})
 		return
 	}
 	if !switchAllowed && a.modem == nil {
@@ -3625,12 +3645,15 @@ func (a *app) enableProfile(ctx context.Context, esimManager *esim.Manager, icci
 }
 
 func (a *app) renameESIMProfile(w http.ResponseWriter, r *http.Request) {
-	if !a.tryModuleOperation() {
-		writeError(w, 409, errModuleBusy)
+	unlock, ok := a.lockModuleUnlessReader(w, r)
+	if !ok {
 		return
 	}
-	defer a.moduleOperationMu.Unlock()
-	esimManager, _ := a.currentESIMManager()
+	defer unlock()
+	esimManager, ok := a.esimManagerFor(w, r)
+	if !ok {
+		return
+	}
 	if !a.demo && esimManager == nil {
 		writeError(w, http.StatusServiceUnavailable, "eSIM manager is unavailable")
 		return
@@ -3661,12 +3684,15 @@ func (a *app) renameESIMProfile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) deleteESIMProfile(w http.ResponseWriter, r *http.Request) {
-	if !a.tryModuleOperation() {
-		writeError(w, 409, errModuleBusy)
+	unlock, ok := a.lockModuleUnlessReader(w, r)
+	if !ok {
 		return
 	}
-	defer a.moduleOperationMu.Unlock()
-	esimManager, _ := a.currentESIMManager()
+	defer unlock()
+	esimManager, ok := a.esimManagerFor(w, r)
+	if !ok {
+		return
+	}
 	if !a.demo && esimManager == nil {
 		writeError(w, http.StatusServiceUnavailable, "eSIM manager is unavailable")
 		return
@@ -3696,12 +3722,15 @@ func (a *app) deleteESIMProfile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) downloadESIMProfile(w http.ResponseWriter, r *http.Request) {
-	if !a.tryModuleOperation() {
-		writeError(w, 409, errModuleBusy)
+	unlock, ok := a.lockModuleUnlessReader(w, r)
+	if !ok {
 		return
 	}
-	defer a.moduleOperationMu.Unlock()
-	esimManager, _ := a.currentESIMManager()
+	defer unlock()
+	esimManager, ok := a.esimManagerFor(w, r)
+	if !ok {
+		return
+	}
 	if !a.demo && esimManager == nil {
 		writeError(w, http.StatusServiceUnavailable, "eSIM manager is unavailable")
 		return

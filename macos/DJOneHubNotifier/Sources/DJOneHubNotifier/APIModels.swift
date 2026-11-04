@@ -212,7 +212,11 @@ struct DJOneHubAPI: Sendable {
     let baseURL: URL
 
     func makeRequest(_ path: String) -> URLRequest {
-        var request = URLRequest(url: baseURL.appending(path: path))
+        // A "?query" in path is kept as the query, not escaped into the path.
+        let parts = path.split(separator: "?", maxSplits: 1).map(String.init)
+        var url = baseURL.appending(path: parts.first ?? path)
+        if parts.count == 2, let withQuery = URL(string: url.absoluteString + "?" + parts[1]) { url = withQuery }
+        var request = URLRequest(url: url)
         if let module = ModuleScope.current {
             request.setValue(module, forHTTPHeaderField: ModuleScope.header)
         }
@@ -385,7 +389,8 @@ extension DJOneHubAPI {
         request.httpMethod = method
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(body)
-        request.timeoutInterval = 8
+        // eSIM rename/delete go to the card over AT+CSIM or a reader: slow.
+        request.timeoutInterval = path.hasPrefix("api/esim") ? 90 : 8
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw APIError.invalidResponse
@@ -631,13 +636,23 @@ extension DJOneHubAPI {
         try await post(path: "api/sms/clear-module", body: EmptyBody())
     }
 
-    func esimOverview() async throws -> ESIMOverview {
-        try await get(path: "api/esim")
+    /// eSIM calls act on the module's card, or with reader on the card in a
+    /// USB smart-card reader.
+    private func esimPath(_ path: String, reader: Bool) -> String { reader ? path + "?source=reader" : path }
+
+    func esimOverview(reader: Bool = false) async throws -> ESIMOverview {
+        try await get(path: esimPath("api/esim", reader: reader), timeout: 60)
     }
 
-    func switchESIM(iccid: String) async throws -> ESIMSwitchResult {
+    func cardReaders() async throws -> [CardReader] {
+        struct Readers: Decodable { let readers: [CardReader] }
+        let response: Readers = try await get(path: "api/esim/readers")
+        return response.readers
+    }
+
+    func switchESIM(iccid: String, reader: Bool = false) async throws -> ESIMSwitchResult {
         // Switching over AT+CSIM plus the module restart takes up to ~2 minutes.
-        try await postDecoded(path: "api/esim/switch", body: ["iccid": iccid], timeout: 150)
+        try await postDecoded(path: esimPath("api/esim/switch", reader: reader), body: ["iccid": iccid], timeout: 150)
     }
 
     func esimHealth() async throws -> ESIMHealth {
@@ -656,12 +671,12 @@ extension DJOneHubAPI {
         )
     }
 
-    func renameESIMProfile(iccid: String, name: String) async throws {
-        try await patch(path: "api/esim/profile", body: ["iccid": iccid, "name": name])
+    func renameESIMProfile(iccid: String, name: String, reader: Bool = false) async throws {
+        try await patch(path: esimPath("api/esim/profile", reader: reader), body: ["iccid": iccid, "name": name])
     }
 
-    func deleteESIMProfile(iccid: String) async throws {
-        try await delete(path: "api/esim/profile", body: ["iccid": iccid])
+    func deleteESIMProfile(iccid: String, reader: Bool = false) async throws {
+        try await delete(path: esimPath("api/esim/profile", reader: reader), body: ["iccid": iccid])
     }
 
     func probeESIMPhonebook() async throws -> ESIMPhonebookProbe {
@@ -810,6 +825,12 @@ extension ESIMProfile {
     }
 }
 
+struct CardReader: Codable, Sendable, Hashable {
+    let name: String
+    let cardPresent: Bool
+    enum CodingKeys: String, CodingKey { case name; case cardPresent = "card_present" }
+}
+
 struct ESIMDownloadResult: Codable, Sendable {
     let message: String?
 }
@@ -820,10 +841,11 @@ extension DJOneHubAPI {
         matchingID: String,
         confirmationCode: String,
         imei: String,
-        aid: String
+        aid: String,
+        reader: Bool = false
     ) async throws -> ESIMDownloadResult {
         try await postDecoded(
-            path: "api/esim/download",
+            path: esimPath("api/esim/download", reader: reader),
             body: [
                 "smdp": smdp,
                 "matching_id": matchingID,
