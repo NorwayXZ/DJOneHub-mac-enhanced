@@ -19,7 +19,21 @@ struct ProxyIPVisit: Decodable {
     }
 }
 
+/// Earlier uses of the current exit IP by any module, kept permanently on this Mac.
+struct IPRecord: Decodable {
+    struct Use: Decodable {
+        var start: String
+        var end: String
+        var module: String? = nil
+        var card: String? = nil
+    }
+    var uses: Int
+    var first: String? = nil
+    var recent: [Use]? = nil
+}
+
 struct CellularProxyStatus: Decodable {
+    var ipRecord: IPRecord? = nil
     var ipSource: String? = nil
     var history: [ProxyIPVisit]? = nil
     var historyError: String? = nil
@@ -49,7 +63,7 @@ struct CellularProxyStatus: Decodable {
     var networkIssue: NetworkIssue? = nil
     enum CodingKeys: String, CodingKey {
         case location, isp, history
-        case networkIssue = "network_issue"
+        case networkIssue = "network_issue", ipRecord = "ip_record"
         case reconnectSeconds = "reconnect_seconds", reconnectAttempts = "reconnect_attempts"
         case autoStart = "auto_start"
         case reconnectMode = "reconnect_mode", reconnectMax = "reconnect_max", reconnectNote = "reconnect_note"
@@ -319,6 +333,9 @@ struct ProxyDashboard: View {
                                         .font(.callout.weight(.medium)).foregroundStyle(accent)
                                 }
                             }
+                            if let record = proxy.status?.ipRecord, proxy.status?.publicIP.isEmpty == false {
+                                ipRecordLine(record)
+                            }
                             if let network = usage.status?.network, network.registered {
                                 roamingBadge(network)
                             }
@@ -528,6 +545,48 @@ struct ProxyDashboard: View {
         let last = ISO8601DateFormatter().date(from: visit.lastSeen) ?? now
         let current = proxy.status?.running == true && visit.ip == proxy.status?.publicIP && proxy.status?.history?.last?.firstSeen == visit.firstSeen
         return current ? max(now, last) : last
+    }
+    /// Whether this exit IP was used before, how often and when; the full list on hover.
+    @ViewBuilder private func ipRecordLine(_ record: IPRecord) -> some View {
+        if record.uses == 0 {
+            Label("第一次用这个 IP", systemImage: "sparkles")
+                .font(.callout.weight(.semibold)).foregroundStyle(accent)
+                .help("本机所有模块的记录里，这个 IP 以前从没用过")
+        } else {
+            let uses = record.recent ?? []
+            let last = uses.first.flatMap { ISO8601DateFormatter().date(from: $0.start) }
+            HStack(spacing: 6) {
+                Label("以前用过 \(record.uses) 次", systemImage: "clock.arrow.circlepath")
+                    .font(.callout.weight(.semibold)).foregroundStyle(.orange)
+                if let last {
+                    Text("· 上次 " + Self.agoText(last) + "（" + last.formatted(date: .abbreviated, time: .shortened) + "）")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+                if let first = record.first.flatMap({ ISO8601DateFormatter().date(from: $0) }), record.uses > 1 {
+                    Text("· 首次 " + first.formatted(date: .abbreviated, time: .omitted)).font(.callout).foregroundStyle(.secondary)
+                }
+            }
+            .help(uses.prefix(10).map(ipUseText).joined(separator: "\n")
+                  + (record.uses > uses.count ? "\n…更早还有 \(record.uses - uses.count) 次" : ""))
+        }
+    }
+    private func ipUseText(_ use: IPRecord.Use) -> String {
+        let iso = ISO8601DateFormatter()
+        var text = use.start
+        if let start = iso.date(from: use.start) {
+            text = start.formatted(date: .abbreviated, time: .shortened)
+            if let end = iso.date(from: use.end) { text += "，用了 " + Self.usageText(from: start, to: end) }
+        }
+        let who = [use.module, use.card].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+        return who.isEmpty ? text : text + "（" + who + "）"
+    }
+    static func agoText(_ date: Date) -> String {
+        let minutes = max(0, Int(Date().timeIntervalSince(date) / 60))
+        switch minutes {
+        case ..<60: return "\(max(minutes, 1)) 分钟前"
+        case ..<1440: return "\(minutes / 60) 小时前"
+        default: return "\(minutes / 1440) 天前"
+        }
     }
     private func roamingBadge(_ network: UsageNetwork) -> some View {
         HStack(spacing: 8) {

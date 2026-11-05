@@ -46,18 +46,20 @@ func proxyListenAddress() string {
 }
 
 type proxyState struct {
-	NetworkIssue  *networkIssue  `json:"network_issue,omitempty"`
-	IPSource      string         `json:"ip_source"`
-	History       []proxyIPVisit `json:"history"`
-	HistoryError  string         `json:"history_error"`
-	Location      string         `json:"location"`
-	ISP           string         `json:"isp"`
-	CheckedAt     string         `json:"checked_at"`
-	LocationError string         `json:"location_error"`
-	Running       bool           `json:"running"`
-	Address       string         `json:"address"`
-	Interface     string         `json:"interface"`
-	PublicIP      string         `json:"public_ip"`
+	NetworkIssue *networkIssue  `json:"network_issue,omitempty"`
+	IPSource     string         `json:"ip_source"`
+	History      []proxyIPVisit `json:"history"`
+	// IPRecord: earlier uses of the current IP by any module, from the IP ledger.
+	IPRecord      *ipRecord `json:"ip_record,omitempty"`
+	HistoryError  string    `json:"history_error"`
+	Location      string    `json:"location"`
+	ISP           string    `json:"isp"`
+	CheckedAt     string    `json:"checked_at"`
+	LocationError string    `json:"location_error"`
+	Running       bool      `json:"running"`
+	Address       string    `json:"address"`
+	Interface     string    `json:"interface"`
+	PublicIP      string    `json:"public_ip"`
 	// The Mac's own address in the carrier IPv6 prefix as sites see it; empty without IPv6.
 	PublicIPv6 string `json:"public_ipv6"`
 	PreviousIP string `json:"previous_ip"`
@@ -110,6 +112,9 @@ func (p *cellularProxy) snapshot() proxyState {
 	s.Uploaded = p.uploaded.Load()
 	s.Downloaded = p.downloaded.Load()
 	s.NetworkIssue = currentNetworkIssue()
+	if n := len(s.History); n > 0 && s.History[n-1].IP == s.PublicIP {
+		s.IPRecord = recordForIP(s.PublicIP, s.History[n-1].FirstSeen)
+	}
 	return s
 }
 func (p *cellularProxy) stop() {

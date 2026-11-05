@@ -101,6 +101,8 @@ func (p *cellularProxy) recordHistoryLocked() {
 	}
 	p.state.History = visits
 	p.saveHistoryLocked()
+	last := visits[len(visits)-1]
+	go noteIPUse(last.IP, last.FirstSeen, last.LastSeen)
 }
 
 func (p *cellularProxy) saveHistoryLocked() {

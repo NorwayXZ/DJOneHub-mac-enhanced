@@ -123,6 +123,7 @@ func (a *app) noteRegistered() {
 		a.pushNetworkBack(offline)
 	}
 	noteCardHealth(a.cardICCID(), false)
+	ledgerCard.Store(cardName(a.cardICCID()))
 }
 
 // noteLost runs after each check that found no registration.
