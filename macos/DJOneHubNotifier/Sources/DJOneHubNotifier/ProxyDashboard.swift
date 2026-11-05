@@ -281,6 +281,7 @@ struct ProxyDashboard: View {
     @State private var confirmBinding = false
     @State private var renameModule = false
     @State private var moduleName = ""
+    @State private var showCheckup = false
     private let accent = Color(red: 0.05, green: 0.48, blue: 0.39)
     private var disabled: Bool { proxy.busy || proxy.reconnecting || proxy.status == nil || proxy.unavailable }
     var body: some View {
@@ -294,6 +295,9 @@ struct ProxyDashboard: View {
                             .font(.subheadline).foregroundStyle(.secondary)
                     }
                     Spacer()
+                    Button { showCheckup = true } label: { Label("一键体检", systemImage: "stethoscope") }
+                        .buttonStyle(.borderedProminent).tint(accent)
+                        .disabled(proxy.previewOnly)
                     Label(proxy.status?.running == true ? "监听中" : (proxy.awaitingAutoStart ? "等待恢复" : "已停止"),
                           systemImage: proxy.status?.running == true ? "circle.fill" : (proxy.awaitingAutoStart ? "clock.arrow.circlepath" : "circle"))
                         .font(.caption.weight(.semibold)).foregroundStyle(proxy.awaitingAutoStart ? Color.orange : accent)
@@ -437,6 +441,7 @@ struct ProxyDashboard: View {
                 }
             }.padding(24)
         }
+        .sheet(isPresented: $showCheckup) { CheckupSheet(api: proxy.api) }
         .alert("重连蜂窝网络？", isPresented: $confirmReconnect) {
             Button("取消", role: .cancel) {}
             Button("断开并重连", role: .destructive) { Task { await proxy.act("reconnect", confirm: true) } }

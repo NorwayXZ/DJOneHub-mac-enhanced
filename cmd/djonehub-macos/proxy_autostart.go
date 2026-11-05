@@ -15,7 +15,7 @@ import (
 // it back once the module serves traffic again. Only the explicit stop action
 // clears it.
 
-const proxyAutoStartInterval = 3 * time.Second
+const proxyAutoStartInterval = time.Second
 
 type proxyAutoStartFile struct {
 	Enabled bool `json:"enabled"`

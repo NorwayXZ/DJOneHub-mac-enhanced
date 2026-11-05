@@ -90,6 +90,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let systemNotifications = SystemNotifications()
     private var appStatusItem: NSStatusItem?
     private var proxyTimer: Timer?
+    private var proxyRefreshing = false
+    private var proxyTick = 0
     private let healthCheck: Bool
     private let reviewSafe: Bool
 
@@ -223,12 +225,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if !reviewSafe { systemNotifications.start() }
         bandCenter.onFinish = { [weak self] title, body in self?.systemNotifications.postBandResult(title: title, body: body) }
         usageCenter.onAlert = { [weak self] title, body in self?.systemNotifications.postUsageAlert(title: title, body: body) }
-        proxyTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+        // The backend answers these in a few milliseconds, so the proxy page
+        // follows the module within a second; band and usage change slowly.
+        proxyTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                guard let self else { return }
-                await self.proxyCenter.refresh()
-                await self.bandCenter.refresh()
-                await self.usageCenter.refresh()
+                guard let self, !self.proxyRefreshing else { return }
+                self.proxyRefreshing = true
+                defer { self.proxyRefreshing = false }
+                self.proxyTick += 1
+                if self.proxyTick % 3 == 0 {
+                    async let band: Void = self.bandCenter.refresh()
+                    async let usage: Void = self.usageCenter.refresh()
+                    await self.proxyCenter.refresh()
+                    _ = await (band, usage)
+                } else {
+                    await self.proxyCenter.refresh()
+                }
             }
         }
         if reviewSafe {

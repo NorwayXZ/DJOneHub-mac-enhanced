@@ -185,12 +185,15 @@ type fleetController struct {
 	inventory      fleetInventoryFunc
 	start          fleetStartFunc
 	// probe reads a module's IMEI before it starts; nil keeps USB positions.
-	probe     fleetProbeFunc
-	probes    map[string]*fleetProbeState
-	dirty     bool
-	retryAt   map[string]time.Time
-	paused    bool
-	lastError string
+	probe  fleetProbeFunc
+	probes map[string]*fleetProbeState
+	dirty  bool
+	// reconnects: when each module came back on USB, for the checkup.
+	reconnects map[string][]time.Time
+	reconciled bool
+	retryAt    map[string]time.Time
+	paused     bool
+	lastError  string
 	// The module with a call in progress, from the last call status sweep,
 	// and the App's audio host registration replayed to every worker.
 	callOwner     string
@@ -205,7 +208,7 @@ func newFleetController(path string, inventory fleetInventoryFunc, start fleetSt
 		return nil, err
 	}
 	sortFleetBindings(&r)
-	return &fleetController{registry: r, path: path, inventory: inventory, start: start, devices: map[string]fleetDevice{}, approved: map[string]string{}, workers: map[string]fleetProcess{}, workerSessions: map[string]string{}, errors: map[string]string{}, retryAt: map[string]time.Time{}, probes: map[string]*fleetProbeState{}}, nil
+	return &fleetController{registry: r, path: path, inventory: inventory, start: start, devices: map[string]fleetDevice{}, approved: map[string]string{}, workers: map[string]fleetProcess{}, workerSessions: map[string]string{}, errors: map[string]string{}, retryAt: map[string]time.Time{}, probes: map[string]*fleetProbeState{}, reconnects: map[string][]time.Time{}}, nil
 }
 func (c *fleetController) reconcile() {
 	c.reconcileMu.Lock()
@@ -299,6 +302,14 @@ func (c *fleetController) reconcile() {
 			delete(c.workerSessions, id)
 		}
 	}
+	if c.reconciled {
+		for id, d := range next {
+			if old, ok := c.devices[id]; !ok || old.Session != d.Session {
+				c.noteReconnectLocked(id, time.Now())
+			}
+		}
+	}
+	c.reconciled = true
 	c.devices = next
 	c.mu.Unlock()
 	stopFleetProcesses(stops)

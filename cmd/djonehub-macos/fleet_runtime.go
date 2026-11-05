@@ -220,7 +220,9 @@ func serveFleetSupervisor(listen string) error {
 	c.reconcile()
 	go runTelegramBot(ctx, fleetBot{c})
 	go func() {
-		ticker := time.NewTicker(3 * time.Second)
+		// Listing USB devices takes about 15 ms, so a replugged or rebooted
+		// module is picked up within a second.
+		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
 		for {
 			select {
@@ -283,6 +285,7 @@ func (c *fleetController) handler(fallback http.Handler) http.Handler {
 		finishModuleModeChange(w, enabled)
 	})
 	mux.HandleFunc("GET /api/modules", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, c.snapshot()) })
+	mux.HandleFunc("GET /api/checkup", c.fleetCheckup)
 	mux.HandleFunc("POST /api/modules/{id}/confirm", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Generation string `json:"generation"`

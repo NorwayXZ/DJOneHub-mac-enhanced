@@ -40,7 +40,7 @@ import (
 //go:embed web/*
 var webAssets embed.FS
 
-const appVersion = "1.3.0-proxy-preview.45"
+const appVersion = "1.3.0-proxy-preview.46"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
@@ -167,6 +167,7 @@ type app struct {
 	usbATOpenMu      sync.Mutex
 	recoveryMu       sync.Mutex
 	statusCache      statusCache
+	iccid            iccidCache
 	lostSignalCount  int
 	lastNetworkCheck time.Time
 }
@@ -1053,7 +1054,7 @@ func (a *app) markUSBATDetached(reason string) {
 // open, watches cellular registration, and escalates through gentle recovery
 // steps when the module loses the network for a sustained period.
 func (a *app) startSignalRecovery(ctx context.Context) {
-	const checkInterval = 8 * time.Second
+	const checkInterval = 5 * time.Second
 	ticker := time.NewTicker(checkInterval)
 	defer ticker.Stop()
 	for {
@@ -1092,7 +1093,7 @@ func (a *app) signalRecoveryOnce() {
 			log.Printf("cellular signal recovered: registration=%d signal=%d dBm", reg, signal)
 		}
 		a.lostSignalCount = 0
-		noteNetworkRegistered()
+		a.noteRegistered()
 	} else {
 		a.lostSignalCount++
 		if a.lostSignalCount <= 3 {
@@ -1103,7 +1104,7 @@ func (a *app) signalRecoveryOnce() {
 		// Without a usable SIM (empty slot, or an eSIM with no enabled
 		// Profile) there is nothing to register, so do not keep rebooting.
 		ready := a.simReady()
-		noteNetworkLost(reg, signal, ready)
+		a.noteLost(reg, signal, ready)
 		if a.lostSignalCount >= 3 && ready {
 			a.recoverSignal()
 		}
@@ -1143,14 +1144,14 @@ func (a *app) recoverSignal() {
 		log.Printf("cellular signal recovery: forcing PS attach and automatic network selection")
 		_, _ = a.usbAT.Command("AT+CGATT=1", 5*time.Second)
 		_, _ = a.usbAT.Command("AT+COPS=0", 5*time.Second)
-	case a.lostSignalCount == 15:
+	case a.lostSignalCount == 24:
 		log.Printf("cellular signal recovery: cycling radio (AT+CFUN=0 then 1)")
 		_, _ = a.usbAT.Command("AT+CFUN=0", 5*time.Second)
 		time.Sleep(3 * time.Second)
 		if a.usbAT != nil {
 			_, _ = a.usbAT.Command("AT+CFUN=1", 10*time.Second)
 		}
-	case a.lostSignalCount >= 38 && time.Since(lastSignalReboot()) >= 15*time.Minute:
+	case a.lostSignalCount >= 60 && time.Since(lastSignalReboot()) >= 15*time.Minute:
 		markSignalReboot()
 		log.Printf("cellular signal recovery: rebooting module (AT+CFUN=1,1)")
 		_, _ = a.usbAT.Command("AT+CFUN=1,1", 3*time.Second)
@@ -1217,6 +1218,8 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /api/gps/refresh", a.refreshGPS)
 	mux.HandleFunc("POST /api/at", a.executeAT)
 	mux.HandleFunc("GET /api/network", a.networkDiagnostic)
+	mux.HandleFunc("GET /api/checkup", a.checkupAPI)
+	mux.HandleFunc("GET /api/checkup/module", a.checkupModuleAPI)
 	mux.HandleFunc("GET /api/network/traffic", a.networkTraffic)
 	mux.HandleFunc("GET /api/network/cellular-policy", a.getCellularPolicy)
 	mux.HandleFunc("POST /api/network/cellular-policy", a.setCellularPolicy)

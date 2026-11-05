@@ -164,4 +164,5 @@ func (a *app) forgetStatus() {
 	a.statusCache.mu.Lock()
 	a.statusCache.at = time.Time{}
 	a.statusCache.mu.Unlock()
+	a.forgetCardICCID()
 }

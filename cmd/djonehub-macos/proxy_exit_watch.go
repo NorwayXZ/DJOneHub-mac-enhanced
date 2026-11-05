@@ -56,6 +56,7 @@ func (a *app) watchProxyExitOnce(ctx context.Context) {
 	probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	ip, source, err := watchExitIP(probeCtx, before.Interface, before.IPSource)
+	a.noteExitCheck(err == nil)
 	if err != nil {
 		return
 	}
