@@ -40,7 +40,7 @@ import (
 //go:embed web/*
 var webAssets embed.FS
 
-const appVersion = "1.3.0-proxy-preview.44"
+const appVersion = "1.3.0-proxy-preview.45"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
@@ -306,6 +306,7 @@ func main() {
 	var moduleSession uint64
 	var multiModule bool
 	var moduleID, workerSocket, proxyListen string
+	var probeSession uint64
 	flag.StringVar(&port, "port", "", "AT serial port; auto-detected when omitted")
 	flag.StringVar(&listen, "listen", "127.0.0.1:7575", "HTTP listen address")
 	flag.BoolVar(&demo, "demo", false, "run the web UI with simulated modem data")
@@ -316,7 +317,16 @@ func main() {
 	flag.StringVar(&workerSocket, "worker-socket", "", "internal: private supervisor socket")
 	flag.StringVar(&proxyListen, "proxy-listen", proxyAddress, "internal: assigned loopback SOCKS address")
 	flag.StringVar(&fleetStateRoot, "state-dir", "", "module manager state directory; default: Application Support/DJOneHub")
+	flag.Uint64Var(&probeSession, "probe-module-session", 0, "internal: print one USB module's IMEI and exit")
 	flag.Parse()
+	if probeSession != 0 {
+		scopedUSBSession = probeSession
+		if err := runModuleProbe(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if moduleSession != 0 {
 		scopedUSBSession = moduleSession
 		scopedModuleID = moduleID

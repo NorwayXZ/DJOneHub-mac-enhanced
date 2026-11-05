@@ -213,6 +213,7 @@ func serveFleetSupervisor(listen string) error {
 	if err != nil {
 		return fmt.Errorf("module bindings: %w", err)
 	}
+	c.probe = fleetProber()
 	defer c.close()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
