@@ -127,8 +127,10 @@ struct ModemStatus: Codable, Sendable {
     let regStatusText: String?
     let imei: String?
     let iccid: String?
+    var cardCapability: CardCapability? = nil
 
     enum CodingKeys: String, CodingKey {
+        case cardCapability = "card_capability"
         case signalDBM = "signal_dbm"
         case networkMode = "network_mode"
         case operatorName = "operator"
@@ -511,13 +513,31 @@ struct ESIMOverview: Codable, Sendable {
     let profiles: [ESIMProfileGroup]?
     /// Shown from the last saved read while the card is read again.
     var refreshing: Bool? = nil
+    /// What each card (by ICCID) can do, learned while it was enabled.
+    var capabilities: [String: CardCapability]? = nil
 
     enum CodingKeys: String, CodingKey {
         case cardType = "card_type"
         case message
         case chipInfo = "chip_info"
-        case profiles, refreshing
+        case profiles, refreshing, capabilities
     }
+
+    func capability(for iccid: String?) -> CardCapability? {
+        guard let iccid, !iccid.isEmpty else { return nil }
+        let key = iccid.uppercased().hasSuffix("F") ? String(iccid.dropLast()) : iccid
+        return capabilities?[key] ?? capabilities?[iccid]
+    }
+}
+
+/// Whether a card is data only (most travel eSIMs) or can also receive SMS.
+struct CardCapability: Codable, Sendable, Equatable {
+    let kind: String
+    let title: String
+    let detail: String
+    let smsc: String?
+
+    var dataOnly: Bool { kind == "data_only" }
 }
 
 struct ESIMChipInfo: Codable, Sendable {
@@ -783,9 +803,10 @@ struct ESIMHealth: Codable, Sendable {
     let signalDBM: Int?
     let networkMode: String?
     var networkIssue: NetworkIssue? = nil
+    var capability: CardCapability? = nil
 
     enum CodingKeys: String, CodingKey {
-        case ok, message, registration, registered, imsi
+        case ok, message, registration, registered, imsi, capability
         case networkIssue = "network_issue"
         case activeProfile = "active_profile"
         case moduleICCID = "module_iccid"

@@ -724,6 +724,7 @@ private struct MessagesView: View {
     @State private var composerRecipient = ""
     @State private var ownNumber = ""
     @State private var autoCleanupME = true
+    @State private var cardCapability: CardCapability?
 
     private var conversations: [Conversation] {
         var latest: [String: (content: String, date: Date)] = [:]
@@ -827,6 +828,11 @@ private struct MessagesView: View {
 
             Divider()
 
+            if let capability = cardCapability, capability.dataOnly {
+                CardCapabilityBanner(capability: capability)
+                    .padding(.horizontal, 12).padding(.top, 10)
+            }
+
             if let sender = selected {
                 ThreadView(
                     sender: sender,
@@ -858,6 +864,11 @@ private struct MessagesView: View {
                             Text(L10n.t("暂无短信"))
                                 .font(.body)
                                 .foregroundStyle(.secondary)
+                            if cardCapability?.dataOnly == true {
+                                Text(L10n.t("当前号码是流量卡，不会收到短信"))
+                                    .font(.caption)
+                                    .foregroundStyle(.orange)
+                            }
                         }
                     }
                 }
@@ -866,7 +877,12 @@ private struct MessagesView: View {
         .task {
             if let identity = try? await calls.apiClient.simIdentity() { ownNumber = identity.phoneNumber }
             if let status = try? await calls.apiClient.smsStatus() { autoCleanupME = status.autoCleanupME }
+            var round = 0
             while !Task.isCancelled {
+                if round % 6 == 0, let modem = try? await calls.apiClient.modemStatus() {
+                    cardCapability = modem.cardCapability
+                }
+                round += 1
                 await load()
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
             }

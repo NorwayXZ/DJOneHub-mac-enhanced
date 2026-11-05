@@ -40,7 +40,7 @@ import (
 //go:embed web/*
 var webAssets embed.FS
 
-const appVersion = "1.3.0-proxy-preview.43"
+const appVersion = "1.3.0-proxy-preview.44"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
@@ -166,6 +166,7 @@ type app struct {
 
 	usbATOpenMu      sync.Mutex
 	recoveryMu       sync.Mutex
+	statusCache      statusCache
 	lostSignalCount  int
 	lastNetworkCheck time.Time
 }
@@ -1324,7 +1325,10 @@ func (a *app) status(w http.ResponseWriter, _ *http.Request) {
 		if a.usbAT != nil {
 			status, err := a.usbATStatus()
 			if err == nil {
-				writeJSON(w, http.StatusOK, status)
+				writeJSON(w, http.StatusOK, struct {
+					modem.DeviceStatus
+					CardCapability *cardCapability `json:"card_capability,omitempty"`
+				}{status, cardCapabilityFor(status.ICCID)})
 				return
 			}
 			a.resetUSBATIfGone(err)
@@ -1363,7 +1367,7 @@ func (a *app) currentUSBDevice() *usbDeviceStatus {
 	return usbDevice
 }
 
-func (a *app) usbATStatus() (modem.DeviceStatus, error) {
+func (a *app) readUSBATStatus() (modem.DeviceStatus, error) {
 	firmwareResp, _ := a.usbAT.Command("ATI", 3*time.Second)
 	cpinResp, cpinErr := a.usbAT.Command("AT+CPIN?", 3*time.Second)
 	csqResp, _ := a.usbAT.Command("AT+CSQ", 3*time.Second)
@@ -1380,6 +1384,7 @@ func (a *app) usbATStatus() (modem.DeviceStatus, error) {
 	}
 
 	noteSIMIMSI(parseUSBATIMSI(cimiResp))
+	a.noteCardCapability(parseUSBATPrefixed(qccidResp, "+QCCID:"), cregResp, ceregResp)
 	regStatus := firstNonZeroRegistration(ceregResp, cregResp)
 	mode, duplex, band, channel := parseUSBATQNWInfo(qnwinfoResp)
 	usbnetMode := -1
@@ -1912,6 +1917,10 @@ func (a *app) sendSMS(w http.ResponseWriter, r *http.Request) {
 	}
 	segments, err := a.sendTextSMS(body.Phone, body.Message)
 	if err != nil {
+		if c := cardCapabilityFor(a.currentICCID()); c != nil && c.Kind == "data_only" {
+			writeError(w, http.StatusBadGateway, "当前号码是流量卡，没有短信功能，发不出短信（"+err.Error()+"）")
+			return
+		}
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
@@ -1991,6 +2000,7 @@ func (a *app) executeAT(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer a.moduleOperationMu.Unlock()
+	defer a.forgetStatus()
 	var body struct {
 		Command string `json:"command"`
 	}
@@ -3483,8 +3493,9 @@ func (a *app) esimOverview(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, struct {
 		*esim.EsimOverview
-		Refreshing bool `json:"refreshing,omitempty"`
-	}{overview, refreshing})
+		Refreshing   bool                      `json:"refreshing,omitempty"`
+		Capabilities map[string]cardCapability `json:"capabilities,omitempty"`
+	}{overview, refreshing, allCardCapabilities()})
 }
 
 // A normal physical SIM cannot open the GSMA eUICC management AIDs. The
@@ -3555,6 +3566,7 @@ func (a *app) esimHealth(w http.ResponseWriter, _ *http.Request) {
 		"signal_dbm":     status.SignalDBM,
 		"network_mode":   status.NetworkMode,
 		"network_issue":  currentNetworkIssue(),
+		"capability":     cardCapabilityFor(status.ICCID),
 	})
 }
 
@@ -3564,6 +3576,7 @@ func (a *app) switchESIM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer unlock()
+	defer a.forgetStatus()
 	_, switchAllowed := a.currentESIMManager()
 	esimManager, ok := a.esimManagerFor(w, r)
 	if !ok {

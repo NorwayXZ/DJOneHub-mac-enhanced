@@ -213,6 +213,9 @@ struct MoreView: View {
                 if !useReader, let issue = esimHealth?.networkIssue {
                     NetworkIssueBanner(issue: issue).padding([.horizontal, .top], 10)
                 }
+                if !useReader, let capability = esimHealth?.capability {
+                    CardCapabilityBanner(capability: capability).padding([.horizontal, .top], 10)
+                }
                 if esim == nil && !(useReader && readerError != nil) {
                     BusyBanner(title: L10n.t("正在读取卡片信息"), started: esimLoadStarted,
                                hint: L10n.t("第一次读卡要逐个读出卡里的号码，约 10–60 秒；读过之后再打开会立即显示。"))
@@ -307,6 +310,9 @@ struct MoreView: View {
                                         .lineLimit(1)
                                 }
                                 Spacer()
+                                if let capability = esim?.capability(for: profile.iccid) {
+                                    CardCapabilityBadge(capability: capability)
+                                }
                                 if profile.enabled {
                                     Text(L10n.t("使用中"))
                                         .font(.caption2.weight(.semibold))

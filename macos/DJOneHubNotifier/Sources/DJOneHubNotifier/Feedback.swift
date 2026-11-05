@@ -150,3 +150,38 @@ struct NetworkIssueBanner: View {
         return seconds < 60 ? " · \(seconds) 秒" : " · 已 \(seconds / 60) 分钟"
     }
 }
+
+/// A small tag: "仅流量" or "可收短信".
+struct CardCapabilityBadge: View {
+    let capability: CardCapability
+
+    var body: some View {
+        Label(capability.dataOnly ? L10n.t("仅流量") : L10n.t("可收短信"),
+              systemImage: capability.dataOnly ? "antenna.radiowaves.left.and.right" : "message.fill")
+            .font(.caption2.weight(.semibold))
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .foregroundStyle(capability.dataOnly ? Color.orange : Color.green)
+            .background((capability.dataOnly ? Color.orange : Color.green).opacity(0.14), in: Capsule())
+            .help(capability.detail)
+    }
+}
+
+/// Explains what the card in use can do, so an empty SMS inbox on a travel
+/// data card is not mistaken for a broken module.
+struct CardCapabilityBanner: View {
+    let capability: CardCapability
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: capability.dataOnly ? "antenna.radiowaves.left.and.right" : "message.fill")
+                .foregroundStyle(capability.dataOnly ? Color.orange : Color.green)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(L10n.t("当前号码：") + capability.title).font(.footnote.weight(.semibold))
+                Text(capability.detail).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .background((capability.dataOnly ? Color.orange : Color.green).opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+    }
+}

@@ -144,6 +144,11 @@ func (a *app) keepAliveOnce(now time.Time) {
 // runKeepAlive sends the plan's SMS from the SIM in this module.
 func (a *app) runKeepAlive(iccid string, now time.Time) (keepAlivePlan, error) {
 	plan := keepAlive.get().Plans[iccid]
+	if c := cardCapabilityFor(iccid); c != nil && c.Kind == "data_only" {
+		err := fmt.Errorf("这是流量卡，没有短信功能，发不了保号短信")
+		_ = updatePlan(iccid, func(p *keepAlivePlan) { p.LastError = err.Error() })
+		return plan, err
+	}
 	to := strings.TrimSpace(plan.To)
 	if to == "" {
 		to = a.ownNumber()
