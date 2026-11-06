@@ -151,7 +151,7 @@ func (a *app) checkupAPI(w http.ResponseWriter, r *http.Request) {
 	if !a.demo {
 		m = a.checkup(r.Context())
 	}
-	writeJSON(w, 200, map[string]any{"modules": []checkupModule{m}})
+	writeJSON(w, 200, map[string]any{"modules": []checkupModule{m}, "push": pushCheckItem()})
 }
 
 // fleetCheckup checks every module at once and adds what only the supervisor
@@ -208,7 +208,12 @@ func (c *fleetController) fleetCheckup(w http.ResponseWriter, r *http.Request) {
 			out[i].Items = append(out[i].Items, checkupItem{Name: "USB 稳定", Level: "ok", Detail: "过去 1 小时没有异常断开"})
 		}
 	}
-	writeJSON(w, 200, map[string]any{"modules": out})
+	writeJSON(w, 200, map[string]any{"modules": out, "push": pushCheckItem()})
+}
+
+func pushCheckItem() checkupItem {
+	level, detail, _ := pushCheck()
+	return checkupItem{Name: "手机推送", Level: level, Detail: detail}
 }
 
 // noteReconnectLocked remembers when a module came back on USB.

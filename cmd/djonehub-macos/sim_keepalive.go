@@ -178,9 +178,9 @@ func (a *app) runKeepAlive(iccid string, now time.Time) (keepAlivePlan, error) {
 	settings := forwarding.get()
 	if err == nil {
 		log.Printf("SIM keep-alive sent for %s", shortICCID(iccid))
-		go sendForward(context.Background(), settings, "SIM 保号已完成", fmt.Sprintf("卡 %s%s 已发送保号短信给 %s；下次在 %d 天后。", shortICCID(iccid), phoneSuffix(plan.Phone), to, plan.days()), 2)
+		go deliverPush(settings, "SIM 保号已完成", fmt.Sprintf("卡 %s%s 已发送保号短信给 %s；下次在 %d 天后。", shortICCID(iccid), phoneSuffix(plan.Phone), to, plan.days()), 2)
 	} else {
-		go sendForward(context.Background(), settings, "SIM 保号失败", fmt.Sprintf("卡 %s%s 发送保号短信失败：%v。请检查余额或信号。", shortICCID(iccid), phoneSuffix(plan.Phone), err), 2)
+		go deliverPush(settings, "SIM 保号失败", fmt.Sprintf("卡 %s%s 发送保号短信失败：%v。请检查余额或信号。", shortICCID(iccid), phoneSuffix(plan.Phone), err), 2)
 	}
 	return keepAlive.get().Plans[iccid], err
 }
@@ -209,7 +209,7 @@ func (a *app) remindAbsentSIMs(now time.Time) {
 		})
 		if claimed {
 			overdue := int(now.Sub(next).Hours() / 24)
-			go sendForward(context.Background(), settings, "SIM 需要保号",
+			go deliverPush(settings, "SIM 需要保号",
 				fmt.Sprintf("卡 %s%s 已超过保号期限 %d 天，但没有插在任何模块上。请插入任一模块，DJOneHub 会自动发送保号短信。", shortICCID(iccid), phoneSuffix(plan.Phone), overdue), 2)
 		}
 	}

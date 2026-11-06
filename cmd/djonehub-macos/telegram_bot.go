@@ -122,14 +122,16 @@ type tgUpdate struct {
 }
 
 func runTelegramBot(ctx context.Context, backend botBackend) {
-	telegramSOCKS = func() string {
+	telegramSOCKS = func() []string {
+		out := []string{}
 		for _, m := range backend.modules() {
 			if m.Connected {
-				return m.Socks
+				out = append(out, m.Socks)
 			}
 		}
-		return ""
+		return out
 	}
+	go runPushOutbox(ctx)
 	failures := 0
 	for ctx.Err() == nil {
 		settings := forwarding.get()

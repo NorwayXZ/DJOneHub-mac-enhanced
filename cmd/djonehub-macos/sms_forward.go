@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -187,11 +186,7 @@ func (a *app) forwardNewSMS(items []receivedSMS) {
 		}
 		title, body := smsForwardText(item, module)
 		remember := func(id int64) { rememberSMSPush(id, scopedModuleID, item.Sender) }
-		go func() {
-			for _, err := range sendForward(context.Background(), settings, title, body, 3, remember) {
-				log.Printf("SMS forward from %q failed: %v", item.Sender, err)
-			}
-		}()
+		go deliverPush(settings, title, body, 3, remember)
 	}
 }
 
@@ -253,10 +248,10 @@ func sendForward(ctx context.Context, s forwardSettings, title, body string, att
 	return failed
 }
 
-// telegramSOCKS, when set, names a local SOCKS5 proxy (a module's) that the
-// multi-module supervisor, which owns no cellular interface, can reach
-// Telegram through.
-var telegramSOCKS func() string
+// telegramSOCKS, when set, lists the local SOCKS5 proxies (one per connected
+// module) the multi-module supervisor, which owns no cellular interface, can
+// reach Telegram through.
+var telegramSOCKS func() []string
 
 type telegramRejected struct{ msg string }
 
@@ -278,28 +273,34 @@ func telegramCall(ctx context.Context, s forwardSettings, method string, params 
 	if err == nil || s.TelegramAPI != "" || errors.As(err, &rejected) || ctx.Err() != nil {
 		return err
 	}
-	var transport *http.Transport
+	routes := []*http.Transport{}
 	if iface, ifaceErr := proxyInterface(); ifaceErr == nil && !coordinatorOnly {
-		transport = &http.Transport{
+		routes = append(routes, &http.Transport{
 			Proxy:       nil,
 			DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) { return cellularDial(ctx, iface, addr) },
+		})
+	}
+	// Then every module's proxy: one card may be dead while another works.
+	if telegramSOCKS != nil {
+		for _, socks := range telegramSOCKS() {
+			routes = append(routes, &http.Transport{Proxy: http.ProxyURL(&url.URL{Scheme: "socks5h", Host: socks})})
 		}
-	} else if telegramSOCKS != nil && telegramSOCKS() != "" {
-		transport = &http.Transport{Proxy: http.ProxyURL(&url.URL{Scheme: "socks5h", Host: telegramSOCKS()})}
-	} else {
+	}
+	if len(routes) == 0 {
 		return err
 	}
-	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
-	transport.DisableKeepAlives = true
-	defer transport.CloseIdleConnections()
 	defer beginCellularActivity()()
-	if cellErr := postTelegram(ctx, &http.Client{Transport: transport}, target, payload, timeout, into); cellErr != nil {
-		if errors.As(cellErr, &rejected) {
+	var cellErr error
+	for _, transport := range routes {
+		transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+		transport.DisableKeepAlives = true
+		cellErr = postTelegram(ctx, &http.Client{Transport: transport}, target, payload, timeout, into)
+		transport.CloseIdleConnections()
+		if cellErr == nil || errors.As(cellErr, &rejected) || ctx.Err() != nil {
 			return cellErr
 		}
-		return fmt.Errorf("宽带：%v；4G：%v", err, cellErr)
 	}
-	return nil
+	return fmt.Errorf("宽带：%v；4G：%v", err, cellErr)
 }
 
 // sendTelegram posts text to the configured chat, as a reply when replyTo is

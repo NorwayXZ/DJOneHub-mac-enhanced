@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -105,7 +104,7 @@ func pushModuleNote(title, body string) {
 	if module := moduleLabel(); module != "" {
 		title = module + " · " + title
 	}
-	go sendForward(context.Background(), settings, title, body, 2)
+	go deliverPush(settings, title, body, 2)
 }
 
 func (a *app) pushNetworkIssue(issue *networkIssue) {

@@ -22,6 +22,8 @@ struct CheckupModule: Codable, Sendable, Identifiable {
 
 struct CheckupReport: Codable, Sendable {
     let modules: [CheckupModule]
+    /// Whether pushes reach the phone; shared by all modules.
+    var push: CheckupItem? = nil
 }
 
 extension DJOneHubAPI {
@@ -74,6 +76,17 @@ struct CheckupSheet: View {
                 VStack(alignment: .leading, spacing: 12) {
                     ForEach(report?.modules ?? [], id: \.identity) { module in
                         moduleCard(module)
+                    }
+                    if let push = report?.push, push.level != "off" {
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: checkupIcon(push.level)).foregroundStyle(checkupColor(push.level)).frame(width: 16)
+                            Text(push.name).font(.footnote.weight(.semibold)).frame(width: 72, alignment: .leading)
+                            Text(push.detail).font(.footnote).foregroundStyle(.secondary).textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(14)
+                        .background(checkupColor(push.level).opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
                     }
                 }
             }

@@ -201,7 +201,7 @@ func (a *app) rotateKeepAlive(target, back esimCardProfile) {
 	label := shortICCID(target.ICCID) + phoneSuffix(target.Name)
 	fail := func(reason string) {
 		_ = updatePlan(target.ICCID, func(p *keepAlivePlan) { p.LastError = reason })
-		go sendForward(context.Background(), settings, "SIM 保号失败", fmt.Sprintf("eSIM 号码 %s：%s", label, reason), 2)
+		go deliverPush(settings, "SIM 保号失败", fmt.Sprintf("eSIM 号码 %s：%s", label, reason), 2)
 	}
 	err := keepAlive.update(func(f *keepAliveFile) {
 		if f.Returns == nil {
@@ -238,7 +238,7 @@ func (a *app) restoreProfile(eid string, back esimCardProfile) {
 	if a.simICCID() != back.ICCID {
 		if err := a.switchProfileFor(back); err != nil {
 			log.Printf("SIM keep-alive: switching back to %s failed: %v", shortICCID(back.ICCID), err)
-			go sendForward(context.Background(), forwarding.get(), "SIM 保号：切回失败",
+			go deliverPush(forwarding.get(), "SIM 保号：切回失败",
 				fmt.Sprintf("保号后没能切回 eSIM 号码 %s：%v。半小时后会再试，也可以在 App 里手动切换。", shortICCID(back.ICCID), err), 2)
 			return
 		}
