@@ -1,8 +1,12 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -103,5 +107,33 @@ func TestFleetChildWithDeletedSocketIsDead(t *testing.T) {
 	slow := &fleetChild{socket: socket, done: make(chan struct{}), started: time.Now().Add(-time.Minute)}
 	if slow.Alive() {
 		t.Fatal("worker that never opened its socket in 30 s must count as dead")
+	}
+}
+
+func TestESIMPageOfStoppedModuleShowsSavedProfiles(t *testing.T) {
+	dir := t.TempDir()
+	c, err := newFleetController(filepath.Join(dir, "module-bindings.json"), func() ([]fleetDevice, error) { return nil, nil }, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	get := func() (int, map[string]any) {
+		r := httptest.NewRequest("GET", "/api/esim", nil)
+		r.Header.Set(moduleHeader, "m1")
+		w := httptest.NewRecorder()
+		if !c.route(w, r) {
+			t.Fatal("eSIM request for a stopped module was not answered")
+		}
+		var body map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &body)
+		return w.Code, body
+	}
+	if code, body := get(); code != 503 || !strings.Contains(fmt.Sprint(body["error"]), "没有连接") {
+		t.Fatalf("no saved copy: %d %v", code, body)
+	}
+	_ = os.MkdirAll(filepath.Join(dir, "modules", "m1"), 0700)
+	_ = os.WriteFile(filepath.Join(dir, "modules", "m1", "esim-overview.json"), []byte(`{"profiles":[{"eid":"1","profiles":[{"iccid":"8985","name":"A"}]}]}`), 0600)
+	code, body := get()
+	if code != 200 || body["profiles"] == nil || !strings.Contains(fmt.Sprint(body["offline"]), "没有连接") {
+		t.Fatalf("saved copy: %d %v", code, body)
 	}
 }

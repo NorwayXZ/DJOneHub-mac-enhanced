@@ -94,8 +94,7 @@ func fleetSpawner(dir string) fleetStartFunc {
 		if len(socket) > 100 {
 			return nil, errors.New("worker socket path too long")
 		}
-		// The socket directory lives in the system temp folder, which macOS
-		// or cleanup tools may empty while the supervisor runs; recreate it.
+		// Recreate the socket folder in case something deleted it meanwhile.
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			return nil, err
 		}
@@ -225,11 +224,18 @@ func serveFleetSupervisor(listen string) error {
 		return err
 	}
 	defer unlock()
-	dir, err := os.MkdirTemp("", "djo-")
-	if err != nil {
+	// Worker sockets live in DJOneHub's own folder: the system temp folder
+	// gets emptied by macOS and cleanup apps while DJOneHub runs. Very long
+	// home paths fall back to the temp folder (socket paths max ~100 bytes).
+	dir := filepath.Join(stateDir, "run")
+	if len(filepath.Join(dir, "10909.sock")) > 100 {
+		if dir, err = os.MkdirTemp("", "djo-"); err != nil {
+			return err
+		}
+		defer os.RemoveAll(dir)
+	} else if err = os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
-	defer os.RemoveAll(dir)
 	c, err := newFleetController(filepath.Join(stateDir, "module-bindings.json"), discoverFleetDevices, fleetSpawner(dir))
 	if err != nil {
 		return fmt.Errorf("module bindings: %w", err)

@@ -515,12 +515,14 @@ struct ESIMOverview: Codable, Sendable {
     var refreshing: Bool? = nil
     /// What each card (by ICCID) can do, learned while it was enabled.
     var capabilities: [String: CardCapability]? = nil
+    /// Set when the module's backend is not running: the profiles are from the last read and cannot be switched.
+    var offline: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case cardType = "card_type"
         case message
         case chipInfo = "chip_info"
-        case profiles, refreshing, capabilities
+        case profiles, refreshing, capabilities, offline
     }
 
     func capability(for iccid: String?) -> CardCapability? {

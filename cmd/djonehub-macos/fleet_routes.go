@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -85,7 +87,36 @@ func (c *fleetController) route(w http.ResponseWriter, r *http.Request) bool {
 		c.forward(w, r, selected, r.URL.RequestURI())
 		return true
 	}
+	if selected != "" && r.Method == "GET" && r.URL.Path == "/api/esim" && !isReaderRequest(r) {
+		c.offlineESIM(w, selected)
+		return true
+	}
 	return false
+}
+
+// offlineESIM answers the eSIM page of a module whose worker is not running
+// with the profiles read last time and the reason, instead of an endless wait.
+func (c *fleetController) offlineESIM(w http.ResponseWriter, id string) {
+	c.mu.Lock()
+	_, connected := c.devices[id]
+	needsConfirm := connected && c.approved[id] != c.devices[id].Session
+	c.mu.Unlock()
+	reason := "模块后台正在启动，几秒后自动恢复；恢复前不能切换号码。"
+	switch {
+	case !connected:
+		reason = "这个模块现在没有连接（没插好、线松了或分线器没供电），下面是上次读到的号码；插好后才能切换。"
+	case needsConfirm:
+		reason = "这个模块还没确认绑定，请先在代理页确认；下面是上次读到的号码。"
+	}
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(c.path), "modules", id, "esim-overview.json"))
+	var overview map[string]any
+	if err != nil || json.Unmarshal(data, &overview) != nil {
+		writeError(w, http.StatusServiceUnavailable, reason)
+		return
+	}
+	overview["offline"] = reason
+	overview["capabilities"] = allCardCapabilities()
+	writeJSON(w, http.StatusOK, overview)
 }
 
 // sweep asks every worker for path at once.

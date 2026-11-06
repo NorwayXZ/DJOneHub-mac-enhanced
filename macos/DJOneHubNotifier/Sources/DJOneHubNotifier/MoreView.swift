@@ -39,6 +39,7 @@ struct MoreView: View {
     @State private var readerError: String?
     @State private var showMacProfileConfirm = false
     @State private var esimLoadStarted = Date()
+    @State private var esimError: String?
 
     private var profiles: [ESIMProfile] {
         esim?.profiles?.flatMap { $0.profiles ?? [] } ?? []
@@ -216,7 +217,11 @@ struct MoreView: View {
                 if !useReader, let capability = esimHealth?.capability {
                     CardCapabilityBanner(capability: capability).padding([.horizontal, .top], 10)
                 }
-                if esim == nil && !(useReader && readerError != nil) {
+                if !useReader, let offline = esim?.offline {
+                    esimProblem(offline)
+                } else if !useReader, esim == nil, let esimError {
+                    esimProblem(L10n.t("读不到卡片信息：") + esimError)
+                } else if esim == nil && !(useReader && readerError != nil) {
                     BusyBanner(title: L10n.t("正在读取卡片信息"), started: esimLoadStarted,
                                hint: L10n.t("第一次读卡要逐个读出卡里的号码，约 10–60 秒；读过之后再打开会立即显示。"))
                         .padding([.horizontal, .top], 10)
@@ -335,7 +340,7 @@ struct MoreView: View {
                                     }
                                     .buttonStyle(.bordered)
                                     .controlSize(.small)
-                                    .disabled(busy || switchingTo != nil)
+                                    .disabled(busy || switchingTo != nil || esim?.offline != nil)
                                 }
                                 Button {
                                     renameProfile = profile
@@ -677,13 +682,14 @@ struct MoreView: View {
             catch { esim = nil; readerError = error.localizedDescription }
         } else {
             esimLoadStarted = Date()
-            esim = try? await calls.apiClient.esimOverview()
-            // Right after a module restart the backend is still connecting: retry.
+            esimError = nil
+            await loadESIMOnce()
+            // While the module or its backend is restarting: show why, keep retrying (up to 10 minutes).
             var tries = 0
-            while esim == nil, tries < 30, !Task.isCancelled {
+            while esim == nil || esim?.offline != nil, tries < 200, !Task.isCancelled {
                 tries += 1
                 try? await Task.sleep(for: .seconds(3))
-                esim = try? await calls.apiClient.esimOverview()
+                await loadESIMOnce()
             }
             // A saved copy was shown: poll until the card has been read again.
             tries = 0
@@ -693,6 +699,26 @@ struct MoreView: View {
                 if let fresh = try? await calls.apiClient.esimOverview() { esim = fresh }
             }
         }
+    }
+
+    private func loadESIMOnce() async {
+        do { esim = try await calls.apiClient.esimOverview(); esimError = nil }
+        catch { if esim?.offline == nil { esim = nil }; esimError = error.localizedDescription }
+    }
+
+    private func esimProblem(_ text: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(text).font(.callout)
+                Text(L10n.t("正在自动重试，恢复后立即显示最新信息。")).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            ProgressView().controlSize(.small)
+        }
+        .padding(10)
+        .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+        .padding([.horizontal, .top], 10)
     }
 
     private static func looksLikeFailure(_ text: String) -> Bool {
