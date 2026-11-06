@@ -83,3 +83,25 @@ func TestParseIMEI(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestFleetChildWithDeletedSocketIsDead(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "10909.sock")
+	w := &fleetChild{socket: socket, done: make(chan struct{}), started: time.Now()}
+	if !w.Alive() {
+		t.Fatal("a worker still starting up must count as alive")
+	}
+	if err := os.WriteFile(socket, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if !w.Alive() {
+		t.Fatal("worker with its socket must be alive")
+	}
+	_ = os.Remove(socket)
+	if w.Alive() {
+		t.Fatal("worker whose socket was deleted must count as dead")
+	}
+	slow := &fleetChild{socket: socket, done: make(chan struct{}), started: time.Now().Add(-time.Minute)}
+	if slow.Alive() {
+		t.Fatal("worker that never opened its socket in 30 s must count as dead")
+	}
+}

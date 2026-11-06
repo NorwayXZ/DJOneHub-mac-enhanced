@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -27,15 +28,30 @@ type fleetChild struct {
 	socket string
 	done   chan struct{}
 	once   sync.Once
+	// The socket can be deleted under a running worker (temp folder cleanup);
+	// such a worker is unreachable and counts as dead so it gets restarted.
+	started    time.Time
+	socketSeen atomic.Bool
+}
+
+func (w *fleetChild) exited() bool {
+	select {
+	case <-w.done:
+		return true
+	default:
+		return false
+	}
 }
 
 func (w *fleetChild) Alive() bool {
-	select {
-	case <-w.done:
+	if w.exited() {
 		return false
-	default:
+	}
+	if _, err := os.Stat(w.socket); err == nil {
+		w.socketSeen.Store(true)
 		return true
 	}
+	return !w.socketSeen.Load() && time.Since(w.started) < 30*time.Second
 }
 func (w *fleetChild) Request(method, path string, body []byte) (int, []byte, error) {
 	timeout := fleetRequestTimeout(method, path)
@@ -60,7 +76,7 @@ func (w *fleetChild) Request(method, path string, body []byte) (int, []byte, err
 }
 func (w *fleetChild) Stop() {
 	w.once.Do(func() {
-		if w.Alive() {
+		if !w.exited() {
 			_ = w.cmd.Process.Signal(syscall.SIGTERM)
 		}
 		select {
@@ -78,6 +94,11 @@ func fleetSpawner(dir string) fleetStartFunc {
 		if len(socket) > 100 {
 			return nil, errors.New("worker socket path too long")
 		}
+		// The socket directory lives in the system temp folder, which macOS
+		// or cleanup tools may empty while the supervisor runs; recreate it.
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return nil, err
+		}
 		_ = os.Remove(socket)
 		executable, err := os.Executable()
 		if err != nil {
@@ -94,7 +115,7 @@ func fleetSpawner(dir string) fleetStartFunc {
 		if err = command.Start(); err != nil {
 			return nil, err
 		}
-		w := &fleetChild{cmd: command, socket: socket, done: make(chan struct{})}
+		w := &fleetChild{cmd: command, socket: socket, done: make(chan struct{}), started: time.Now()}
 		go func() { err := command.Wait(); log.Printf("module worker %s exited: %v", b.ID, err); close(w.done) }()
 		return w, nil
 	}
