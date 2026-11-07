@@ -107,6 +107,11 @@ func TestAPIRejectsCrossSiteAndRebinding(t *testing.T) {
 		{"http://evil.example/api/proxy", "", 403},
 		{"http://127.0.0.1:7575/api/proxy", "", 204},
 		{"http://127.0.0.1:7575/api/proxy", "http://127.0.0.1:7575", 204},
+		// The change-IP link works through a tunnel's own host name.
+		{"http://abc.tunnel.example/api/proxy/rotate", "", 204},
+		{"http://abc.tunnel.example/api/modules/slot-03100000/proxy/rotate", "", 204},
+		{"http://abc.tunnel.example/api/modules/x/y/proxy/rotate", "", 403},
+		{"http://abc.tunnel.example/api/proxy/rotate", "https://evil.example", 403},
 	} {
 		r := httptest.NewRequest("POST", tt.url, nil)
 		r.Header.Set("Origin", tt.origin)

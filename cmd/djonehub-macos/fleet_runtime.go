@@ -357,7 +357,13 @@ func (c *fleetController) handler(fallback http.Handler) http.Handler {
 	})
 	mux.HandleFunc("GET /api/modules/{id}/proxy", func(w http.ResponseWriter, r *http.Request) { c.forward(w, r, r.PathValue("id"), "/api/proxy") })
 	mux.HandleFunc("POST /api/modules/{id}/proxy", func(w http.ResponseWriter, r *http.Request) { c.forward(w, r, r.PathValue("id"), "/api/proxy") })
-	rotate := func(w http.ResponseWriter, r *http.Request) { c.forward(w, r, r.PathValue("id"), "/api/proxy/rotate") }
+	rotate := func(w http.ResponseWriter, r *http.Request) {
+		path := "/api/proxy/rotate"
+		if r.URL.RawQuery != "" {
+			path += "?" + r.URL.RawQuery // keeps ?wait=
+		}
+		c.forward(w, r, r.PathValue("id"), path)
+	}
 	mux.HandleFunc("GET /api/modules/{id}/proxy/rotate", rotate)
 	mux.HandleFunc("POST /api/modules/{id}/proxy/rotate", rotate)
 	mux.HandleFunc("GET /api/proxy/links", func(w http.ResponseWriter, r *http.Request) {

@@ -40,7 +40,7 @@ import (
 //go:embed web/*
 var webAssets embed.FS
 
-const appVersion = "1.3.0-proxy-preview.56"
+const appVersion = "1.3.0-proxy-preview.57"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
@@ -1323,11 +1323,23 @@ func (a *app) platformInfo(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
+// isRotatePath is the change-IP link, the one API people call through a
+// tunnel or from another machine, so it is accepted under any Host. It returns
+// only the new exit IP, which DNS rebinding gains nothing from.
+func isRotatePath(path string) bool {
+	if path == "/api/proxy/rotate" {
+		return true
+	}
+	id, ok := strings.CutPrefix(path, "/api/modules/")
+	id, ok2 := strings.CutSuffix(id, "/proxy/rotate")
+	return ok && ok2 && id != "" && !strings.Contains(id, "/")
+}
+
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			host, _, err := net.SplitHostPort(r.Host)
-			if err != nil || (host != "127.0.0.1" && host != "localhost" && host != "::1") {
+			if (err != nil || (host != "127.0.0.1" && host != "localhost" && host != "::1")) && !isRotatePath(r.URL.Path) {
 				http.Error(w, "invalid host", 403)
 				return
 			}
