@@ -40,7 +40,7 @@ import (
 //go:embed web/*
 var webAssets embed.FS
 
-const appVersion = "1.3.0-proxy-preview.50"
+const appVersion = "1.3.0-proxy-preview.51"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
@@ -1106,7 +1106,15 @@ func (a *app) signalRecoveryOnce() {
 		ready := a.simReady()
 		a.noteLost(reg, signal, ready)
 		if a.lostSignalCount >= 3 && ready {
-			a.recoverSignal()
+			cimi, _ := a.usbAT.Command("AT+CIMI", 3*time.Second)
+			if simSettling(parseUSBATIMSI(cimi), time.Now()) {
+				// Hold at the first step so escalation starts over once
+				// the SIM settles on one identity.
+				a.lostSignalCount = 3
+				logQuietly("sim-settling", "cellular signal recovery paused: SIM changed identity recently, letting it search")
+			} else {
+				a.recoverSignal()
+			}
 		}
 	}
 

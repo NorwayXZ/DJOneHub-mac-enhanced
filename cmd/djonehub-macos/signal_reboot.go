@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -44,4 +45,29 @@ func markSignalReboot() {
 	}
 	_ = os.MkdirAll(filepath.Dir(path), 0o700)
 	_ = os.WriteFile(path, []byte(time.Now().Format(time.RFC3339)), 0o600)
+}
+
+// Multi-IMSI travel SIMs swap their own identity every couple of minutes
+// until one is accepted, and every swap restarts the network search. A radio
+// cycle or reboot in the middle throws that search away, so recovery waits
+// while the SIM's IMSI has changed recently.
+const simSettleTime = 4 * time.Minute
+
+func simIdentityPath() string { return moduleStatePath("sim-identity") }
+
+// simSettling records imsi and reports whether it changed within simSettleTime.
+func simSettling(imsi string, now time.Time) bool {
+	path := simIdentityPath()
+	if imsi == "" || path == "" {
+		return false
+	}
+	if data, err := os.ReadFile(path); err == nil {
+		if last, changed, ok := strings.Cut(string(data), "\n"); ok && last == imsi {
+			at, err := time.Parse(time.RFC3339, changed)
+			return err == nil && now.Sub(at) < simSettleTime
+		}
+	}
+	_ = os.MkdirAll(filepath.Dir(path), 0o700)
+	_ = os.WriteFile(path, []byte(imsi+"\n"+now.Format(time.RFC3339)), 0o600)
+	return true
 }
