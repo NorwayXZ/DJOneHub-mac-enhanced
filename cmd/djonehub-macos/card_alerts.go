@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -140,9 +141,12 @@ func (a *app) noteLost(reg, signal int, ready bool) {
 // noteExitCheck runs after each exit IP check through the cellular proxy.
 func (a *app) noteExitCheck(ok bool) {
 	iccid := a.cardICCID()
-	issue, recovered := noteDataPath(ok, !cardHealthFor(iccid).LastDataOK.IsZero(), time.Now())
+	issue, recovered, fix := noteDataPath(ok, !cardHealthFor(iccid).LastDataOK.IsZero(), time.Now())
 	if ok {
 		noteCardHealth(iccid, true)
+	}
+	if fix {
+		a.fixDataStall()
 	}
 	if issue != nil {
 		a.pushNetworkIssue(issue)
@@ -150,4 +154,20 @@ func (a *app) noteExitCheck(ok bool) {
 	if recovered {
 		pushModuleNote("网络已恢复", cardName(iccid)+" 又能正常上网了。")
 	}
+}
+
+// fixDataStall reconnects the cellular data like the change-IP link does: a
+// stuck data session comes back with a fresh one (and a new exit IP).
+func (a *app) fixDataStall() {
+	if !a.tryModuleOperation() {
+		dataFixSkipped()
+		return
+	}
+	if _, msg := a.launchReconnect(ipReconnectMode()); msg != "" {
+		a.moduleOperationMu.Unlock()
+		dataFixSkipped()
+		log.Printf("cellular data stalled, automatic reconnect not started: %s", msg)
+		return
+	}
+	log.Printf("cellular data stalled while registered, reconnecting automatically")
 }

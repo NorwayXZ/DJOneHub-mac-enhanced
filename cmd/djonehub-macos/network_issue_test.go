@@ -30,21 +30,49 @@ func TestDiagnoseNetworkNamesWhoseProblemItIs(t *testing.T) {
 	}
 }
 
-func TestDataPathBlockedIsPushedOnceAndRecovers(t *testing.T) {
-	t.Cleanup(func() { dataIssueOf, dataFailSince, dataPushed = nil, time.Time{}, false })
+func TestDataStallReconnectsBeforeBlamingTheCard(t *testing.T) {
+	t.Cleanup(func() { dataIssueOf, dataFailSince, dataPushed, dataFixes = nil, time.Time{}, false, 0 })
 	now := time.Now()
-	if push, _ := noteDataPath(false, true, now); push != nil {
-		t.Fatal("pushed on the first failure")
+	fixes := 0
+	var push *networkIssue
+	// Checks every 20 s for 12 minutes: three reconnects, then one push.
+	for at := time.Duration(0); at <= 12*time.Minute; at += 20 * time.Second {
+		p, _, fix := noteDataPath(false, true, now.Add(at))
+		if fix {
+			fixes++
+		}
+		if p != nil {
+			if push != nil {
+				t.Fatal("pushed twice")
+			}
+			if fixes < dataFixesBeforeBlame {
+				t.Fatalf("blamed the card after %d reconnects", fixes)
+			}
+			push = p
+		}
 	}
-	push, _ := noteDataPath(false, true, now.Add(6*time.Minute))
-	if push == nil || push.Title != "这张卡可能已失效" {
-		t.Fatalf("want expiry push, got %+v", push)
+	if fixes != 3 || push == nil || push.Title != "这张卡可能已失效" {
+		t.Fatalf("fixes=%d push=%+v", fixes, push)
 	}
-	if again, _ := noteDataPath(false, true, now.Add(12*time.Minute)); again != nil {
-		t.Fatal("pushed twice")
+	if _, _, fix := noteDataPath(false, true, now.Add(23*time.Minute)); !fix {
+		t.Fatal("stopped reconnecting after blaming the card")
 	}
-	if _, recovered := noteDataPath(true, true, now.Add(13*time.Minute)); !recovered {
+	if _, recovered, _ := noteDataPath(true, true, now.Add(24*time.Minute)); !recovered {
 		t.Fatal("recovery not reported")
+	}
+}
+
+func TestShortDataStallIsFixedWithoutAPush(t *testing.T) {
+	t.Cleanup(func() { dataIssueOf, dataFailSince, dataPushed, dataFixes = nil, time.Time{}, false, 0 })
+	now := time.Now()
+	if _, _, fix := noteDataPath(false, true, now); fix {
+		t.Fatal("reconnected on the first failure")
+	}
+	if _, _, fix := noteDataPath(false, true, now.Add(40*time.Second)); !fix {
+		t.Fatal("no reconnect after 40 s")
+	}
+	if p, recovered, _ := noteDataPath(true, true, now.Add(80*time.Second)); p != nil || recovered {
+		t.Fatal("a fixed stall must not notify")
 	}
 }
 

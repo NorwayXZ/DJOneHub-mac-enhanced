@@ -87,7 +87,9 @@ func (a *app) runProxyAutoStart(ctx context.Context) {
 			return
 		case <-ticker.C:
 			a.autoStartProxyOnce(ctx)
-			if s := a.proxy.snapshot(); s.Running && s.PublicIP == "" && time.Since(lastRetry) >= 15*time.Second {
+			// While the exit fails, re-check often so a stuck data session is
+			// reconnected within a minute instead of after two 5-minute checks.
+			if s := a.proxy.snapshot(); s.Running && ((s.PublicIP == "" && time.Since(lastRetry) >= 15*time.Second) || (dataStalled() && time.Since(lastRetry) >= dataStallRecheck)) {
 				lastRetry = time.Now()
 				a.watchProxyExitOnce(ctx)
 			}

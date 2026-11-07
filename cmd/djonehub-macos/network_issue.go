@@ -162,45 +162,92 @@ func diagnoseNetwork(now time.Time, loss *networkLoss, signal int, simReady bool
 	return issue
 }
 
-// dataIssueOf: the module is registered but nothing gets through, which is
-// how many travel cards behave once their data is used up or expired.
+// dataIssueOf: the module is registered but nothing gets through. Most of
+// the time that is a stuck data session (often after the module's USB
+// dropped), which one reconnect fixes, so the app reconnects by itself and
+// only blames the card once several reconnects changed nothing.
 var (
 	dataIssueOf   *networkIssue
 	dataFailSince time.Time
 	dataPushed    bool
+	dataFixes     int
 )
 
-// dataBlockedAfter: failed exit checks for this long while registered.
-const dataBlockedAfter = 5 * time.Minute
+// dataBlockedAfter: failed exit checks for at least this long, and
+// dataFixesBeforeBlame automatic reconnects, before the card is blamed.
+const (
+	dataBlockedAfter     = 5 * time.Minute
+	dataFixesBeforeBlame = 3
+	// dataStallRecheck: how often the exit is re-checked while it fails.
+	dataStallRecheck = 20 * time.Second
+)
+
+// dataFixAt is how long into a stall each automatic reconnect runs; after
+// the last one it keeps reconnecting every 15 minutes, since a long-running
+// proxy must come back on its own whenever the carrier lets it.
+var dataFixAt = []time.Duration{30 * time.Second, 3 * time.Minute, 8 * time.Minute}
+
+func dataFixDue(fixes int, stalled time.Duration) bool {
+	if fixes < len(dataFixAt) {
+		return stalled >= dataFixAt[fixes]
+	}
+	return stalled >= dataFixAt[len(dataFixAt)-1]+time.Duration(fixes-len(dataFixAt)+1)*15*time.Minute
+}
+
+// dataStalled reports whether the last exit check failed.
+func dataStalled() bool {
+	networkIssueMu.Lock()
+	defer networkIssueMu.Unlock()
+	return !dataFailSince.IsZero()
+}
+
+// dataFixSkipped undoes a counted reconnect that could not start.
+func dataFixSkipped() {
+	networkIssueMu.Lock()
+	defer networkIssueMu.Unlock()
+	if dataFixes > 0 {
+		dataFixes--
+	}
+}
 
 // noteDataPath records one exit check through the cellular proxy. It returns
-// the issue to push when the data path has just been judged blocked, and
-// whether a pushed block has just ended.
-func noteDataPath(ok, cardWorked bool, now time.Time) (push *networkIssue, recovered bool) {
+// the issue to push when the data path has just been judged blocked, whether
+// a pushed block has just ended, and whether to reconnect now.
+func noteDataPath(ok, cardWorked bool, now time.Time) (push *networkIssue, recovered, fix bool) {
 	networkIssueMu.Lock()
 	defer networkIssueMu.Unlock()
 	if ok {
 		recovered = dataPushed
-		dataIssueOf, dataFailSince, dataPushed = nil, time.Time{}, false
-		return nil, recovered
+		dataIssueOf, dataFailSince, dataPushed, dataFixes = nil, time.Time{}, false, 0
+		return nil, recovered, false
 	}
 	if dataFailSince.IsZero() {
 		dataFailSince = now
 	}
-	if now.Sub(dataFailSince) < dataBlockedAfter || networkIssueOf != nil {
-		return nil, false
+	// Lost registration has its own recovery; reconnecting data would only
+	// get in its way.
+	if networkIssueOf != nil {
+		return nil, false, false
+	}
+	stalled := now.Sub(dataFailSince)
+	if dataFixDue(dataFixes, stalled) {
+		dataFixes++
+		fix = true
+	}
+	if stalled < dataBlockedAfter || dataFixes < dataFixesBeforeBlame || fix {
+		return nil, false, fix
 	}
 	issue := &networkIssue{Level: "warn", Title: "连上了网络，但上不了网", Since: dataFailSince,
-		Detail: "模块已注册到运营商，但流量走不出去。常见原因：流量用完、套餐到期或还没开通。模块是好的，可以换一个号码试试。"}
+		Detail: "模块已注册到运营商，但流量走不出去，已自动重连 3 次仍不通。常见原因：流量用完、套餐到期或还没开通。DJOneHub 会继续每 15 分钟自动重连。"}
 	if cardWorked {
 		issue.Level, issue.Title = "error", "这张卡可能已失效"
-		issue.Detail = "这张卡之前能正常上网，现在连得上运营商却上不了网，多半是流量用完或套餐到期。模块是好的：换一个号码，或给这张卡续费后就能恢复。"
+		issue.Detail = "这张卡之前能正常上网，现在连得上运营商却上不了网，已自动重连 3 次仍不通，多半是流量用完或套餐到期。DJOneHub 会继续每 15 分钟自动重连；给这张卡续费或换一个号码后就能恢复。"
 	}
 	dataIssueOf = issue
 	if dataPushed {
-		return nil, false
+		return nil, false, false
 	}
 	dataPushed = true
 	copied := *issue
-	return &copied, false
+	return &copied, false, false
 }
