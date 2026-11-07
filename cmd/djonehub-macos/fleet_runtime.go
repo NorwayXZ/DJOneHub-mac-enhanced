@@ -262,6 +262,7 @@ func serveFleetSupervisor(listen string) error {
 	}()
 	fallback := newWorkerApp().routes()
 	server := &http.Server{Addr: listen, Handler: securityHeaders(c.handler(fallback)), ReadHeaderTimeout: 5 * time.Second}
+	go runLANControl(ctx, server.Handler)
 	go func() { <-ctx.Done(); _ = server.Close() }()
 	log.Printf("multi-module supervisor listening on %s", listen)
 	err = server.ListenAndServe()
@@ -373,10 +374,13 @@ func (c *fleetController) handler(fallback http.Handler) http.Handler {
 			if m.Proxy != nil {
 				link.PublicIP = m.Proxy.PublicIP
 			}
+			link.LANSocks, link.LANRotateURL = lanLinks(link.Socks, "/api/modules/"+m.ID+"/proxy/rotate")
 			links = append(links, link)
 		}
 		writeJSON(w, 200, links)
 	})
+	mux.HandleFunc("GET /api/lan-share", lanShareAPI)
+	mux.HandleFunc("POST /api/lan-share", lanShareAPI)
 	mux.HandleFunc("POST /api/update/prepare", func(w http.ResponseWriter, r *http.Request) {
 		if err := c.prepareAllWorkers(); err != nil {
 			writeError(w, 409, err.Error())

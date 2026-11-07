@@ -145,7 +145,7 @@ func (p *cellularProxy) start() error {
 	if err != nil {
 		return err
 	}
-	l, err := net.Listen("tcp4", proxyListenAddress())
+	l, err := net.Listen("tcp4", lanBindAddress(proxyListenAddress()))
 	if err != nil {
 		return err
 	}
@@ -154,30 +154,96 @@ func (p *cellularProxy) start() error {
 	p.cancel = cancel
 	p.clients = make(map[net.Conn]bool)
 	go p.monitor(ctx, iface)
+	go p.followLANShare(ctx, iface)
 	p.state.Interface = iface
 	p.state.Error = ""
-	go func() {
-		for {
-			c, err := l.Accept()
-			if err != nil {
-				return
-			}
-			p.mu.Lock()
-			if p.listener != l || len(p.clients) >= 128 {
-				p.mu.Unlock()
-				c.Close()
-				continue
-			}
-			p.clients[c] = true
-			p.mu.Unlock()
-			go func() {
-				defer func() { c.Close(); p.mu.Lock(); delete(p.clients, c); p.mu.Unlock() }()
-				p.handle(ctx, c, iface)
-			}()
-		}
-	}()
+	go p.accept(ctx, l, iface)
 	return nil
 }
+
+// socksLogin reads an RFC 1929 login and answers it.
+func socksLogin(c net.Conn) bool {
+	h := make([]byte, 2)
+	if _, err := io.ReadFull(c, h); err != nil || h[0] != 1 {
+		return false
+	}
+	user := make([]byte, int(h[1]))
+	if _, err := io.ReadFull(c, user); err != nil {
+		return false
+	}
+	n := make([]byte, 1)
+	if _, err := io.ReadFull(c, n); err != nil {
+		return false
+	}
+	pass := make([]byte, int(n[0]))
+	if _, err := io.ReadFull(c, pass); err != nil {
+		return false
+	}
+	if !lanShare.get().checkLogin(string(user), string(pass)) {
+		c.Write([]byte{1, 1})
+		return false
+	}
+	c.Write([]byte{1, 0})
+	return true
+}
+
+func (p *cellularProxy) accept(ctx context.Context, l net.Listener, iface string) {
+	for {
+		c, err := l.Accept()
+		if err != nil {
+			return
+		}
+		p.mu.Lock()
+		if p.listener != l || len(p.clients) >= 128 {
+			p.mu.Unlock()
+			c.Close()
+			continue
+		}
+		p.clients[c] = true
+		p.mu.Unlock()
+		go func() {
+			defer func() { c.Close(); p.mu.Lock(); delete(p.clients, c); p.mu.Unlock() }()
+			p.handle(ctx, c, iface)
+		}()
+	}
+}
+
+// followLANShare moves the SOCKS port between loopback and every interface
+// when LAN sharing is switched; open connections keep running.
+func (p *cellularProxy) followLANShare(ctx context.Context, iface string) {
+	ticker := time.NewTicker(lanShareRecheck)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		want := lanBindAddress(proxyListenAddress())
+		p.mu.Lock()
+		if p.listener == nil || p.listener.Addr().String() == want {
+			p.mu.Unlock()
+			continue
+		}
+		old := p.listener
+		old.Close()
+		l, err := net.Listen("tcp4", want)
+		if err != nil {
+			// Fall back to loopback so local clients keep working.
+			log.Printf("proxy: listen on %s failed: %v", want, err)
+			if l, err = net.Listen("tcp4", proxyListenAddress()); err != nil {
+				p.listener = nil
+				p.mu.Unlock()
+				continue
+			}
+		}
+		p.listener = l
+		p.mu.Unlock()
+		log.Printf("proxy: SOCKS now listening on %s", l.Addr())
+		go p.accept(ctx, l, iface)
+	}
+}
+
 func socksReply(c net.Conn, code byte) { _, _ = c.Write([]byte{5, code, 0, 1, 0, 0, 0, 0, 0, 0}) }
 func (p *cellularProxy) handle(ctx context.Context, c net.Conn, iface string) {
 	p.handleWithDial(ctx, c, iface, cellularDial)
@@ -192,17 +258,25 @@ func (p *cellularProxy) handleWithDial(ctx context.Context, c net.Conn, iface st
 	if _, err := io.ReadFull(c, methods); err != nil {
 		return
 	}
-	allowed := false
+	// This computer needs no login; LAN clients must use username/password
+	// (RFC 1929) with the LAN sharing login.
+	noAuth, userPass := false, false
 	for _, m := range methods {
-		if m == 0 {
-			allowed = true
-		}
+		noAuth = noAuth || m == 0
+		userPass = userPass || m == 2
 	}
-	if !allowed {
+	switch {
+	case noAuth && !isLANClient(c):
+		c.Write([]byte{5, 0})
+	case userPass && lanShare.get().Enabled:
+		c.Write([]byte{5, 2})
+		if !socksLogin(c) {
+			return
+		}
+	default:
 		c.Write([]byte{5, 255})
 		return
 	}
-	c.Write([]byte{5, 0})
 	req := make([]byte, 4)
 	if _, err := io.ReadFull(c, req); err != nil || req[0] != 5 || req[2] != 0 {
 		return

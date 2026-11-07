@@ -40,7 +40,7 @@ import (
 //go:embed web/*
 var webAssets embed.FS
 
-const appVersion = "1.3.0-proxy-preview.57"
+const appVersion = "1.3.0-proxy-preview.58"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
@@ -523,6 +523,7 @@ func serve(instance *app, listen string) {
 		go instance.runBandGuard(ctx)
 		go instance.runUsageLedger(ctx)
 		go runLogRotation(ctx)
+		go runLANControl(ctx, server.Handler)
 		if instance.modem == nil && multiModuleAuto {
 			go instance.watchForSecondModule(ctx)
 		}
@@ -1233,6 +1234,8 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /api/band", a.bandActionAPI)
 	mux.HandleFunc("GET /api/usage", a.usageAPI)
 	mux.HandleFunc("POST /api/usage", a.usageAPI)
+	mux.HandleFunc("GET /api/lan-share", lanShareAPI)
+	mux.HandleFunc("POST /api/lan-share", lanShareAPI)
 	mux.HandleFunc("GET /api/fraud/ipqs", a.ipqsAPI)
 	mux.HandleFunc("POST /api/fraud/ipqs", a.ipqsAPI)
 	mux.HandleFunc("GET /api/platform", a.platformInfo)

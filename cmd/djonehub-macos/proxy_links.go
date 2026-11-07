@@ -34,6 +34,9 @@ type proxyLink struct {
 	Socks     string `json:"socks"`
 	RotateURL string `json:"rotate_url"`
 	PublicIP  string `json:"public_ip"`
+	// LAN forms, set while LAN sharing is on.
+	LANSocks     string `json:"lan_socks,omitempty"`
+	LANRotateURL string `json:"lan_rotate_url,omitempty"`
 }
 
 type rotateResult struct {
@@ -59,13 +62,15 @@ func apiBase(r *http.Request) string {
 
 func (a *app) proxyLinksAPI(w http.ResponseWriter, r *http.Request) {
 	s := a.proxy.snapshot()
-	writeJSON(w, 200, []proxyLink{{
+	link := proxyLink{
 		Name:      "4G 模块",
 		Connected: s.Interface != "" || s.Running,
 		Socks:     proxyListenAddress(),
 		RotateURL: apiBase(r) + "/api/proxy/rotate",
 		PublicIP:  s.PublicIP,
-	}})
+	}
+	link.LANSocks, link.LANRotateURL = lanLinks(link.Socks, "/api/proxy/rotate")
+	writeJSON(w, 200, []proxyLink{link})
 }
 
 // proxyRotateAPI is the one-click switch link. GET or POST without a body
