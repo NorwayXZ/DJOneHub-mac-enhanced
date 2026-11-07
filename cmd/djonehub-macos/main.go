@@ -40,7 +40,7 @@ import (
 //go:embed web/*
 var webAssets embed.FS
 
-const appVersion = "1.3.0-proxy-preview.55"
+const appVersion = "1.3.0-proxy-preview.56"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
@@ -443,6 +443,7 @@ func main() {
 	if !manager.WaitReady(15 * time.Second) {
 		log.Printf("modem initialization is still running; the web UI will remain available")
 	}
+	instance.ensureHostUSBNet()
 
 	atBackend := backend.NewATBackend(manager)
 	esimManager, err := esim.NewManager(esim.ManagerOptions{
@@ -920,7 +921,7 @@ func (a *app) ensureUSBAT() error {
 	a.port = dev.Description()
 	a.discoveryError = ""
 	log.Printf("USB AT bridge opened on DJI %s", dev.Description())
-	a.ensureMacUSBNet()
+	a.ensureHostUSBNet()
 	if scopedUSBSession != 0 {
 		a.initUSBATESIMManager()
 		return nil

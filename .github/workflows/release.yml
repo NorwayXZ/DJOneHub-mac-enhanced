@@ -1,4 +1,4 @@
-name: macOS Release
+name: macOS and Windows Release
 on:
   push:
     tags: ['v*']
@@ -33,6 +33,7 @@ jobs:
         run: |
           scripts/build-dmg-universal.sh "$TAG"
           scripts/package-app-update.sh "$TAG"
+          scripts/package-windows-amd64.sh "$TAG"
       - name: Publish Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -41,4 +42,4 @@ jobs:
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" --generate-notes
           fi
-          gh release upload "$TAG" dist/*.dmg dist/*.dmg.sha256 dist/DJOneHub-macOS-universal-update.zip dist/DJOneHub-macOS-universal-update.zip.sha256 --clobber
+          gh release upload "$TAG" dist/*.dmg dist/*.dmg.sha256 dist/DJOneHub-macOS-universal-update.zip dist/DJOneHub-macOS-universal-update.zip.sha256 dist/release/DJOneHub-Windows-amd64-*.zip dist/release/DJOneHub-Windows-amd64-*.zip.sha256 --clobber

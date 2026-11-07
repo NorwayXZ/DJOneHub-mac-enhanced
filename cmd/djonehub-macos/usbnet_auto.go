@@ -7,19 +7,25 @@ import (
 	"time"
 )
 
-// macUSBNetMode is the usbnet mode that gives macOS a network adapter (ECM).
-// Factory modules ship with 0, which leaves the Mac without one, so the proxy
-// never comes up although the module itself is online.
-const macUSBNetMode = "1"
+// hostUSBNetMode is the usbnet mode that gives this computer a driverless
+// network adapter: ECM on macOS, RNDIS on Windows (Windows has no in-box ECM
+// driver). Factory modules ship with 0, which leaves the computer without one,
+// so the proxy never comes up although the module itself is online.
+func hostUSBNetMode() string {
+	if runtime.GOOS == "windows" {
+		return "3"
+	}
+	return "1"
+}
 
 // usbnetChecked keeps the check to once per process: after the reboot the
 // module comes back in a new worker, which checks again and finds it set.
 var usbnetChecked atomic.Bool
 
-// ensureMacUSBNet sets usbnet to the Mac mode on a module that lacks it and
+// ensureHostUSBNet sets usbnet to this computer's mode on a module that lacks it and
 // reboots the module so the adapter appears. Called after the AT bridge opens.
-func (a *app) ensureMacUSBNet() {
-	if runtime.GOOS != "darwin" || a.demo || coordinatorOnly || !usbnetChecked.CompareAndSwap(false, true) {
+func (a *app) ensureHostUSBNet() {
+	if (runtime.GOOS != "darwin" && runtime.GOOS != "windows") || a.demo || coordinatorOnly || !usbnetChecked.CompareAndSwap(false, true) {
 		return
 	}
 	go func() {
@@ -33,24 +39,25 @@ func (a *app) ensureMacUSBNet() {
 			time.Sleep(10 * time.Second)
 		}
 		defer a.moduleOperationMu.Unlock()
+		want := hostUSBNetMode()
 		current, err := a.runATCommand(`AT+QCFG="usbnet"`, 5*time.Second)
 		mode := parseUSBNetMode(current)
-		if err != nil || mode == "" || mode == macUSBNetMode {
+		if err != nil || mode == "" || mode == want {
 			return
 		}
-		log.Printf("usbnet check: mode %s gives the Mac no network adapter, setting %s", mode, macUSBNetMode)
-		if _, err := a.runATCommand(`AT+QCFG="usbnet",`+macUSBNetMode, 8*time.Second); err != nil {
+		log.Printf("usbnet check: mode %s gives this computer no network adapter, setting %s", mode, want)
+		if _, err := a.runATCommand(`AT+QCFG="usbnet",`+want, 8*time.Second); err != nil {
 			log.Printf("usbnet check: write failed: %v", err)
 			return
 		}
-		if readBack, err := a.runATCommand(`AT+QCFG="usbnet"`, 5*time.Second); err != nil || parseUSBNetMode(readBack) != macUSBNetMode {
-			log.Printf("usbnet check: read-back did not confirm mode %s", macUSBNetMode)
+		if readBack, err := a.runATCommand(`AT+QCFG="usbnet"`, 5*time.Second); err != nil || parseUSBNetMode(readBack) != want {
+			log.Printf("usbnet check: read-back did not confirm mode %s", want)
 			return
 		}
 		if _, err := a.runATCommand("AT+CFUN=1,1", 4*time.Second); err != nil {
 			log.Printf("usbnet check: reboot failed: %v", err)
 			return
 		}
-		log.Printf("usbnet check: module rebooting to bring up the Mac network adapter")
+		log.Printf("usbnet check: module rebooting to bring up the network adapter")
 	}()
 }
