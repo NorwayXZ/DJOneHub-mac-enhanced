@@ -23,3 +23,18 @@ func TestRecoveryWaitsWhileSIMSwapsIdentity(t *testing.T) {
 		t.Fatal("an unreadable IMSI must not block recovery")
 	}
 }
+
+func TestRecoveryKeepsManualCarrier(t *testing.T) {
+	for resp, want := range map[string]bool{
+		"AT+COPS?\r\n+COPS: 1\r\nOK":                      true,
+		"AT+COPS?\r\n+COPS: 1,0,\"CHINA MOBILE\",7\r\nOK": true,
+		"AT+COPS?\r\n+COPS: 4,2,\"46000\",7\r\nOK":        true,
+		"AT+COPS?\r\n+COPS: 0,0,\"CHINA MOBILE\",7\r\nOK": false,
+		"AT+COPS?\r\n+COPS: 0\r\nOK":                      false,
+		"":                                                false,
+	} {
+		if got := manualOperatorSelected(resp); got != want {
+			t.Errorf("%q: got %v", resp, got)
+		}
+	}
+}

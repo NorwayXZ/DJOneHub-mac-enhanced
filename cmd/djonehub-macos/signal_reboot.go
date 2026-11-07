@@ -71,3 +71,11 @@ func simSettling(imsi string, now time.Time) bool {
 	_ = os.WriteFile(path, []byte(imsi+"\n"+now.Format(time.RFC3339)), 0o600)
 	return true
 }
+
+// manualOperatorSelected reports whether +COPS? shows a hand-picked carrier
+// (mode 1, or 4 = manual with automatic fallback).
+func manualOperatorSelected(resp string) bool {
+	mode, _, _ := strings.Cut(parseUSBATPrefixed(resp, "+COPS:"), ",")
+	mode = strings.TrimSpace(mode)
+	return mode == "1" || mode == "4"
+}
