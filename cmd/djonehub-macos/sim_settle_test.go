@@ -24,17 +24,13 @@ func TestRecoveryWaitsWhileSIMSwapsIdentity(t *testing.T) {
 	}
 }
 
-func TestRecoveryKeepsManualCarrier(t *testing.T) {
-	for resp, want := range map[string]bool{
-		"AT+COPS?\r\n+COPS: 1\r\nOK":                      true,
-		"AT+COPS?\r\n+COPS: 1,0,\"CHINA MOBILE\",7\r\nOK": true,
-		"AT+COPS?\r\n+COPS: 4,2,\"46000\",7\r\nOK":        true,
-		"AT+COPS?\r\n+COPS: 0,0,\"CHINA MOBILE\",7\r\nOK": false,
-		"AT+COPS?\r\n+COPS: 0\r\nOK":                      false,
-		"":                                                false,
-	} {
-		if got := manualOperatorSelected(resp); got != want {
-			t.Errorf("%q: got %v", resp, got)
+func TestRecoveryOnlyWakesAStoppedRadio(t *testing.T) {
+	if !operatorDeregistered("AT+COPS?\r\n+COPS: 2\r\nOK") {
+		t.Fatal("deregistered radio should be told to search again")
+	}
+	for _, resp := range []string{"+COPS: 0", "+COPS: 1", "+COPS: 0,0,\"CHINA MOBILE\",7", ""} {
+		if operatorDeregistered(resp) {
+			t.Fatalf("%q: a searching or manual radio must be left alone", resp)
 		}
 	}
 }

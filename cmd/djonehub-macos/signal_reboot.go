@@ -72,12 +72,12 @@ func simSettling(imsi string, now time.Time) bool {
 	return true
 }
 
-// manualOperatorSelected reports whether +COPS? shows a hand-picked carrier
-// (mode 1, or 4 = manual with automatic fallback).
-func manualOperatorSelected(resp string) bool {
+// operatorDeregistered: +COPS? mode 2, the radio was told to stop searching.
+func operatorDeregistered(resp string) bool { return operatorMode(resp) == "2" }
+
+func operatorMode(resp string) string {
 	mode, _, _ := strings.Cut(parseUSBATPrefixed(resp, "+COPS:"), ",")
-	mode = strings.TrimSpace(mode)
-	return mode == "1" || mode == "4"
+	return strings.TrimSpace(mode)
 }
 
 // clearForbiddenNetworks blanks EF_FPLMN (6F7B, four entries).

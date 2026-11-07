@@ -40,7 +40,7 @@ import (
 //go:embed web/*
 var webAssets embed.FS
 
-const appVersion = "1.3.0-proxy-preview.53"
+const appVersion = "1.3.0-proxy-preview.54"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
@@ -1149,11 +1149,13 @@ func (a *app) recoverSignal() {
 	}
 	switch {
 	case a.lostSignalCount == 3:
-		log.Printf("cellular signal recovery: forcing PS attach and automatic network selection")
-		_, _ = a.usbAT.Command("AT+CGATT=1", 5*time.Second)
-		// Some roaming SIMs only register when the carrier is picked by
-		// hand (as on a phone); never undo a manual selection.
-		if cops, _ := a.usbAT.Command("AT+COPS?", 3*time.Second); !manualOperatorSelected(cops) {
+		// AT+CGATT=1 and AT+COPS=0 block until the module finds a network;
+		// while it is still searching they time out, the AT channel is
+		// taken for lost and every button fails with "module busy" for a
+		// minute. So only wake a radio that stopped searching, and never
+		// undo a manual carrier (some roaming SIMs register only that way).
+		if cops, _ := a.usbAT.Command("AT+COPS?", 3*time.Second); operatorDeregistered(cops) {
+			log.Printf("cellular signal recovery: restarting automatic network selection")
 			_, _ = a.usbAT.Command("AT+COPS=0", 5*time.Second)
 		}
 	case a.lostSignalCount == 24:
