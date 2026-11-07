@@ -40,7 +40,7 @@ import (
 //go:embed web/*
 var webAssets embed.FS
 
-const appVersion = "1.3.0-proxy-preview.54"
+const appVersion = "1.3.0-proxy-preview.55"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
@@ -170,6 +170,8 @@ type app struct {
 	iccid            iccidCache
 	lostSignalCount  int
 	lastNetworkCheck time.Time
+	lastLinkCheck    time.Time
+	linkDownSince    time.Time
 }
 
 type usbInterfaceStatus struct {
@@ -1094,6 +1096,7 @@ func (a *app) signalRecoveryOnce() {
 		}
 		a.lostSignalCount = 0
 		a.noteRegistered()
+		a.checkModuleLink()
 	} else {
 		a.lostSignalCount++
 		if a.lostSignalCount <= 3 {
@@ -1124,6 +1127,33 @@ func (a *app) signalRecoveryOnce() {
 		a.lastNetworkCheck = time.Now()
 		a.ensureCellularDHCP()
 	}
+}
+
+// checkModuleLink restarts a registered module whose USB network has stopped
+// handing the Mac an address (see linkDownReboot).
+func (a *app) checkModuleLink() {
+	if time.Since(a.lastLinkCheck) < 15*time.Second {
+		return
+	}
+	a.lastLinkCheck = time.Now()
+	found, usable := moduleLinkState(discoverMacNetworkInterfaces(), fleetSessionForInterface, scopedUSBSession)
+	if !found || usable {
+		a.linkDownSince = time.Time{}
+		return
+	}
+	if a.linkDownSince.IsZero() {
+		a.linkDownSince = time.Now()
+		log.Printf("cellular link: module is registered but the Mac has no address from it")
+		return
+	}
+	if time.Since(a.linkDownSince) < linkDownReboot || time.Since(lastSignalReboot()) < 15*time.Minute {
+		return
+	}
+	a.linkDownSince = time.Time{}
+	markSignalReboot()
+	log.Printf("cellular link: still no address after %s, rebooting module (AT+CFUN=1,1)", linkDownReboot)
+	_, _ = a.usbAT.Command("AT+CFUN=1,1", 3*time.Second)
+	a.markUSBATDetached("cellular link recovery reboot")
 }
 
 // probeCellularHealth cheaply reads registration and signal without running

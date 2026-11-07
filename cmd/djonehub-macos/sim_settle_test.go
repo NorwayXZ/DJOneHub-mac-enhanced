@@ -34,3 +34,27 @@ func TestRecoveryOnlyWakesAStoppedRadio(t *testing.T) {
 		}
 	}
 }
+
+func TestModuleLinkWithSelfAssignedAddressIsDown(t *testing.T) {
+	session := func(name string) uint64 {
+		return map[string]uint64{"en13": 2, "en15": 1}[name]
+	}
+	items := []macNetInterface{
+		{Name: "en0", Status: "active", IPv4: "192.168.1.5"},
+		{Name: "en15", Status: "active", IPv4: "192.168.225.30"},
+		{Name: "en13", Status: "active", IPv4: "169.254.6.111"},
+	}
+	if found, usable := moduleLinkState(items, session, 2); !found || usable {
+		t.Fatalf("module 2 with 169.254: found=%v usable=%v", found, usable)
+	}
+	if found, usable := moduleLinkState(items, session, 1); !found || !usable {
+		t.Fatalf("module 1 with a DHCP address: found=%v usable=%v", found, usable)
+	}
+	items[2].IPv4 = "192.168.225.28"
+	if _, usable := moduleLinkState(items, session, 2); !usable {
+		t.Fatal("module 2 recovered")
+	}
+	if found, _ := moduleLinkState(items, session, 3); found {
+		t.Fatal("a module without its own interface must not trigger a reboot")
+	}
+}

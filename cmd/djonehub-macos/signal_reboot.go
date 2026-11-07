@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -82,3 +83,26 @@ func operatorMode(resp string) string {
 
 // clearForbiddenNetworks blanks EF_FPLMN (6F7B, four entries).
 const clearForbiddenNetworks = `AT+CRSM=214,28539,0,0,12,"FFFFFFFFFFFFFFFFFFFFFFFF"`
+
+// The module can stay registered with a data session up while its USB
+// network stops answering DHCP: the Mac only has a self-assigned 169.254
+// address and nothing gets through until the module restarts.
+const linkDownReboot = 90 * time.Second
+
+// moduleLinkState looks at this module's USB network interface: found when
+// it is up, usable when it also has a real IPv4 address.
+func moduleLinkState(items []macNetInterface, session func(string) uint64, scoped uint64) (found, usable bool) {
+	for _, item := range items {
+		if item.Status != "active" || session(item.Name) == 0 {
+			continue
+		}
+		if scoped != 0 && session(item.Name) != scoped {
+			continue
+		}
+		found = true
+		if ip := net.ParseIP(item.IPv4); ip != nil && !ip.IsUnspecified() && !ip.IsLinkLocalUnicast() {
+			usable = true
+		}
+	}
+	return found, usable
+}
