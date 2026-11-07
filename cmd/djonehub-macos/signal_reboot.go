@@ -79,3 +79,6 @@ func manualOperatorSelected(resp string) bool {
 	mode = strings.TrimSpace(mode)
 	return mode == "1" || mode == "4"
 }
+
+// clearForbiddenNetworks blanks EF_FPLMN (6F7B, four entries).
+const clearForbiddenNetworks = `AT+CRSM=214,28539,0,0,12,"FFFFFFFFFFFFFFFFFFFFFFFF"`

@@ -40,7 +40,7 @@ import (
 //go:embed web/*
 var webAssets embed.FS
 
-const appVersion = "1.3.0-proxy-preview.52"
+const appVersion = "1.3.0-proxy-preview.53"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
@@ -1158,6 +1158,12 @@ func (a *app) recoverSignal() {
 		}
 	case a.lostSignalCount == 24:
 		log.Printf("cellular signal recovery: cycling radio (AT+CFUN=0 then 1)")
+		// A carrier that rejected the SIM once is written into the SIM's
+		// forbidden list and never tried again, even after the plan is
+		// activated or the outage ends; forget it so the search retries.
+		if resp, err := a.usbAT.Command(clearForbiddenNetworks, 5*time.Second); err == nil && strings.Contains(resp, "+CRSM: 144") {
+			log.Printf("cellular signal recovery: cleared the SIM's forbidden network list")
+		}
 		_, _ = a.usbAT.Command("AT+CFUN=0", 5*time.Second)
 		time.Sleep(3 * time.Second)
 		if a.usbAT != nil {
