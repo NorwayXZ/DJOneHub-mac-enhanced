@@ -141,7 +141,7 @@ func (a *app) noteLost(reg, signal int, ready bool) {
 // noteExitCheck runs after each exit IP check through the cellular proxy.
 func (a *app) noteExitCheck(ok bool) {
 	iccid := a.cardICCID()
-	issue, recovered, fix := noteDataPath(ok, !cardHealthFor(iccid).LastDataOK.IsZero(), time.Now())
+	issue, recovered, fix := noteDataPath(ok, !cardHealthFor(iccid).LastDataOK.IsZero(), a.proxy.runningSince(), time.Now())
 	if ok {
 		noteCardHealth(iccid, true)
 	}

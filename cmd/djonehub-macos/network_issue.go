@@ -185,7 +185,12 @@ const (
 // dataFixAt is how long into a stall each automatic reconnect runs; after
 // the last one it keeps reconnecting every 15 minutes, since a long-running
 // proxy must come back on its own whenever the carrier lets it.
-var dataFixAt = []time.Duration{30 * time.Second, 3 * time.Minute, 8 * time.Minute}
+var dataFixAt = []time.Duration{time.Minute, 3 * time.Minute, 8 * time.Minute}
+
+// dataSettleTime: a proxy that just (re)started, after an app restart or a
+// reconnect, often needs a few seconds before traffic flows; its failed
+// checks are not a stall.
+const dataSettleTime = 45 * time.Second
 
 func dataFixDue(fixes int, stalled time.Duration) bool {
 	if fixes < len(dataFixAt) {
@@ -210,16 +215,20 @@ func dataFixSkipped() {
 	}
 }
 
-// noteDataPath records one exit check through the cellular proxy. It returns
+// noteDataPath records one exit check through the cellular proxy, whose
+// listener has been up since running. It returns
 // the issue to push when the data path has just been judged blocked, whether
 // a pushed block has just ended, and whether to reconnect now.
-func noteDataPath(ok, cardWorked bool, now time.Time) (push *networkIssue, recovered, fix bool) {
+func noteDataPath(ok, cardWorked bool, running, now time.Time) (push *networkIssue, recovered, fix bool) {
 	networkIssueMu.Lock()
 	defer networkIssueMu.Unlock()
 	if ok {
 		recovered = dataPushed
 		dataIssueOf, dataFailSince, dataPushed, dataFixes = nil, time.Time{}, false, 0
 		return nil, recovered, false
+	}
+	if dataFailSince.IsZero() && now.Sub(running) < dataSettleTime {
+		return nil, false, false
 	}
 	if dataFailSince.IsZero() {
 		dataFailSince = now

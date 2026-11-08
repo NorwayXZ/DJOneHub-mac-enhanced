@@ -89,6 +89,7 @@ type cellularProxy struct {
 	autoStartLoaded bool
 	mu              sync.Mutex
 	listener        net.Listener
+	startedAt       time.Time
 	clients         map[net.Conn]bool
 	state           proxyState
 	cancel          context.CancelFunc
@@ -96,6 +97,16 @@ type cellularProxy struct {
 	stopRotation    atomic.Bool
 	uploaded        atomic.Uint64
 	downloaded      atomic.Uint64
+}
+
+// runningSince is when the current listener started (zero while stopped).
+func (p *cellularProxy) runningSince() time.Time {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.listener == nil {
+		return time.Time{}
+	}
+	return p.startedAt
 }
 
 func (p *cellularProxy) snapshot() proxyState {
@@ -151,6 +162,7 @@ func (p *cellularProxy) start() error {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	p.listener = l
+	p.startedAt = time.Now()
 	p.cancel = cancel
 	p.clients = make(map[net.Conn]bool)
 	go p.monitor(ctx, iface)

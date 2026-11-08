@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"sync"
 	"time"
 )
 
@@ -22,19 +23,49 @@ var proxyExitWatchProviders = []proxyExitProvider{
 	{"http://ifconfig.me/ip", "ifconfig.me", ""},
 }
 
-func watchExitIP(ctx context.Context, iface, preferred string) (string, string, error) {
-	providers := make([]proxyExitProvider, 0, len(proxyExitWatchProviders))
+// exitProviderTimeout bounds one echo service, so a site the carrier's exit
+// cannot reach (ip.3322.net from a Philippine exit, say) costs seconds instead
+// of the whole check, which would then look like a dead data path.
+const (
+	exitProviderTimeout = 5 * time.Second
+	exitProviderPenalty = 10 * time.Minute
+)
+
+// exitProviderFailed: when each service last failed here; it goes last for
+// a while.
+var exitProviderFailed sync.Map
+
+func exitProviderOrder(preferred string, now time.Time) []proxyExitProvider {
+	var good, bad []proxyExitProvider
 	for _, provider := range proxyExitWatchProviders {
-		if provider.source == preferred {
-			providers = append([]proxyExitProvider{provider}, providers...)
+		if at, ok := exitProviderFailed.Load(provider.source); ok && now.Sub(at.(time.Time)) < exitProviderPenalty {
+			bad = append(bad, provider)
+		} else if provider.source == preferred {
+			good = append([]proxyExitProvider{provider}, good...)
 		} else {
-			providers = append(providers, provider)
+			good = append(good, provider)
 		}
 	}
-	for _, provider := range providers {
-		if ip, err := probeProxyExitProvider(ctx, iface, provider); err == nil {
+	return append(good, bad...)
+}
+
+func watchExitIP(ctx context.Context, iface, preferred string) (string, string, error) {
+	for _, provider := range exitProviderOrder(preferred, time.Now()) {
+		pctx, cancel := context.WithTimeout(ctx, exitProviderTimeout)
+		ip, err := probeProxyExitProvider(pctx, iface, provider)
+		cancel()
+		if err == nil {
+			exitProviderFailed.Delete(provider.source)
 			return ip, provider.source, nil
 		}
+		if ctx.Err() != nil {
+			// The caller's own deadline, not this service, ran out.
+			break
+		}
+		exitProviderFailed.Store(provider.source, time.Now())
+	}
+	if ctx.Err() != nil {
+		return "", "", ctx.Err()
 	}
 	return probeProxyExit(ctx, iface, preferred)
 }
@@ -53,7 +84,7 @@ func (a *app) watchProxyExitOnce(ctx context.Context) {
 		return
 	}
 	a.moduleOperationMu.Unlock()
-	probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	probeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	ip, source, err := watchExitIP(probeCtx, before.Interface, before.IPSource)
 	a.noteExitCheck(err == nil)

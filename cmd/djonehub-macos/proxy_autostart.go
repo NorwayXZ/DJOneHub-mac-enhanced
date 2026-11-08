@@ -81,12 +81,14 @@ func (a *app) runProxyAutoStart(ctx context.Context) {
 	defer watch.Stop()
 	var lastRetry time.Time
 	go a.proxy.fillFraudScores(ctx)
+	defer setKeepAwake(false)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			a.autoStartProxyOnce(ctx)
+			setKeepAwake(!a.demo && a.proxy.wantsAwake())
 			// While the exit fails, re-check often so a stuck data session is
 			// reconnected within a minute instead of after two 5-minute checks.
 			if s := a.proxy.snapshot(); s.Running && ((s.PublicIP == "" && time.Since(lastRetry) >= 15*time.Second) || (dataStalled() && time.Since(lastRetry) >= dataStallRecheck)) {
