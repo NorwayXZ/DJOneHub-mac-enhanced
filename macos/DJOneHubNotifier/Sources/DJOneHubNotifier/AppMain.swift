@@ -89,6 +89,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let updater: AppUpdater
     private let systemNotifications = SystemNotifications()
     private var appStatusItem: NSStatusItem?
+    private var menuBarProxyStatus: CellularProxyStatus?
     private var proxyTimer: Timer?
     private var proxyRefreshing = false
     private var proxyTick = 0
@@ -102,7 +103,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var gpsAnimationTimer: Timer?
     private var gpsSearchTimeoutTimer: Timer?
     private var gpsStatusItem: NSStatusItem?
-    private var cellularStatusItem: NSStatusItem?
+    private var cellularReading: (signalLevel: Int, detail: String)?
     private var gpsWasEnabled = false
     private var gpsSearchTimedOut = false
     private var gpsStartupFramesRemaining = 0
@@ -355,7 +356,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         stopGPSAnimation()
         cancelGPSSearchTimeout()
         removeGPSStatusItem()
-        removeCellularStatusItem()
     }
 
     private func pollCalls() async {
@@ -503,7 +503,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // broadband usually stays default while the SIM carries the SOCKS5 proxy.
     private func pollCellularStatus() async {
         guard let modem = try? await api.modemStatus() else {
-            removeCellularStatusItem()
+            cellularReading = nil
+            renderStatusIcon()
             return
         }
         let registered = ["已注册", "漫游注册"].contains(modem.regStatusText ?? "")
@@ -521,23 +522,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if usageCenter.status?.network?.roaming == true { detail += " · 漫游" }
         }
         let role = (try? await api.isUsingCellularRoute()) == true ? "4G 正在接管网络" : "4G 供蜂窝代理使用"
-        showCellularStatusItem(signalLevel: level, toolTip: "DJOneHub \(role) · \(detail)；点击打开控制面板")
-    }
-
-    private func showCellularStatusItem(signalLevel: Int, toolTip: String) {
-        if cellularStatusItem == nil {
-            cellularStatusItem = NSStatusBar.system.statusItem(withLength: 48)
-            cellularStatusItem?.button?.target = self
-            cellularStatusItem?.button?.action = #selector(openDJOneHubFromCellularMenuBar)
-        }
-        cellularStatusItem?.button?.image = Self.cellularStatusImage(signalLevel: signalLevel)
-        cellularStatusItem?.button?.toolTip = toolTip
-    }
-
-    private func removeCellularStatusItem() {
-        guard let cellularStatusItem else { return }
-        NSStatusBar.system.removeStatusItem(cellularStatusItem)
-        self.cellularStatusItem = nil
+        cellularReading = (level, "\(role) · \(detail)")
+        renderStatusIcon()
     }
 
     private func showGPSStatusItem(signalLevel: Int?, scanPhase: Int? = nil) {
@@ -615,10 +601,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         gpsMapPanel.toggle()
     }
 
-    @objc private func openDJOneHubFromCellularMenuBar() {
-        openDJOneHub()
-    }
-
     private static func isCellularNetwork(_ mode: String?) -> Bool {
         let normalized = mode?.uppercased() ?? ""
         return normalized.contains("LTE") || normalized.contains("4G")
@@ -635,16 +617,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // status bar: four signal bars on the left, a "4G" label on the right.
     // The label is vertically centered and sized to the same height as the
     // tallest signal bar (13.8pt). Drawn as a template image so macOS renders
-    // it white on a dark menu bar and black on a light one, like iOS.
-    private static func cellularStatusImage(signalLevel: Int) -> NSImage {
-        let image = NSImage(size: NSSize(width: 48, height: 18))
-        image.lockFocus()
-        // 模板色：菜单栏深色时系统渲染为白色，浅色时自动变黑，与 iPhone 状态栏一致
-        let color = NSColor.black
-        let active = color
+    // it white on a dark menu bar and black on a light one, like iOS. A proxy
+    // dot needs its own color, which a template cannot carry, so with a dot
+    // the bars are drawn for the menu bar's current appearance instead.
+    private static func cellularStatusImage(signalLevel: Int, proxyDot: NSColor?) -> NSImage {
+        let description = "DJOneHub 4G 信号 \(signalLevel) 格"
+        guard let proxyDot else {
+            let image = NSImage(size: NSSize(width: 44, height: 18))
+            image.lockFocus()
+            // 模板色：菜单栏深色时系统渲染为白色，浅色时自动变黑，与 iPhone 状态栏一致
+            drawCellularSignal(signalLevel: signalLevel, color: .black)
+            image.unlockFocus()
+            image.isTemplate = true
+            image.accessibilityDescription = description
+            return image
+        }
+        let image = NSImage(size: NSSize(width: 51, height: 18), flipped: false) { _ in
+            let dark = NSAppearance.currentDrawing().bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            drawCellularSignal(signalLevel: signalLevel, color: dark ? .white : .black)
+            proxyDot.setFill()
+            NSBezierPath(ovalIn: NSRect(x: 44.5, y: 5.5, width: 6, height: 6)).fill()
+            return true
+        }
+        image.isTemplate = false
+        image.accessibilityDescription = description
+        return image
+    }
+
+    private static func drawCellularSignal(signalLevel: Int, color: NSColor) {
         let inactive = color.withAlphaComponent(0.30)
         for (index, height) in [4.2, 7.4, 10.6, 13.8].enumerated() {
-            (index < signalLevel ? active : inactive).setFill()
+            (index < signalLevel ? color : inactive).setFill()
             let bar = NSBezierPath(
                 roundedRect: NSRect(x: CGFloat(index) * 5.2, y: 1, width: 3.6, height: height),
                 xRadius: 0.9,
@@ -661,10 +664,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 .foregroundColor: color,
             ]
         )
-        image.unlockFocus()
-        image.isTemplate = true
-        image.accessibilityDescription = "DJOneHub 4G 信号 \(signalLevel) 格"
-        return image
     }
 
     private static func gpsSignalLevel(for fix: GPSFixSummary?) -> Int? {
@@ -849,7 +848,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func installStatusMenu() {
         NotificationCenter.default.addObserver(self, selector: #selector(quitWorkspace), name: Notification.Name("DJOneHubQuitRequested"), object: nil)
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.image = NSImage(systemSymbolName: "antenna.radiowaves.left.and.right", accessibilityDescription: "DJOneHub")
         let menu = NSMenu()
         func add(_ title: String, _ action: Selector) {
@@ -873,25 +872,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
         statusContextMenu = menu
         appStatusItem = item
-        proxyCenter.onStatusChange = { [weak self] status in self?.updateProxyStatusIcon(status) }
-        updateProxyStatusIcon(proxyCenter.status)
+        proxyCenter.onStatusChange = { [weak self] status in
+            self?.menuBarProxyStatus = status
+            self?.renderStatusIcon()
+        }
+        menuBarProxyStatus = proxyCenter.status
+        renderStatusIcon()
     }
-    private func updateProxyStatusIcon(_ status: CellularProxyStatus?) {
+    // One menu bar icon: signal bars and "4G" while the module answers, the
+    // antenna otherwise. Green means the proxy is on, orange that it is
+    // reconnecting or waiting for the network.
+    private func renderStatusIcon() {
+        let status = menuBarProxyStatus
         let running = status?.running == true
         let reconnecting = status?.phase == "reconnecting"
         let awaiting = !running && status?.autoStart == true
-        let symbol = NSImage(systemSymbolName: "antenna.radiowaves.left.and.right", accessibilityDescription: "DJOneHub")
-        if running || reconnecting || awaiting {
-            let color: NSColor = running && !reconnecting ? .systemGreen : .systemOrange
-            let colored = symbol?.withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [color]))
-            colored?.isTemplate = false
-            appStatusItem?.button?.image = colored
+        let proxyColor: NSColor? = running || reconnecting || awaiting ? (running && !reconnecting ? .systemGreen : .systemOrange) : nil
+        if let cellularReading {
+            appStatusItem?.button?.image = Self.cellularStatusImage(signalLevel: cellularReading.signalLevel, proxyDot: proxyColor)
         } else {
-            symbol?.isTemplate = true
-            appStatusItem?.button?.image = symbol
+            let symbol = NSImage(systemSymbolName: "antenna.radiowaves.left.and.right", accessibilityDescription: "DJOneHub")
+            if let proxyColor {
+                let colored = symbol?.withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [proxyColor]))
+                colored?.isTemplate = false
+                appStatusItem?.button?.image = colored
+            } else {
+                symbol?.isTemplate = true
+                appStatusItem?.button?.image = symbol
+            }
         }
         let state = reconnecting ? "蜂窝网络重连中" : (running ? (proxyCenter.fleetMode ? "\(proxyCenter.runningCount) 个蜂窝代理已开启" : "蜂窝代理已开启 · 127.0.0.1:10909") : (status == nil ? "蜂窝代理状态未知" : (awaiting ? "蜂窝网络中断，恢复后自动开启代理" : "蜂窝代理已停止")))
-        appStatusItem?.button?.toolTip = "DJOneHub · " + state
+        var tip = "DJOneHub · " + state
+        if let cellularReading { tip += "\n" + cellularReading.detail }
+        appStatusItem?.button?.toolTip = tip
     }
     private var statusContextMenu: NSMenu?
     @objc private func statusItemClicked() {
