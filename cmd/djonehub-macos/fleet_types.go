@@ -183,6 +183,7 @@ type fleetController struct {
 	workerSessions map[string]string
 	errors         map[string]string
 	inventory      fleetInventoryFunc
+	inventoryFails int
 	start          fleetStartFunc
 	// probe reads a module's IMEI before it starts; nil keeps USB positions.
 	probe  fleetProbeFunc
@@ -202,6 +203,9 @@ type fleetController struct {
 	audioHostSent map[string]string
 }
 
+// fleetInventoryFailLimit is about a minute of consecutive failed listings.
+const fleetInventoryFailLimit = 60
+
 func newFleetController(path string, inventory fleetInventoryFunc, start fleetStartFunc) (*fleetController, error) {
 	r, err := loadFleetRegistry(path)
 	if err != nil {
@@ -218,6 +222,16 @@ func (c *fleetController) reconcile() {
 	defer c.mu.Unlock()
 	if err != nil {
 		c.lastError = err.Error()
+		// A listing that fails once says nothing about the modules. Unplugged
+		// modules show up in a listing that works, and each worker notices its
+		// own USB going away, so only a lasting failure stops them.
+		c.inventoryFails++
+		if c.inventoryFails == 1 {
+			log.Printf("USB inventory failed, keeping module workers running: %v", err)
+		}
+		if c.inventoryFails < fleetInventoryFailLimit {
+			return
+		}
 		stops := []fleetProcess{}
 		for id, w := range c.workers {
 			stops = append(stops, w)
@@ -230,6 +244,10 @@ func (c *fleetController) reconcile() {
 		c.mu.Lock()
 		return
 	}
+	if c.inventoryFails > 1 {
+		log.Printf("USB inventory recovered after %d failed listings", c.inventoryFails)
+	}
+	c.inventoryFails = 0
 	c.lastError = ""
 	counts := map[string]int{}
 	sessions := map[string]int{}

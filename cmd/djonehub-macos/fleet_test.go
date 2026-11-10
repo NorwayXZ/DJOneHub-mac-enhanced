@@ -210,14 +210,31 @@ func TestModuleModeArgumentsPreserveOtherOptions(t *testing.T) {
 		t.Fatal(disabled)
 	}
 }
-func TestFleetInventoryErrorStopsWorkersAndReportsFailure(t *testing.T) {
+func TestFleetKeepsWorkersThroughBriefInventoryFailures(t *testing.T) {
 	devices := []fleetDevice{{Session: "1", Location: 1, Serial: "A"}}
 	c, created := makeFleet(t, &devices)
 	c.reconcile()
-	c.inventory = func() ([]fleetDevice, error) { return nil, errors.New("inventory failed") }
+	worker := created[c.registry.Bindings[0].ID][0]
+	working := c.inventory
+	failing := func() ([]fleetDevice, error) { return nil, errors.New("inventory failed") }
+	c.inventory = failing
+	for range fleetInventoryFailLimit - 1 {
+		c.reconcile()
+	}
+	if c.snapshot().Error == "" || !worker.Alive() {
+		t.Fatal("a brief inventory failure stopped the worker")
+	}
+	c.inventory = working
 	c.reconcile()
-	if c.snapshot().Error == "" || created[c.registry.Bindings[0].ID][0].Alive() {
-		t.Fatal("inventory failure kept a stale worker")
+	if c.inventoryFails != 0 || !worker.Alive() || len(created[c.registry.Bindings[0].ID]) != 1 {
+		t.Fatal("recovery restarted the worker or kept counting")
+	}
+	c.inventory = failing
+	for range fleetInventoryFailLimit {
+		c.reconcile()
+	}
+	if worker.Alive() {
+		t.Fatal("a lasting inventory failure kept a stale worker")
 	}
 }
 func TestFleetRejectsInvalidEnumerationSession(t *testing.T) {

@@ -86,7 +86,7 @@ func discoverFleetDevices() ([]fleetDevice, error) {
 		return nil, errors.New("USB inventory unavailable")
 	}
 	defer C.free(unsafe.Pointer(raw))
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, "/usr/bin/plutil", "-convert", "json", "-o", "-", "-")
 	command.Stdin = bytes.NewReader(C.GoBytes(unsafe.Pointer(raw), length))

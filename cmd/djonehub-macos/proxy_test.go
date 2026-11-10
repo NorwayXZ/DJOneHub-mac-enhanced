@@ -213,3 +213,17 @@ func TestDecodeProxyLocation(t *testing.T) {
 		})
 	}
 }
+
+// While IPv6 leads, an IPv4-only destination used to come back as a nil
+// connection with no error, which crashed the module worker.
+func TestDialWithIPv6LeadAndNoIPv6AddressReportsAnError(t *testing.T) {
+	cellularIPv6PreferredUntil.Store(time.Now().Add(time.Hour).UnixNano())
+	t.Cleanup(func() { cellularIPv6PreferredUntil.Store(0) })
+	c, err := dialCellularFamilies(context.Background(), "invalid", []string{"1.2.3.4:80"}, nil)
+	if c != nil || err == nil {
+		t.Fatalf("conn=%v err=%v", c, err)
+	}
+	if c, err := dialCellularList(context.Background(), "invalid", nil); c != nil || err == nil {
+		t.Fatalf("empty list: conn=%v err=%v", c, err)
+	}
+}

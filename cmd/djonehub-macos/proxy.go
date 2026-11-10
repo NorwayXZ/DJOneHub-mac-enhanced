@@ -455,7 +455,9 @@ func noteCellularFamilyWin(ipv6, ipv4Failed bool) {
 func dialCellularFamilies(ctx context.Context, iface string, v4, v6 []string) (net.Conn, error) {
 	first, second := v4, v6
 	ipv6First := time.Now().UnixNano() < cellularIPv6PreferredUntil.Load()
-	if ipv6First || len(v4) == 0 {
+	// IPv6 can lead only when this destination has an IPv6 address.
+	ipv6First = (ipv6First && len(v6) > 0) || len(v4) == 0
+	if ipv6First {
 		first, second = v6, v4
 	}
 	if len(second) == 0 {
@@ -469,7 +471,7 @@ func dialCellularFamilies(ctx context.Context, iface string, v4, v6 []string) (n
 		ipv6 bool
 	}
 	results := make(chan result, 2)
-	firstIsIPv6 := ipv6First || len(v4) == 0
+	firstIsIPv6 := ipv6First
 	go func() {
 		c, err := dialCellularList(ctx, iface, first)
 		results <- result{c, err, firstIsIPv6}
@@ -522,7 +524,7 @@ func dialCellularFamilies(ctx context.Context, iface string, v4, v6 []string) (n
 }
 
 func dialCellularList(ctx context.Context, iface string, addresses []string) (net.Conn, error) {
-	var err error
+	err := errors.New("no address to connect to")
 	for _, address := range addresses {
 		c, e := boundProxyDial(ctx, iface, address)
 		if e == nil {
