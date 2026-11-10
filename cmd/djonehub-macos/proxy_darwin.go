@@ -53,6 +53,11 @@ func proxyInterface() (string, error) {
 		}
 	}
 	if found == "" {
+		// A scoped worker exists only while its module is on USB, so the
+		// module is there and only its network adapter is not ready.
+		if scopedUSBSession != 0 {
+			return "", errors.New("模块已连接，但它的网卡还没有给电脑分配地址，正在自动恢复，约 1～2 分钟，恢复后代理会自动开启")
+		}
 		return "", errors.New("未找到模块的蜂窝网卡，请检查模块是否已连接并完成上网初始化")
 	}
 	route := discoverMacDefaultRoute()

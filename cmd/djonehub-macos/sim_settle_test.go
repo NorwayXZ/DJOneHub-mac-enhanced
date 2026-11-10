@@ -58,3 +58,36 @@ func TestModuleLinkWithSelfAssignedAddressIsDown(t *testing.T) {
 		t.Fatal("a module without its own interface must not trigger a reboot")
 	}
 }
+
+func TestLinkRecoveryCyclesRadioBeforeReboot(t *testing.T) {
+	long := time.Hour
+	for _, c := range []struct {
+		down        time.Duration
+		cycled      bool
+		sinceReboot time.Duration
+		want        linkStep
+	}{
+		{20 * time.Second, false, long, linkWait},
+		{46 * time.Second, false, long, linkCycleRadio},
+		{2 * time.Minute, true, long, linkWait},
+		{3 * time.Minute, true, long, linkReboot},
+		{3 * time.Minute, true, time.Minute, linkWait},
+	} {
+		if got := linkRecoveryStep(c.down, c.cycled, c.sinceReboot); got != c.want {
+			t.Errorf("%+v: got %v", c, got)
+		}
+	}
+}
+
+func TestPDPHasIPv4(t *testing.T) {
+	for resp, want := range map[string]bool{
+		`+CGPADDR: 1,"10.2.125.52,38.0.3.129.169.130.5.186.0.0.0.16.60.5.112.1"`: true,
+		`+CGPADDR: 1,"0.0.0.0,38.0.3.129.169.130.5.186.0.0.0.16.60.5.112.1"`:     false,
+		`+CGPADDR: 1,"38.0.3.129.169.130.5.186.0.0.0.16.60.5.112.1"`:             false,
+		`ERROR`: false,
+	} {
+		if got := pdpHasIPv4(resp); got != want {
+			t.Errorf("%s: got %v", resp, got)
+		}
+	}
+}

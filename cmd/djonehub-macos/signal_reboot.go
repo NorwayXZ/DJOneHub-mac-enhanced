@@ -86,8 +86,42 @@ const clearForbiddenNetworks = `AT+CRSM=214,28539,0,0,12,"FFFFFFFFFFFFFFFFFFFFFF
 
 // The module can stay registered with a data session up while its USB
 // network stops answering DHCP: the Mac only has a self-assigned 169.254
-// address and nothing gets through until the module restarts.
-const linkDownReboot = 90 * time.Second
+// address and nothing gets through until its data session or the module restarts.
+const (
+	linkDownRadioCycle = 45 * time.Second
+	linkDownReboot     = 3 * time.Minute
+)
+
+type linkStep int
+
+const (
+	linkWait linkStep = iota
+	linkCycleRadio
+	linkReboot
+)
+
+// linkRecoveryStep: a module whose DHCP stopped answering usually restarts it
+// when its data session is rebuilt, so a radio cycle (about a minute) comes
+// first and the reboot only if that did not bring an address.
+func linkRecoveryStep(down time.Duration, radioCycled bool, sinceReboot time.Duration) linkStep {
+	switch {
+	case down >= linkDownRadioCycle && !radioCycled:
+		return linkCycleRadio
+	case down >= linkDownReboot && sinceReboot >= 15*time.Minute:
+		return linkReboot
+	}
+	return linkWait
+}
+
+// pdpHasIPv4 reports whether +CGPADDR shows the module holding an IPv4 address.
+func pdpHasIPv4(resp string) bool {
+	for _, addr := range parsePDPAddresses(resp) {
+		if ip := net.ParseIP(addr); ip != nil && ip.To4() != nil && !ip.IsUnspecified() {
+			return true
+		}
+	}
+	return false
+}
 
 // moduleLinkState looks at this module's USB network interface: found when
 // it is up, usable when it also has a real IPv4 address.

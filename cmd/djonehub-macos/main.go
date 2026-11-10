@@ -40,7 +40,7 @@ import (
 //go:embed web/*
 var webAssets embed.FS
 
-const appVersion = "1.3.0-proxy-preview.61"
+const appVersion = "1.3.0-proxy-preview.62"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
@@ -171,6 +171,7 @@ type app struct {
 	lostSignalCount  int
 	lastNetworkCheck time.Time
 	lastLinkCheck    time.Time
+	linkRadioCycled  bool
 	linkDownSince    time.Time
 }
 
@@ -1145,10 +1146,24 @@ func (a *app) checkModuleLink() {
 	}
 	if a.linkDownSince.IsZero() {
 		a.linkDownSince = time.Now()
+		a.linkRadioCycled = false
 		log.Printf("cellular link: module is registered but the Mac has no address from it")
 		return
 	}
-	if time.Since(a.linkDownSince) < linkDownReboot || time.Since(lastSignalReboot()) < 15*time.Minute {
+	step := linkRecoveryStep(time.Since(a.linkDownSince), a.linkRadioCycled, time.Since(lastSignalReboot()))
+	if step == linkWait {
+		return
+	}
+	// An IPv6-only bearer legitimately gives the Mac no IPv4 address.
+	if resp, err := a.usbAT.Command("AT+CGPADDR=1", 3*time.Second); err != nil || !pdpHasIPv4(resp) {
+		return
+	}
+	if step == linkCycleRadio {
+		a.linkRadioCycled = true
+		log.Printf("cellular link: no DHCP answer from the module, cycling radio to restart its network")
+		_, _ = a.usbAT.Command("AT+CFUN=0", 8*time.Second)
+		time.Sleep(3 * time.Second)
+		_, _ = a.usbAT.Command("AT+CFUN=1", 8*time.Second)
 		return
 	}
 	a.linkDownSince = time.Time{}
