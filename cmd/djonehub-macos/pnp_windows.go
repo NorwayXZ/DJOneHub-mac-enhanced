@@ -271,3 +271,13 @@ func findWinModule(session uint64) (winModule, error) {
 	}
 	return winModule{}, errors.New("DJI/Quectel USB AT device (2ca3:4006 or 2c7c:0125) not found")
 }
+
+// moduleUSBInstance is the composite device instance of this worker's module;
+// the tray app matches it to the module's Windows audio devices.
+func moduleUSBInstance() string {
+	m, err := findWinModule(scopedUSBSession)
+	if err != nil {
+		return ""
+	}
+	return m.Instance
+}

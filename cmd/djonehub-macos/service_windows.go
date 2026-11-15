@@ -82,6 +82,7 @@ func runAsService(run func()) bool {
 	if !isServiceInvocation() {
 		return false
 	}
+	relaunchTrayAfterUpdate()
 	if err := svc.Run(serviceName, djonehubService{run: run}); err != nil {
 		log.Printf("service: %v", err)
 	}
@@ -183,6 +184,8 @@ func handleServiceCommand() bool {
 		err = installService()
 	case "uninstall-service":
 		err = uninstallService()
+	case "start-service":
+		err = startService()
 	default:
 		return false
 	}
@@ -191,4 +194,20 @@ func handleServiceCommand() bool {
 		os.Exit(1)
 	}
 	return true
+}
+
+// startService starts the installed service (the tray runs this elevated when
+// DJOneHub is opened after 完全退出).
+func startService() error {
+	m, err := mgr.Connect()
+	if err != nil {
+		return fmt.Errorf("需要管理员权限: %w", err)
+	}
+	defer m.Disconnect()
+	s, err := m.OpenService(serviceName)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	return s.Start()
 }

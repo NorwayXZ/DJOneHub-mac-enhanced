@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -173,6 +174,7 @@ func (a *app) applyCallPoll(calls []parsedCall, now time.Time) {
 				a.callHistory = a.callHistory[:100]
 			}
 			a.activeCall = nil
+			a.hostMuted, a.hostRecording = false, false
 			// Only tear down the module voice route when a call actually
 			// ended; idle polls must not stop a route prepared in advance.
 			callEnded = true
@@ -341,6 +343,7 @@ func (a *app) callStatus(w http.ResponseWriter, _ *http.Request) {
 		"poll_interval_s": int(a.callPollInterval.Seconds()),
 		"last_poll":       a.callLastPoll,
 		"last_poll_error": a.callLastPollError,
+		"host":            map[string]bool{"enabled": a.swiftAudioHost, "muted": a.hostMuted, "recording": a.hostRecording},
 		"audio": map[string]any{
 			"running":   audioRunning,
 			"far_peak":  audioFarPeak,
@@ -580,6 +583,9 @@ func (a *app) audioMute(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
+	a.callMu.Lock()
+	a.hostMuted = body.Muted
+	a.callMu.Unlock()
 	if a.audio != nil {
 		a.audio.setMuted(body.Muted)
 	}
@@ -587,6 +593,26 @@ func (a *app) audioMute(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) audioRecord(w http.ResponseWriter, r *http.Request) {
+	if a.swiftAudioHost && runtime.GOOS == "windows" {
+		// The tray app records; it follows this flag.
+		var body struct {
+			Action string `json:"action"`
+		}
+		if !decodeJSON(w, r, &body) {
+			return
+		}
+		a.callMu.Lock()
+		if a.activeCall == nil {
+			a.callMu.Unlock()
+			writeError(w, http.StatusConflict, "当前没有通话")
+			return
+		}
+		a.hostRecording = strings.EqualFold(strings.TrimSpace(body.Action), "start")
+		recording := a.hostRecording
+		a.callMu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]any{"recording": recording})
+		return
+	}
 	if a.swiftAudioHost {
 		writeError(w, http.StatusConflict, "MaVo 音频策略已接管媒体；录音观察器尚未接入，避免影响实时音频")
 		return
@@ -668,5 +694,6 @@ func (a *app) audioHostConfig(w http.ResponseWriter, _ *http.Request) {
 		"route_ready":  routeReady,
 		"route_error":  routeError,
 		"host_enabled": hostEnabled,
+		"usb_instance": moduleUSBInstance(),
 	})
 }

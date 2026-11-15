@@ -387,6 +387,19 @@ func (c *fleetController) handler(fallback http.Handler) http.Handler {
 	mux.Handle("GET /app/", webAppHandler())
 	mux.HandleFunc("GET /api/contacts", contactsAPI)
 	mux.HandleFunc("PUT /api/contacts", contactsAPI)
+	mux.HandleFunc("GET /api/desktop/settings", desktopSettingsAPI)
+	mux.HandleFunc("PUT /api/desktop/settings", desktopSettingsAPI)
+	mux.HandleFunc("POST /api/desktop/quit", desktopQuitAPI)
+	mux.HandleFunc("GET /api/desktop/audio", trayAudioAPI)
+	mux.HandleFunc("POST /api/desktop/audio", trayAudioAPI)
+	mux.HandleFunc("GET /api/update/windows", windowsUpdateStatusAPI)
+	mux.HandleFunc("POST /api/update/windows", func(w http.ResponseWriter, r *http.Request) {
+		if err := c.prepareAllWorkers(); err != nil {
+			writeError(w, 409, err.Error())
+			return
+		}
+		windowsUpdateStartAPI(w, r)
+	})
 	mux.HandleFunc("GET /api/lan-share", lanShareAPI)
 	mux.HandleFunc("POST /api/lan-share", lanShareAPI)
 	mux.HandleFunc("POST /api/update/prepare", func(w http.ResponseWriter, r *http.Request) {

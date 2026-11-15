@@ -82,6 +82,10 @@ github.com/iniwex5/quectel-qmi-go v0.6.0 h1:zWZc9jeNMy7+USFRBbfdShnjzSryyYnCw7NP
 github.com/iniwex5/quectel-qmi-go v0.6.0/go.mod h1:6AlSY+Yj4MqJOsZ8cNrq99AzT9MlaopADnJtSRiyAfE=
 github.com/iniwex5/vowifi-go v1.1.2 h1:C9GUw66vG//uWprx68tDqnOKfQDry4L7EdBL35UgnMI=
 github.com/iniwex5/vowifi-go v1.1.2/go.mod h1:3SK63TPpPeB+u+X49zhQqNqw0ZXcV88Z8dIGU/ECCX0=
+github.com/jchv/go-webview2 v0.0.0-20260205173254-56598839c808 h1:ftnsTqIUH57XQEF+PnXX9++nlHCzdkuB5zbWyMMruZo=
+github.com/jchv/go-webview2 v0.0.0-20260205173254-56598839c808/go.mod h1:rWifBlzkgrvd7zUqlfq91sWt3473OikgnglnIILx/Jo=
+github.com/jchv/go-winloader v0.0.0-20250406163304-c1995be93bd1 h1:njuLRcjAuMKr7kI3D85AXWkw6/+v9PwtV6M6o11sWHQ=
+github.com/jchv/go-winloader v0.0.0-20250406163304-c1995be93bd1/go.mod h1:alcuEEnZsY1WQsagKhZDsoPCRoOijYqhZvPwLG0kzVs=
 github.com/jinzhu/inflection v1.0.0 h1:K317FqzuhWc8YvSVlFMCCUb36O/S9MCKRDI7QkRKD/E=
 github.com/jinzhu/inflection v1.0.0/go.mod h1:h+uFLlag+Qp1Va5pdKtLDYj+kHp5pxUVkryuEj+Srlc=
 github.com/jinzhu/now v1.1.5 h1:/o9tlHleP7gOFmsnYNz3RGnqzefHA47wQpKrrdTIwXQ=

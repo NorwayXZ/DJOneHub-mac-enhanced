@@ -41,3 +41,6 @@
 - 后台：WinUSB AT、SetupAPI 识别模块、多模块进程、按模块绑定网卡的代理、网卡 DNS、跃点调整、Windows 服务（`--install-service`），均已在测试机实测。
 - 界面：`cmd/djonehub-macos/web/app`，由后台在 `/app/` 提供；托盘程序 `cmd/djonehub-tray` 用 Edge 应用窗口打开它，并为新短信、来电弹通知。
 - 安装包：`windows/DJOneHub.iss`，GitHub Actions 的 Windows 任务构建，随每个版本发布。
+- 66：通话声音（模块 ADB 走 WinUSB，托盘程序用 winmm 把模块的 USB 音频接到电脑麦克风/扬声器，8 kHz，远端 3 kHz 四阶低通、近端回声抑制、静音、立体声录音）、来电铃声、一键更新（服务下载并校验安装包后静默安装，新服务在已登录会话里重新打开窗口）、WebView2 原生窗口、通讯录 vcf/csv 导入导出、设置页补齐。
+- 模块 1（2ca3:4006）当前 USBCFG 的 ADB 位为 0，Mac 和 Windows 都需要先在 设置 › 通话支持 启用后才有通话声音。
+

@@ -164,40 +164,170 @@
     return () => { clearInterval(t); clearInterval(t2); };
   }
 
+  // ---- Windows 通知 / 铃声 (the tray app reads these) --------------------------
+  const RINGTONES = [["Ring01", "铃声 1"], ["Ring02", "铃声 2"], ["Ring03", "铃声 3"], ["Ring04", "铃声 4"], ["Ring05", "铃声 5"], ["Ring06", "铃声 6"], ["Ring07", "铃声 7"], ["Ring08", "铃声 8"], ["Ring09", "铃声 9"], ["Ring10", "铃声 10"], ["Alarm01", "闹铃"], ["off", "静音"]];
+  let desktop = null;
+  async function saveDesktop(change) {
+    const next = Object.assign({}, desktop || {}, change);
+    desktop = await api("api/desktop/settings", { method: "PUT", body: next, unscoped: true });
+  }
+  const toggle = (key, on, label) => `<label class="row small" style="gap:8px;cursor:pointer"><input type="checkbox" data-dk="${key}" ${on ? "checked" : ""}>${label}</label>`;
+  function notifyPanel(el) {
+    function draw() {
+      const s = desktop || { notifications: true, show_contents: false };
+      el.innerHTML = `<div class="col" style="gap:8px">${toggle("notifications", s.notifications, "Windows 通知：新短信和来电")}${toggle("show_contents", s.show_contents, "在通知中显示短信内容和验证码")}
+        <div class="small muted">默认隐藏短信正文和验证码，只显示发件人。通知由右下角托盘里的 DJOneHub 发出，托盘退出后不再通知（代理照常运行）。</div></div>`;
+      el.querySelectorAll("[data-dk]").forEach((c) => { c.onchange = () => saveDesktop({ [c.dataset.dk]: c.checked }).then(draw).catch((e) => toast(e.message, "failure")); });
+    }
+    draw();
+    api("api/desktop/settings", { unscoped: true }).then((s) => { desktop = s; draw(); }).catch(() => {});
+  }
+  function ringtoneRow(el) {
+    function draw() {
+      const cur = (desktop && desktop.ringtone) || "Ring01";
+      el.innerHTML = `<div class="row"><span class="small muted" style="width:80px">来电铃声</span><select class="field" data-ring style="width:auto;min-width:140px">${RINGTONES.map(([v, l]) => `<option value="${v}" ${v === cur ? "selected" : ""}>${l}</option>`).join("")}</select></div>`;
+      el.querySelector("[data-ring]").onchange = (e) => saveDesktop({ ringtone: e.target.value }).then(() => toast("铃声已更换", "success")).catch((x) => toast(x.message, "failure"));
+    }
+    draw();
+    api("api/desktop/settings", { unscoped: true }).then((s) => { desktop = s; draw(); }).catch(() => {});
+  }
+
+  // ---- 多模块代理 -------------------------------------------------------------
+  function fleetPanel(el) {
+    const n = App.modules.length;
+    el.innerHTML = `<div class="col" style="gap:6px"><div class="strong">${icon("cable", "accent")} ${App.fleetMode ? "多模块模式已开启" : "当前使用单模块模式"}${n ? ` · ${n} 个模块` : ""}</div>
+      <div class="small muted">每台模块使用独立后台和固定 SOCKS5 端口，从 10909 开始分配。设备断开后保留端口，不自动换用其他 SIM。</div>
+      <div class="small muted">所有功能对每个模块都可用：左上角切换模块，拨号、短信发送、频段、流量、呼叫转移等页面针对选中的模块；来电、短信列表和推送覆盖全部模块，并标明来自哪个模块。电脑只有一套麦克风和扬声器，同一时间只能在电脑上接听一路通话。</div></div>`;
+  }
+
+  // ---- 通话支持 (ModuleSetupCard) ----------------------------------------------
+  function moduleSetupPanel(el) {
+    let s = null, busy = false, err = "", timer = null;
+    const pending = (st) => ["initializing", "restarting", "verifying", "reconnecting"].includes(st);
+    function draw() {
+      const st = s && s.state;
+      const ic = st === "ready" ? ["check", "green"] : st === "failed" || st === "unsupported" ? ["warn", "orange"] : pending(st) ? ["cycle", "accent"] : ["phone", "accent"];
+      el.innerHTML = `<div class="col" style="gap:8px"><div class="row" style="gap:10px;align-items:flex-start">${icon(ic[0], ic[1])}<div class="col grow" style="gap:3px"><span class="strong small">${esc((s && s.summary) || "正在检查模块状态")}</span><span class="tiny muted mono" style="word-break:break-all">${esc((s && s.detail) || "新模块只需初始化一次；之后直接插入即可使用。")}</span></div>${busy || pending(st) ? '<div class="spinner"></div>' : `<button class="btn small" data-a="refresh">${icon("refresh")}</button>`}</div>
+        ${s && s.can_initialize && !busy ? '<div><button class="btn primary small" data-a="init">启用通话支持</button></div>' : ""}
+        ${s && s.backup_path ? '<div class="tiny muted">已备份原始模块配置</div>' : ""}
+        <div class="tiny muted">通话时声音走这台电脑的麦克风和扬声器；通话录音保存在“文档\\DJOneHub\\通话录音”。</div>
+        ${err ? `<div class="small red">${esc(err)}</div>` : ""}
+        ${App.fleetMode && App.selected ? `<div class="tiny muted">针对 ${esc(App.selected.name)}（左上角切换模块）</div>` : ""}</div>`;
+      const r = el.querySelector('[data-a="refresh"]'); if (r) r.onclick = load;
+      const i = el.querySelector('[data-a="init"]'); if (i) i.onclick = () => App.confirmDialog("启用通话支持？", "兼容原始模块、旧 UAC 配置及其他工具留下的完整 USB 配置。将先备份当前配置，再补齐通话所需接口并重启模块；过程中 4G 会短暂断开。验证失败会自动恢复原始配置，并显示具体原因。", "启用", true).then((ok) => ok && init());
+    }
+    async function load() {
+      busy = true; err = ""; draw();
+      try { s = await api("api/module/setup", { timeout: 20 }); } catch (e) { err = e.message; }
+      busy = false; draw();
+      clearTimeout(timer);
+      if (s && pending(s.state)) timer = setTimeout(load, 2000);
+    }
+    async function init() {
+      busy = true; err = ""; draw();
+      try { s = await api("api/module/setup", { body: { confirm: true }, timeout: 20 }); }
+      catch (e) { try { s = await api("api/module/setup", { timeout: 20 }); if (!pending(s.state)) err = e.message; } catch (_) { err = e.message; } }
+      busy = false; draw();
+      if (s && pending(s.state)) timer = setTimeout(load, 2000);
+    }
+    load();
+    return () => clearTimeout(timer);
+  }
+
+  // ---- 语音运行时 (VoiceRuntimeCard) -------------------------------------------
+  function voiceRuntimePanel(el) {
+    let s = null, busy = false, err = "";
+    function draw() {
+      const ok = s && s.runtime_installed;
+      el.innerHTML = `<div class="col" style="gap:8px"><div class="row" style="gap:10px;align-items:flex-start">${icon(ok ? "wave" : "download", ok ? "green" : "accent")}<div class="col grow" style="gap:3px"><span class="strong small">${ok ? "语音运行时已就绪" : "尚未安装语音运行时"}</span><span class="tiny muted">${esc((s && s.runtime_detail) || "首次确认后从上游固定版本下载并校验，下载可能需要数分钟；模块重启后将从本机缓存自动恢复。")}</span></div>${busy ? '<div class="spinner"></div>' : `<button class="btn small" data-a="refresh">${icon("refresh")}</button>`}</div>
+        ${s && !ok && !busy ? '<div><button class="btn primary small" data-a="get">确认并启用通话</button></div>' : ""}
+        ${err ? `<div class="small red">${esc(err)}</div>` : ""}</div>`;
+      const r = el.querySelector('[data-a="refresh"]'); if (r) r.onclick = load;
+      const g = el.querySelector('[data-a="get"]'); if (g) g.onclick = () => App.confirmDialog("下载并启用语音运行时？", "将从 MaVo 官方固定版本直接下载模块侧语音运行时，校验 SHA-256 后保存到本机。DJOneHub 不随软件分发该运行时。首次通话时会临时部署到当前模块；不刷写固件。", "确认并启用", true).then((ok) => ok && provision());
+    }
+    async function load() { busy = true; err = ""; draw(); try { s = await api("api/voice/status", { timeout: 15 }); } catch (e) { err = e.message; } busy = false; draw(); }
+    async function provision() {
+      busy = true; err = ""; draw();
+      try { s = await api("api/voice/provision", { body: {}, timeout: 200 }); }
+      catch (e) { err = /timeout|超时/i.test(e.message) ? "语音运行时下载超过 3 分钟未完成，请检查网络后重试。" : e.message; }
+      busy = false; draw();
+    }
+    load();
+  }
+
+  // ---- 服务控制 ---------------------------------------------------------------
+  function quitPanel(el) {
+    el.innerHTML = `<div class="row" style="gap:10px"><button class="btn danger" data-a="quit">${icon("power")}完全退出</button><span class="small muted">停止 4G 后台、代理、短信守护与通知服务</span></div>`;
+    el.querySelector('[data-a="quit"]').onclick = () => App.confirmDialog("确认完全退出？", "将停止 DJOneHub 后台服务（代理、短信转发、自动恢复）和托盘通知。需要时双击桌面上的 DJOneHub 即可恢复（会请求管理员权限）。", "退出", true).then(async (ok) => {
+      if (!ok) return;
+      try { await api("api/desktop/quit", { body: {}, unscoped: true }); toast("正在退出 DJOneHub…", "success"); setTimeout(() => window.close(), 1500); }
+      catch (e) { toast(e.message, "failure"); }
+    });
+  }
+
   App.pages.settings = function (host) {
     const appearance = localStorage.getItem("djonehub.appearance") || "system";
     host.innerHTML = `<div style="display:flex;flex-direction:column;height:100vh"><div class="row" style="padding:10px 14px"><span style="font-size:17px;font-weight:600">设置</span></div><div class="divider" style="margin:0"></div>
       <div style="overflow-y:auto;flex:1"><div class="page" style="gap:10px;max-width:900px">
+      ${section("Windows 通知")}${cardWrap('<div data-nt></div>')}
       ${section("短信转发")}${cardWrap('<div data-fwd></div>')}
       ${section("呼叫转移")}${cardWrap('<div data-cf></div>')}
       ${section("SIM 保号")}${cardWrap('<div data-ka></div>')}
+      ${section("多模块代理")}${cardWrap('<div data-fl></div>')}
       ${section("状态")}${cardWrap('<div data-st></div>')}
-      ${section("通用")}${cardWrap(`<div class="row"><span class="small muted" style="width:80px">外观</span><div class="row" style="gap:0;border:1px solid var(--line-2);border-radius:7px;overflow:hidden">${[["system", "跟随系统"], ["light", "浅色"], ["dark", "深色"]].map(([v, l]) => `<button data-theme="${v}" style="border:0;padding:5px 14px;cursor:pointer;background:${v === appearance ? "var(--accent)" : "transparent"};color:${v === appearance ? "#fff" : "inherit"}">${l}</button>`).join("")}</div></div>`)}
-      ${section("后台服务")}${cardWrap(`<div class="small muted">DJOneHub 作为 Windows 服务运行：开机自动启动，不用登录；关掉这个窗口后代理、短信转发和自动恢复照常工作。要完全停止，请在“服务”里停止“DJOneHub 蜂窝代理”，或卸载 DJOneHub。</div><div class="small muted" data-ver style="margin-top:8px"></div>`)}
+      ${section("通话支持")}${cardWrap('<div data-ms></div>')}
+      ${section("语音运行时")}${cardWrap('<div data-vr></div>')}
+      ${section("通用")}${cardWrap(`<div class="row"><span class="small muted" style="width:80px">外观</span><div class="row" style="gap:0;border:1px solid var(--line-2);border-radius:7px;overflow:hidden">${[["system", "跟随系统"], ["light", "浅色"], ["dark", "深色"]].map(([v, l]) => `<button data-theme="${v}" style="border:0;padding:5px 14px;cursor:pointer;background:${v === appearance ? "var(--accent)" : "transparent"};color:${v === appearance ? "#fff" : "inherit"}">${l}</button>`).join("")}</div></div><div class="divider" style="margin:10px 0"></div><div data-rt></div>`)}
+      ${section("服务控制")}${cardWrap(`<div data-qt></div><div class="small muted" style="margin-top:10px">DJOneHub 作为 Windows 服务运行：开机自动启动，不用登录；关掉这个窗口后代理、短信转发和自动恢复照常工作。</div><div class="small muted" data-ver style="margin-top:8px"></div>`)}
       </div></div></div>`;
     forwardPanel(host.querySelector("[data-fwd]"));
     callForwardPanel(host.querySelector("[data-cf]"));
     keepAlivePanel(host.querySelector("[data-ka]"));
     const stopStatus = statusPanel(host.querySelector("[data-st]"));
+    notifyPanel(host.querySelector("[data-nt]"));
+    fleetPanel(host.querySelector("[data-fl]"));
+    const stopSetup = moduleSetupPanel(host.querySelector("[data-ms]"));
+    voiceRuntimePanel(host.querySelector("[data-vr]"));
+    ringtoneRow(host.querySelector("[data-rt]"));
+    quitPanel(host.querySelector("[data-qt]"));
     host.querySelectorAll("[data-theme]").forEach((b) => { b.onclick = () => { localStorage.setItem("djonehub.appearance", b.dataset.theme); App.applyTheme(); App.show("settings"); }; });
     api("api/platform", { unscoped: true }).then((p) => { host.querySelector("[data-ver]").textContent = "版本 " + (p.version || "") + " · " + (p.os || ""); }).catch(() => {});
-    return { destroy: stopStatus };
+    return { destroy: () => { stopStatus(); stopSetup(); } };
   };
 
   // ---- 软件更新 ---------------------------------------------------------------
   App.pages.updates = function (host) {
-    let current = "", release = null, message = "", busy = false;
+    let current = "", release = null, message = "", busy = false, upd = null, poll = null;
     function draw() {
       const asset = release && (release.assets || []).find((a) => /Windows.*(Setup|amd64).*\.exe$/i.test(a.name)) || release && (release.assets || []).find((a) => /Windows-amd64.*\.zip$/i.test(a.name));
       const newer = release && current && release.tag_name.replace(/^v/, "") !== current;
+      const working = upd && (upd.state === "downloading" || upd.state === "installing");
       host.innerHTML = `<div class="page" style="padding:28px;gap:18px;max-width:900px;min-height:100vh">
         <div class="row"><span style="font:700 22px var(--round)">${icon("download", "accent")} 软件更新</span><span class="grow"></span><span class="small mono muted">${esc(current)}</span></div>
         <div class="muted">更新源：${REPO}</div>
         <div class="sel">${esc(message)}</div>
-        <div class="row" style="gap:8px"><button class="btn" data-a="check" ${busy ? "disabled" : ""}>检查更新</button>${newer && asset ? `<a class="btn primary" href="${esc(asset.browser_download_url)}" target="_blank">${icon("download")}下载 ${esc(asset.name)}</a>` : ""}${busy ? '<div class="spinner"></div>' : ""}</div>
+        <div class="row" style="gap:8px"><button class="btn" data-a="check" ${busy || working ? "disabled" : ""}>检查更新</button>${newer && asset && /Setup/i.test(asset.name) ? `<button class="btn primary" data-a="install" ${working ? "disabled" : ""}>${icon("download")}下载并安装 ${esc(release.tag_name)}</button>` : newer && asset ? `<a class="btn primary" href="${esc(asset.browser_download_url)}" target="_blank">${icon("download")}下载 ${esc(asset.name)}</a>` : ""}${busy || working ? '<div class="spinner"></div>' : ""}</div>
+        ${upd && upd.state === "downloading" ? `<div class="col" style="gap:6px;max-width:420px"><div class="small">正在下载 ${esc(upd.tag)}… ${Math.round((upd.progress || 0) * 100)}%</div><div style="height:6px;border-radius:3px;background:var(--line)"><div style="height:6px;border-radius:3px;background:var(--accent);width:${Math.round((upd.progress || 0) * 100)}%"></div></div></div>` : ""}
+        ${upd && upd.state === "installing" ? '<div class="small strong">安装包校验通过，正在安装。窗口会关闭，安装完成后自动重新打开（约半分钟），代理会短暂中断。</div>' : ""}
+        ${upd && upd.state === "failed" ? `<div class="small red">更新失败：${esc(upd.error || "")}</div>` : ""}
         ${release ? `<div class="divider"></div><div class="strong" style="font-size:15px">${esc(release.tag_name)}</div><div class="sel" style="white-space:pre-wrap;line-height:1.6">${esc(release.body || "此版本没有更新说明。")}</div>` : ""}
-        <div class="grow"></div><div class="small muted">只从本仓库的 GitHub 发布页下载。下载后运行安装包即可覆盖升级，配置和绑定都会保留。</div></div>`;
+        <div class="grow"></div><div class="small muted">只从本仓库的 GitHub 发布页下载，校验 SHA-256 后自动安装；配置和绑定都会保留。有通话或模块操作时会等它结束。</div></div>`;
       host.querySelector('[data-a="check"]').onclick = check;
+      const ins = host.querySelector('[data-a="install"]');
+      if (ins) ins.onclick = install;
+    }
+    async function install() {
+      try { await api("api/update/windows", { body: { tag: release.tag_name }, unscoped: true, timeout: 30 }); upd = { state: "downloading", tag: release.tag_name, progress: 0 }; draw(); watch(); }
+      catch (e) { toast(e.message, "failure"); }
+    }
+    function watch() {
+      clearInterval(poll);
+      poll = setInterval(async () => {
+        if (!host.isConnected) { clearInterval(poll); return; }
+        try { upd = await api("api/update/windows", { unscoped: true, timeout: 4 }); } catch (_) { /* the service is restarting */ }
+        if (current && upd && upd.state === "idle") { clearInterval(poll); }
+        draw();
+      }, 1000);
     }
     async function check() {
       busy = true; message = "正在检查…"; draw();
@@ -211,6 +341,7 @@
       } catch (e) { message = "检查失败：" + e.message; }
       busy = false; draw();
     }
+    api("api/update/windows", { unscoped: true }).then((u) => { upd = u; if (u && (u.state === "downloading" || u.state === "installing")) watch(); }).catch(() => {});
     api("api/platform", { unscoped: true }).then((p) => { current = p.version || ""; draw(); check(); }).catch(() => { draw(); check(); });
     draw();
   };

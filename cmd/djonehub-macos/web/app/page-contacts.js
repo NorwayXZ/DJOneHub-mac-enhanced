@@ -70,12 +70,65 @@
     catch (e) { toast("保存失败：" + e.message, "failure"); }
   };
 
+  // ---- import: vCard (phones, iCloud, Outlook) and CSV (Google, Outlook) ------
+  function unfold(text) { return text.replace(/\r\n/g, "\n").replace(/\n[ \t]/g, ""); }
+  function qp(s) { try { return decodeURIComponent(s.replace(/=\n/g, "").replace(/=([0-9A-F]{2})/gi, "%$1")); } catch (_) { return s; } }
+  function vValue(line) {
+    const i = line.indexOf(":"); if (i < 0) return "";
+    let v = line.slice(i + 1);
+    if (/ENCODING=QUOTED-PRINTABLE/i.test(line.slice(0, i))) v = qp(v);
+    return v.replace(/\\n/gi, "\n").replace(/\\([,;\\])/g, "$1").trim();
+  }
+  function parseVCard(text) {
+    const out = [];
+    for (const card of unfold(text).split(/BEGIN:VCARD/i).slice(1)) {
+      let name = "", n = "", note = ""; const phones = [];
+      for (const line of card.split("\n")) {
+        const key = line.split(/[:;]/)[0].replace(/^item\d+\./i, "").toUpperCase();
+        if (key === "FN") name = vValue(line);
+        else if (key === "N") n = vValue(line).split(";").filter(Boolean).join("");
+        else if (key === "TEL") { const p = vValue(line).replace(/^tel:/i, ""); if (p) phones.push(p); }
+        else if (key === "NOTE") note = vValue(line);
+      }
+      name = name || n;
+      if (name || phones.length) out.push({ name: name || phones[0], phones, note });
+    }
+    return out;
+  }
+  function csvRows(text) {
+    const rows = []; let row = [], cell = "", q = false;
+    text = text.replace(/^﻿/, "");
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (q) { if (ch === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else q = false; } else cell += ch; }
+      else if (ch === '"') q = true;
+      else if (ch === ",") { row.push(cell); cell = ""; }
+      else if (ch === "\n" || ch === "\r") { if (ch === "\r" && text[i + 1] === "\n") i++; row.push(cell); rows.push(row); row = []; cell = ""; }
+      else cell += ch;
+    }
+    if (cell || row.length) { row.push(cell); rows.push(row); }
+    return rows.filter((r) => r.some((c) => c.trim()));
+  }
+  function parseCSV(text) {
+    const rows = csvRows(text); if (rows.length < 2) return [];
+    const head = rows[0].map((h) => h.trim().toLowerCase());
+    const col = (re) => head.findIndex((h) => re.test(h));
+    const nameCol = col(/^(name|display name|姓名|名称|全名)$/), first = col(/^(first name|given name|名)$/), last = col(/^(last name|family name|姓)$/), noteCol = col(/^(notes?|备注)$/);
+    const phoneCols = head.map((h, i) => (/phone|mobile|tel|电话|手机/.test(h) && !/type|label/.test(h) ? i : -1)).filter((i) => i >= 0);
+    return rows.slice(1).map((r) => {
+      const name = (nameCol >= 0 && r[nameCol]) || [last >= 0 ? r[last] : "", first >= 0 ? r[first] : ""].join("").trim();
+      const phones = phoneCols.flatMap((i) => String(r[i] || "").split(/\s*:::\s*|\s*;\s*/)).map((p) => p.trim()).filter(Boolean);
+      return { name: (name || phones[0] || "").trim(), phones, note: noteCol >= 0 ? r[noteCol] || "" : "" };
+    }).filter((c) => c.name && c.phones.length);
+  }
+
   App.pages.contacts = function (host) {
     let search = "", selected = null;
     host.innerHTML = `<div style="display:flex;flex-direction:column;height:100vh">
       <div class="row" style="padding:10px 14px;gap:12px"><span style="font-size:17px;font-weight:600">通讯录</span><span class="small muted" data-count></span><span class="grow"></span>
         <div class="row" style="gap:6px;background:var(--field);border:1px solid var(--line-2);border-radius:9px;padding:0 9px;height:32px;width:250px">${icon("search", "muted")}<input data-search placeholder="搜索姓名或号码" style="border:0;background:none;outline:none;flex:1"></div>
-        <button class="btn" data-a="new">${icon("plus")}新建</button></div>
+        <button class="btn" data-a="import" title="导入手机或 Outlook / Google 导出的 .vcf、.csv 文件">${icon("upload")}导入</button><button class="btn" data-a="export">${icon("download")}导出</button>
+        <button class="btn" data-a="new">${icon("plus")}新建</button><input type="file" data-file accept=".vcf,.vcard,.csv,text/vcard,text/csv" multiple hidden></div>
       <div class="divider" style="margin:0"></div>
       <div style="display:flex;flex:1;min-height:0">
         <div data-list style="width:300px;flex:none;overflow-y:auto;border-right:1px solid var(--line);padding:6px 0"></div>
@@ -85,6 +138,37 @@
     const detailEl = host.querySelector("[data-detail]");
     host.querySelector("[data-search]").oninput = (e) => { search = e.target.value.trim().toLowerCase(); draw(); };
     host.querySelector('[data-a="new"]').onclick = () => App.editContact(null);
+    const fileEl = host.querySelector("[data-file]");
+    host.querySelector('[data-a="import"]').onclick = () => fileEl.click();
+    fileEl.onchange = async () => {
+      const files = [...fileEl.files]; fileEl.value = "";
+      let found = [];
+      for (const f of files) {
+        const text = await f.text();
+        found = found.concat(/BEGIN:VCARD/i.test(text) ? parseVCard(text) : parseCSV(text));
+      }
+      if (!found.length) { toast("文件里没有找到联系人", "failure"); return; }
+      const norm = (p) => p.replace(/[^\d+]/g, "");
+      const list = store.list.slice();
+      let added = 0, merged = 0;
+      for (const c of found) {
+        const hit = list.find((x) => (x.name && x.name === c.name) || (x.phones || []).some((p) => c.phones.some((q) => norm(p) && norm(p) === norm(q))));
+        if (hit) {
+          const before = (hit.phones || []).length;
+          hit.phones = [...new Set([...(hit.phones || []), ...c.phones])];
+          if (hit.phones.length > before) merged++;
+        } else { list.push({ id: "c" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8), name: c.name, phones: c.phones, note: c.note || "" }); added++; }
+      }
+      try { await store.save(list); toast(`已导入：新增 ${added} 位${merged ? "，补充号码 " + merged + " 位" : ""}`, "success"); }
+      catch (e) { toast("导入失败：" + e.message, "failure"); }
+    };
+    host.querySelector('[data-a="export"]').onclick = () => {
+      const lines = store.list.map((c) => ["BEGIN:VCARD", "VERSION:3.0", "FN:" + (c.name || ""), ...(c.phones || []).map((p) => "TEL;TYPE=CELL:" + p), ...(c.note ? ["NOTE:" + c.note.replace(/\n/g, "\\n")] : []), "END:VCARD"].join("\r\n"));
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob([lines.join("\r\n") + "\r\n"], { type: "text/vcard" }));
+      a.download = "DJOneHub 通讯录.vcf"; a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    };
 
     function filtered() {
       const all = store.list.slice().sort((a, b) => (a.name || "").localeCompare(b.name || "", "zh-CN"));
@@ -95,7 +179,7 @@
       const list = filtered();
       host.querySelector("[data-count]").textContent = store.list.length ? store.list.length + " 位联系人" : "";
       if (!store.list.length) {
-        listEl.innerHTML = `<div class="col muted" style="align-items:center;padding:60px 20px;gap:8px">${icon("person", "faint")}<div>通讯录为空</div><div class="small">点右上角“新建”添加联系人，短信和来电会显示名字。</div></div>`;
+        listEl.innerHTML = `<div class="col muted" style="align-items:center;padding:60px 20px;gap:8px">${icon("person", "faint")}<div>通讯录为空</div><div class="small">点右上角“新建”添加，或“导入”手机 / Outlook / Google 导出的 .vcf、.csv 文件。短信和来电会显示名字。</div></div>`;
       } else if (!list.length) {
         listEl.innerHTML = '<div class="muted" style="padding:40px 20px;text-align:center">没有匹配的联系人</div>';
       } else {

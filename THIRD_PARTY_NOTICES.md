@@ -14,6 +14,15 @@ The macOS release package includes **libusb 1.0.30**, distributed under the GNU 
 - Source: <https://github.com/libusb/libusb/releases/tag/v1.0.30>
 - License text in the release package: `licenses/libusb-COPYING`
 
+The Windows release (`DJOneHub.exe`) is built with these Go modules:
+
+| Component | License |
+| --- | --- |
+| [go-webview2](https://github.com/jchv/go-webview2) (native window around Microsoft Edge WebView2) | MIT, Copyright (c) 2020 John Chadwick |
+| [go-winloader](https://github.com/jchv/go-winloader) | ISC, Copyright (c) 2021 John Chadwick |
+
+The window uses the Microsoft Edge WebView2 Runtime that ships with Windows 10/11; it is not redistributed.
+
 This public-source tree intentionally does **not** contain the MaVo module-side
 voice runtime or any kernel-module binary. Its integration and status APIs stay
 in the source solely so that call control and diagnostics remain buildable.

@@ -192,7 +192,7 @@ func (c *fleetController) mergedCalls(w http.ResponseWriter) {
 	names := c.moduleNames()
 	responses := c.sweep("/api/calls/status")
 	var active map[string]any
-	var audio any
+	var audio, host any
 	owner := ""
 	history := []map[string]any{}
 	errorsSeen := []string{}
@@ -209,6 +209,7 @@ func (c *fleetController) mergedCalls(w http.ResponseWriter) {
 			Polling bool             `json:"polling"`
 			Error   string           `json:"last_poll_error"`
 			Audio   any              `json:"audio"`
+			Host    any              `json:"host"`
 		}
 		if json.Unmarshal(responses[id], &status) != nil {
 			continue
@@ -219,7 +220,7 @@ func (c *fleetController) mergedCalls(w http.ResponseWriter) {
 		}
 		if status.Active != nil && callPriority(status.Active) > callPriority(active) {
 			status.Active["module_id"], status.Active["module_name"] = id, names[id]
-			active, owner, audio = status.Active, id, status.Audio
+			active, owner, audio, host = status.Active, id, status.Audio, status.Host
 		}
 		for _, item := range status.History {
 			item["module_id"], item["module_name"] = id, names[id]
@@ -236,7 +237,7 @@ func (c *fleetController) mergedCalls(w http.ResponseWriter) {
 	c.callOwner, c.callOwnerAt = owner, time.Now()
 	c.mu.Unlock()
 	c.replayAudioHost()
-	writeJSON(w, 200, map[string]any{"active": active, "history": history, "polling": polling, "poll_interval_s": 3, "last_poll_error": strings.Join(errorsSeen, "；"), "audio": audio})
+	writeJSON(w, 200, map[string]any{"active": active, "history": history, "polling": polling, "poll_interval_s": 3, "last_poll_error": strings.Join(errorsSeen, "；"), "audio": audio, "host": host})
 }
 
 func (c *fleetController) currentCallOwner() string {

@@ -9,6 +9,8 @@
     try {
       const s = await api("api/calls/status", { timeout: 4 });
       calls.active = s.active || null;
+      calls.host = s.host || null;
+      calls.trayAudio = calls.active && calls.active.state === "active" ? await api("api/desktop/audio", { unscoped: true, timeout: 3 }).catch(() => null) : null;
       calls.history = s.history || [];
       calls.online = true;
     } catch (e) { calls.online = false; calls.error = e.message; }
@@ -29,6 +31,17 @@
   }
   App.dial = dial;
 
+  // Where the call's sound is: the tray app plays it through this PC.
+  function audioLine(c) {
+    if (c.state !== "active") return "";
+    const t = calls.trayAudio;
+    if (t && t.running) return `<div class="small green">${icon("wave")} 声音走这台电脑的麦克风和扬声器${recordingNote()}</div>`;
+    if (t && t.error) return `<div class="small orange">${esc(t.error)}</div>`;
+    if (!calls.host || !calls.host.enabled) return '<div class="small muted">托盘里的 DJOneHub 没有运行，声音不经过电脑。双击桌面上的 DJOneHub 即可。</div>';
+    return `<div class="small muted">${t && t.detail ? esc(t.detail) : "正在接通电脑音频…"}</div>`;
+  }
+  function recordingNote() { return calls.host && calls.host.recording ? " · 正在录音" : ""; }
+
   // ---- in-call overlay ------------------------------------------------------
   let overlay = null, keypad = false;
   const STATE = { incoming: "来电…", waiting: "等待接听…", active: "通话中", dialing: "正在拨号…", alerting: "等待对方接听…", held: "通话保持" };
@@ -41,6 +54,7 @@
       document.body.appendChild(overlay);
     }
     const ringing = c.state === "incoming" || c.state === "waiting";
+    const muted = !!(calls.host && calls.host.muted), recording = !!(calls.host && calls.host.recording);
     const inCall = ["active", "dialing", "alerting", "held"].includes(c.state);
     const start = fmt.parseDate(c.started_at);
     let dur = "";
@@ -51,16 +65,18 @@
       <div style="font:600 28px var(--round)">${esc(App.contacts.name(c.number))}</div>
       <div class="muted">${esc(STATE[c.state] || "通话状态")}${c.module_name ? " · " + esc(c.module_name) : ""}</div>
       ${dur ? `<div class="mono" style="font-size:20px">${dur}</div>` : ""}
-      <div class="small muted">Windows 版暂不支持通话声音：可以拨打、接听和挂断，声音不经过电脑。</div>
+      ${audioLine(c)}
       <div style="flex:1"></div>
       ${!ringing && keypad ? `<div class="col" style="gap:10px">${["123", "456", "789", "*0#"].map((r) => `<div class="row" style="gap:26px">${[...r].map((ch) => `<button data-dtmf="${ch}" style="width:58px;height:58px;border-radius:50%;border:0;background:rgba(128,128,128,0.12);font-size:22px;cursor:pointer">${ch}</button>`).join("")}</div>`).join("")}</div>` : ""}
       <div class="row" style="gap:${ringing ? 44 : 22}px;margin-bottom:20px">${ringing ? round("reject", "phoneDown", "拒接", "var(--red)", true) + round("answer", "phone", "接听", "var(--green)", true)
-        : round("hangup", "phoneDown", "挂断", "var(--red)", true) + round("keypad", "grid", "键盘", keypad ? "var(--green)" : "var(--text)")}</div>`);
+        : round("mute", muted ? "micOff" : "mic", muted ? "取消静音" : "静音", muted ? "var(--orange)" : "var(--text)") + round("record", "record", recording ? "停止录音" : "录音", recording ? "var(--red)" : "var(--text)") + round("hangup", "phoneDown", "挂断", "var(--red)", true) + round("keypad", "grid", "键盘", keypad ? "var(--green)" : "var(--text)")}</div>`);
     const on = (a, fn) => { const b = overlay.querySelector(`[data-a="${a}"]`); if (b) b.onclick = fn; };
     const post = (path, body) => api(path, { body: body || {}, timeout: 10 }).catch((e) => toast(e.message, "failure")).then(() => setTimeout(pollCalls, 300));
     on("reject", () => post("api/calls/reject"));
     on("answer", () => post("api/calls/answer"));
     on("hangup", () => post("api/calls/hangup"));
+    on("mute", () => post("api/calls/audio/mute", { muted: !muted }));
+    on("record", () => post("api/calls/audio/record", { action: recording ? "stop" : "start" }));
     on("keypad", () => { keypad = !keypad; overlay._html = null; drawOverlay(); });
     overlay.querySelectorAll("[data-dtmf]").forEach((b) => { b.onclick = () => api("api/calls/dtmf", { body: { digit: b.dataset.dtmf } }).catch(() => {}); });
   }

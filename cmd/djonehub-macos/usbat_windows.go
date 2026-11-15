@@ -454,8 +454,12 @@ func (u *usbAT) bulkWriteLocked(payload []byte, timeout time.Duration) error {
 }
 
 func (u *usbAT) bulkReadLocked(timeout time.Duration) ([]byte, error) {
+	return u.bulkReadSizedLocked(512, timeout)
+}
+
+func (u *usbAT) bulkReadSizedLocked(size int, timeout time.Duration) ([]byte, error) {
 	u.setTimeoutLocked(u.endpointIn, timeout)
-	buf := make([]byte, 512)
+	buf := make([]byte, max(size, 512))
 	var n uint32
 	if r, _, e := winusbReadPipe.Call(u.handle, uintptr(u.endpointIn), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)), uintptr(unsafe.Pointer(&n)), 0); r == 0 {
 		if e == windows.ERROR_SEM_TIMEOUT {

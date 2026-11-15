@@ -52,7 +52,7 @@ func webAppHandler() http.Handler {
 	})
 }
 
-const appVersion = "1.3.0-proxy-preview.65"
+const appVersion = "1.3.0-proxy-preview.66"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
@@ -137,6 +137,8 @@ type app struct {
 	// backend owns only module control and call state; MaVo's Swift service owns
 	// every host-audio callback and media loop.
 	swiftAudioHost bool
+	// Windows tray audio host: mute and recording requested from the window.
+	hostMuted, hostRecording bool
 
 	moduleVoiceMu     sync.Mutex
 	moduleVoiceOpMu   sync.Mutex
@@ -1337,6 +1339,8 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /api/esim/download", a.downloadESIMProfile)
 	mux.HandleFunc("GET /api/esim/readers", a.cardReadersAPI)
 	mux.Handle("GET /app/", webAppHandler())
+	mux.HandleFunc("GET /api/desktop/settings", desktopSettingsAPI)
+	mux.HandleFunc("PUT /api/desktop/settings", desktopSettingsAPI)
 	mux.HandleFunc("GET /api/contacts", contactsAPI)
 	mux.HandleFunc("PUT /api/contacts", contactsAPI)
 	if runtime.GOOS == "windows" || a.webConsole {
@@ -1362,7 +1366,7 @@ func (a *app) platformInfo(w http.ResponseWriter, _ *http.Request) {
 		"version":               appVersion,
 		"os":                    runtime.GOOS,
 		"web_console":           runtime.GOOS == "windows" || a.webConsole,
-		"call_audio":            runtime.GOOS == "darwin",
+		"call_audio":            runtime.GOOS == "darwin" || runtime.GOOS == "windows",
 		"direct_usb_at":         runtime.GOOS == "darwin" || runtime.GOOS == "windows",
 		"esim_full":             runtime.GOOS == "darwin" || runtime.GOOS == "windows",
 		"network_policy_native": runtime.GOOS == "darwin",
