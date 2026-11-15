@@ -16,7 +16,6 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -25,7 +24,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/damonto/euicc-go/driver"
@@ -300,6 +298,12 @@ type cellularPolicyStatus struct {
 }
 
 func main() {
+	if handleServiceCommand() {
+		return
+	}
+	if isServiceInvocation() {
+		prepareServiceEnvironment()
+	}
 	platformCleanup := initPlatformRuntime()
 	defer platformCleanup()
 
@@ -322,6 +326,7 @@ func main() {
 	flag.StringVar(&proxyListen, "proxy-listen", proxyAddress, "internal: assigned loopback SOCKS address")
 	flag.StringVar(&fleetStateRoot, "state-dir", "", "module manager state directory; default: Application Support/DJOneHub")
 	flag.Uint64Var(&probeSession, "probe-module-session", 0, "internal: print one USB module's IMEI and exit")
+	flag.Bool("service", false, "internal: started by the Windows service manager")
 	flag.Parse()
 	if probeSession != 0 {
 		scopedUSBSession = probeSession
@@ -344,8 +349,13 @@ func main() {
 	// there, and one module is simply a supervisor with one worker.
 	if (multiModule && runtime.GOOS == "darwin" || runtime.GOOS == "windows") && !demo && port == "" {
 		coordinatorOnly = true
-		if err := serveFleetSupervisor(listen); err != nil {
-			log.Fatal(err)
+		supervise := func() {
+			if err := serveFleetSupervisor(listen); err != nil {
+				log.Print(err)
+			}
+		}
+		if !runAsService(supervise) {
+			supervise()
 		}
 		return
 	}
@@ -518,7 +528,7 @@ func serve(instance *app, listen string) {
 		Handler:           instance.routes(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := shutdownContext()
 	defer stop()
 	if !instance.demo {
 		go instance.startCellularPolicyGuard(ctx)

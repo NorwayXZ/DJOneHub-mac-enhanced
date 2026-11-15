@@ -242,7 +242,7 @@ func serveFleetSupervisor(listen string) error {
 	}
 	c.probe = fleetProber()
 	defer c.close()
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, cancel := shutdownContext()
 	defer cancel()
 	c.reconcile()
 	go runTelegramBot(ctx, fleetBot{c})
