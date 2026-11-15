@@ -385,6 +385,8 @@ func (c *fleetController) handler(fallback http.Handler) http.Handler {
 		writeJSON(w, 200, links)
 	})
 	mux.Handle("GET /app/", webAppHandler())
+	mux.HandleFunc("GET /api/contacts", contactsAPI)
+	mux.HandleFunc("PUT /api/contacts", contactsAPI)
 	mux.HandleFunc("GET /api/lan-share", lanShareAPI)
 	mux.HandleFunc("POST /api/lan-share", lanShareAPI)
 	mux.HandleFunc("POST /api/update/prepare", func(w http.ResponseWriter, r *http.Request) {

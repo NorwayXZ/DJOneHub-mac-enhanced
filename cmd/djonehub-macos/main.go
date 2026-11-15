@@ -1337,6 +1337,8 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /api/esim/download", a.downloadESIMProfile)
 	mux.HandleFunc("GET /api/esim/readers", a.cardReadersAPI)
 	mux.Handle("GET /app/", webAppHandler())
+	mux.HandleFunc("GET /api/contacts", contactsAPI)
+	mux.HandleFunc("PUT /api/contacts", contactsAPI)
 	if runtime.GOOS == "windows" || a.webConsole {
 		assets, err := fs.Sub(webAssets, "web")
 		if err != nil {
