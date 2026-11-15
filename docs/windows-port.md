@@ -35,3 +35,9 @@
 2. 界面：WebView2 外壳，按 SwiftUI 各页面一比一复刻（侧边栏、深色绿色主题、全部页面）；托盘图标、Windows 通知。
 3. 安装包：安装服务和界面、开始菜单、开机启动、软件内自动更新；GitHub 发布增加 Windows 安装包。
 4. 每一步在测试机上实测（`vps win1`）。
+
+## 进度（2026-11-15）
+
+- 后台：WinUSB AT、SetupAPI 识别模块、多模块进程、按模块绑定网卡的代理、网卡 DNS、跃点调整、Windows 服务（`--install-service`），均已在测试机实测。
+- 界面：`cmd/djonehub-macos/web/app`，由后台在 `/app/` 提供；托盘程序 `cmd/djonehub-tray` 用 Edge 应用窗口打开它，并为新短信、来电弹通知。
+- 安装包：`windows/DJOneHub.iss`，GitHub Actions 的 Windows 任务构建，随每个版本发布。
