@@ -340,7 +340,9 @@ func main() {
 		}
 		return
 	}
-	if multiModule && runtime.GOOS == "darwin" && !demo && port == "" {
+	// Windows always runs the module supervisor: it is the only USB path
+	// there, and one module is simply a supervisor with one worker.
+	if (multiModule && runtime.GOOS == "darwin" || runtime.GOOS == "windows") && !demo && port == "" {
 		coordinatorOnly = true
 		if err := serveFleetSupervisor(listen); err != nil {
 			log.Fatal(err)
@@ -1334,8 +1336,8 @@ func (a *app) platformInfo(w http.ResponseWriter, _ *http.Request) {
 		"os":                    runtime.GOOS,
 		"web_console":           runtime.GOOS == "windows" || a.webConsole,
 		"call_audio":            runtime.GOOS == "darwin",
-		"direct_usb_at":         runtime.GOOS == "darwin",
-		"esim_full":             runtime.GOOS == "darwin",
+		"direct_usb_at":         runtime.GOOS == "darwin" || runtime.GOOS == "windows",
+		"esim_full":             runtime.GOOS == "darwin" || runtime.GOOS == "windows",
 		"network_policy_native": runtime.GOOS == "darwin",
 		"native_contacts":       runtime.GOOS == "darwin",
 	})
@@ -3026,71 +3028,6 @@ func parsePDPAddresses(resp string) []string {
 		}
 	}
 	return out
-}
-
-func discoverMacNetworkInterfaces() []macNetInterface {
-	out, err := exec.Command("ifconfig").Output()
-	if err != nil {
-		return nil
-	}
-	var interfaces []macNetInterface
-	for _, block := range splitIfconfigBlocks(string(out)) {
-		block = strings.TrimSpace(block)
-		if block == "" {
-			continue
-		}
-		lines := strings.Split(block, "\n")
-		if len(lines) == 0 {
-			continue
-		}
-		fields := strings.Fields(lines[0])
-		if len(fields) == 0 {
-			continue
-		}
-		name := strings.TrimSuffix(fields[0], ":")
-		if name == "" || strings.HasPrefix(name, "lo") || strings.HasPrefix(name, "utun") {
-			continue
-		}
-		item := macNetInterface{Name: name, Status: "unknown", Kind: classifyMacInterfaceName(name)}
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, "status:") {
-				item.Status = strings.TrimSpace(strings.TrimPrefix(line, "status:"))
-			}
-			if strings.HasPrefix(line, "ether ") {
-				fields := strings.Fields(line)
-				if len(fields) >= 2 {
-					item.MAC = fields[1]
-				}
-			}
-			if strings.HasPrefix(line, "inet ") {
-				fields := strings.Fields(line)
-				if len(fields) >= 2 {
-					item.IPv4 = fields[1]
-				}
-			}
-		}
-		interfaces = append(interfaces, item)
-	}
-	return interfaces
-}
-
-func discoverMacDefaultRoute() macDefaultRoute {
-	out, err := exec.Command("route", "-n", "get", "default").Output()
-	if err != nil {
-		return macDefaultRoute{}
-	}
-	var route macDefaultRoute
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "gateway:") {
-			route.Gateway = strings.TrimSpace(strings.TrimPrefix(line, "gateway:"))
-		}
-		if strings.HasPrefix(line, "interface:") {
-			route.Interface = strings.TrimSpace(strings.TrimPrefix(line, "interface:"))
-		}
-	}
-	return route
 }
 
 func splitIfconfigBlocks(out string) []string {

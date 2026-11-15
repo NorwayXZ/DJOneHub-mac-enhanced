@@ -5,8 +5,12 @@ package main
 import (
 	"context"
 	"errors"
+	"log"
 	"net"
+	"os/exec"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"unsafe"
 
@@ -84,22 +88,47 @@ func isModuleAdapter(guid string) bool {
 func cellularAdapter() (windowsAdapter, error) {
 	var found []windowsAdapter
 	for _, item := range discoverWindowsAdapters() {
-		if item.IPv4 != nil && isModuleAdapter(item.GUID) {
-			found = append(found, item)
+		if item.IPv4 == nil || !isModuleAdapter(item.GUID) {
+			continue
 		}
+		if scopedUSBSession != 0 && adapterSession(item.GUID) != scopedUSBSession {
+			continue
+		}
+		found = append(found, item)
 	}
 	switch len(found) {
 	case 0:
+		if scopedUSBSession != 0 {
+			return windowsAdapter{}, errors.New("模块已连接，但它的网卡还没有给电脑分配地址，正在自动恢复，约 1～2 分钟，恢复后代理会自动开启")
+		}
 		return windowsAdapter{}, errors.New("未找到模块的蜂窝网卡，请检查模块是否已连接并完成上网初始化")
 	case 1:
 	default:
-		return windowsAdapter{}, errors.New("检测到多个模块，Windows 版目前只支持一个模块")
+		return windowsAdapter{}, errors.New("检测到多个模块，请在设置中启用多模块模式")
 	}
+	keepCellularOffDefault(found[0])
 	var best uint32
 	if err := windows.GetBestInterfaceEx(&windows.SockaddrInet4{Addr: [4]byte{8, 8, 8, 8}}, &best); err != nil || best == found[0].Index {
 		return windowsAdapter{}, errors.New("需要宽带或 Wi-Fi 作为电脑的默认网络，蜂窝只给代理使用")
 	}
 	return found[0], nil
+}
+
+// cellularMetric keeps a module's adapter behind broadband in Windows'
+// automatic route choice, so only the proxy uses cellular.
+const cellularMetric = 9000
+
+var metricSet sync.Map
+
+func keepCellularOffDefault(a windowsAdapter) {
+	if _, done := metricSet.LoadOrStore(a.GUID, true); done {
+		return
+	}
+	for _, family := range []string{"ipv4", "ipv6"} {
+		if out, err := exec.Command("netsh", "interface", family, "set", "interface", strconv.Itoa(int(a.Index)), "metric="+strconv.Itoa(cellularMetric)).CombinedOutput(); err != nil {
+			log.Printf("set cellular %s metric on %s: %v %s", family, a.Name, err, strings.TrimSpace(string(out)))
+		}
+	}
 }
 
 func proxyInterface() (string, error) {

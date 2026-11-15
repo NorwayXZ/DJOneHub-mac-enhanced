@@ -1,0 +1,37 @@
+# Windows 版移植记录
+
+目标：Windows 下载、安装、使用体验和界面与 macOS 版 DJOneHub 一致。
+
+## 已在真机验证（2026-11-15，NUC i3-1115G4，Windows 11 Pro 26200）
+
+- **AT 通道不需要第三方驱动。** 用 SetupAPI 给模块的 AT 接口强制选择 Windows 自带、
+  微软签名的 `winusb.inf`（“WinUSB 设备”），由 `DiInstallDevice` 安装，不用重启。
+  安装前在设备的 `Device Parameters` 写入 `DeviceInterfaceGUIDs`，
+  DJOneHub 的 GUID 为 `{6d4f2b1a-8c3e-4f7a-9b21-d30e5a774c01}`。
+  之后用 `CM_Get_Device_Interface_List` 找到路径，`CreateFile` + `WinUsb_Initialize`，
+  批量端点读写 AT。安装需要管理员权限。
+- **AT 接口编号随 usbnet 模式变化。** ECM（usbnet 1）下是 `MI_02`（端点 0x03/0x84），
+  RNDIS（usbnet 3）下是 `MI_04`（端点 0x04/0x86）。模块重新枚举、接口类变化后，
+  原来的绑定会失效，需要重新绑定。
+- **上网用 RNDIS（usbnet 3）。** Windows 自带 `wceisvista.inf` 自动驱动，
+  DHCP 拿到 192.168.225.x。两个模块网段相同，按源地址绑定可分别出网：
+  模块 1 出口为 DITO，模块 2 出口为 AT&T，宽带默认路由不受影响。
+  RNDIS 网卡的接口跃点（25、75）高于宽带（20），但正式版应主动调高，
+  确保宽带始终是默认出口。
+- ECM（usbnet 1）在 Windows 上没有自带驱动；模块插回 Mac 时，Mac 版会自动切回 ECM。
+- WebView2 已预装（157），可作为界面外壳。
+
+## 实现计划
+
+1. 后端 Windows 支持（`cmd/djonehub-macos`）
+   - `usbat_windows.go`：WinUSB 版 `usbAT`，接口与 `usbat_darwin.go` 一致
+     （`Command`、`CommandWithPrompt`、`Description`、`Close`）。
+   - WinUSB 绑定：模块接入时检查 AT 接口，没绑就绑。
+   - `fleet_windows.go`：用 SetupAPI 枚举模块（位置、会话），实现网卡到模块的映射，
+     开启 Windows 多模块（`multiModule && runtime.GOOS == "darwin"` 的限制要放开）。
+   - 网卡发现：Windows 版 `discoverMacNetworkInterfaces`；`proxy_windows.go` 按模块限定网卡。
+   - RNDIS 网卡跃点调高；`setKeepAwake` 已完成。
+   - 后端以 Windows 服务（LocalSystem）运行：开机即启动，有绑定驱动所需的权限。
+2. 界面：WebView2 外壳，按 SwiftUI 各页面一比一复刻（侧边栏、深色绿色主题、全部页面）；托盘图标、Windows 通知。
+3. 安装包：安装服务和界面、开始菜单、开机启动、软件内自动更新；GitHub 发布增加 Windows 安装包。
+4. 每一步在测试机上实测（`vps win1`）。

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net"
-	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,13 +18,6 @@ func parseCellularDNSServer(output string) (string, error) {
 		}
 	}
 	return "", errors.New("模块尚未提供可用的 IPv4 DNS，请检查 USB DHCP")
-}
-func cellularDNSServer(ctx context.Context, iface string) (string, error) {
-	out, err := exec.CommandContext(ctx, "/usr/sbin/ipconfig", "getoption", iface, "domain_name_server").Output()
-	if err != nil {
-		return "", errors.New("未能读取模块 DHCP DNS；不会回退到宽带 DNS")
-	}
-	return parseCellularDNSServer(string(out))
 }
 
 // Carrier IPv6 resolvers from the module's DHCPv6 reply. On an IPv6-only
@@ -47,13 +39,6 @@ func parseCellularDNSv6Servers(output string) []string {
 		}
 	}
 	return servers
-}
-func cellularDNSv6Servers(ctx context.Context, iface string) []string {
-	out, err := exec.CommandContext(ctx, "/usr/sbin/ipconfig", "getv6packet", iface).Output()
-	if err != nil {
-		return nil
-	}
-	return parseCellularDNSv6Servers(string(out))
 }
 
 // Public resolvers raced alongside the module's DHCP resolver. The module's
