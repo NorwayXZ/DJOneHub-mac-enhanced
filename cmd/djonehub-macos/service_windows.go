@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
@@ -105,20 +106,22 @@ func installService() error {
 		StartType:        mgr.StartAutomatic,
 		DelayedAutoStart: false,
 	}
-	s, err := m.OpenService(serviceName)
-	if err == nil {
-		_, _ = s.Control(svc.Stop)
-		waitServiceStopped(s)
-		config.BinaryPathName = `"` + exe + `" --service`
-		if err := s.UpdateConfig(config); err != nil {
-			s.Close()
-			return err
+	// An existing registration is removed and created again, so a moved or
+	// renamed binary and a stuck earlier start can never survive an upgrade.
+	if old, err := m.OpenService(serviceName); err == nil {
+		removeService(old)
+		for i := 0; i < 50; i++ {
+			probe, err := m.OpenService(serviceName)
+			if err != nil {
+				break
+			}
+			probe.Close()
+			time.Sleep(200 * time.Millisecond)
 		}
-	} else {
-		s, err = m.CreateService(serviceName, exe, config, "--service")
-		if err != nil {
-			return err
-		}
+	}
+	s, err := m.CreateService(serviceName, exe, config, "--service")
+	if err != nil {
+		return err
 	}
 	defer s.Close()
 	_ = s.SetRecoveryActions([]mgr.RecoveryAction{
@@ -139,10 +142,24 @@ func uninstallService() error {
 	if err != nil {
 		return nil
 	}
+	removeService(s)
+	return nil
+}
+
+// removeService stops the service, ending its process if it does not stop
+// (a start that never completed cannot be stopped), and deletes it.
+func removeService(s *mgr.Service) {
 	defer s.Close()
 	_, _ = s.Control(svc.Stop)
 	waitServiceStopped(s)
-	return s.Delete()
+	if st, err := s.Query(); err == nil && st.State != svc.Stopped && st.ProcessId != 0 {
+		if h, err := windows.OpenProcess(windows.PROCESS_TERMINATE, false, st.ProcessId); err == nil {
+			_ = windows.TerminateProcess(h, 1)
+			windows.CloseHandle(h)
+		}
+		waitServiceStopped(s)
+	}
+	_ = s.Delete()
 }
 
 func waitServiceStopped(s *mgr.Service) {
