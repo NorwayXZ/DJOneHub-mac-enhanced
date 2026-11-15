@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DJOneHub</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div id="shell">
+  <aside id="sidebar">
+    <div class="brand">
+      <div class="brand-name">DJOneHub</div>
+      <div class="brand-sub">蜂窝连接工作台</div>
+    </div>
+    <div id="module-switcher"></div>
+    <nav id="nav"></nav>
+    <div class="sidebar-foot"><span class="icon" data-icon="tray"></span>关闭窗口后继续运行</div>
+  </aside>
+  <main id="content"></main>
+</div>
+<div id="toast-layer"></div>
+<div id="modal-layer"></div>
+<script src="core.js"></script>
+<script src="page-proxy.js"></script>
+<script src="page-phone.js"></script>
+<script src="page-messages.js"></script>
+<script src="page-contacts.js"></script>
+<script src="page-module.js"></script>
+<script src="page-settings.js"></script>
+<script>App.start();</script>
+</body>
+</html>

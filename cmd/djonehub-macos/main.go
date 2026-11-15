@@ -38,6 +38,20 @@ import (
 //go:embed web/*
 var webAssets embed.FS
 
+// webAppHandler serves the desktop app's pages (web/app), used by the
+// Windows app window and by browsers.
+func webAppHandler() http.Handler {
+	assets, err := fs.Sub(webAssets, "web")
+	if err != nil {
+		panic(fmt.Sprintf("open embedded web app: %v", err))
+	}
+	files := http.FileServer(http.FS(assets))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache")
+		files.ServeHTTP(w, r)
+	})
+}
+
 const appVersion = "1.3.0-proxy-preview.63"
 
 type receivedSMS struct {
@@ -1322,6 +1336,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("DELETE /api/esim/profile", a.deleteESIMProfile)
 	mux.HandleFunc("POST /api/esim/download", a.downloadESIMProfile)
 	mux.HandleFunc("GET /api/esim/readers", a.cardReadersAPI)
+	mux.Handle("GET /app/", webAppHandler())
 	if runtime.GOOS == "windows" || a.webConsole {
 		assets, err := fs.Sub(webAssets, "web")
 		if err != nil {
