@@ -77,7 +77,11 @@ func (w *fleetChild) Request(method, path string, body []byte) (int, []byte, err
 func (w *fleetChild) Stop() {
 	w.once.Do(func() {
 		if !w.exited() {
-			_ = w.cmd.Process.Signal(syscall.SIGTERM)
+			if err := w.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+				// Windows cannot deliver SIGTERM; the worker holds nothing
+				// that outlives its process.
+				_ = w.cmd.Process.Kill()
+			}
 		}
 		select {
 		case <-w.done:
@@ -159,6 +163,7 @@ func serveModuleWorker(socket string) error {
 	if parent <= 1 || os.Getppid() != parent {
 		return errors.New("worker must be started by supervisor")
 	}
+	gone := supervisorGone(parent)
 	go func() {
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
@@ -167,7 +172,7 @@ func serveModuleWorker(socket string) error {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if os.Getppid() != parent {
+				if gone() {
 					cancel()
 					return
 				}
