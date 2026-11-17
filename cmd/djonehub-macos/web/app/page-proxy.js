@@ -126,6 +126,7 @@
       <div data-modules></div>
       <div class="card hero col" style="gap:14px" data-hero></div>
       <div data-links></div>
+      <div data-friends></div>
       <div class="metrics" data-metrics></div>
       <div class="card soft col pad18" style="gap:10px" data-result></div>
       <div class="card pad18 col" style="gap:12px" data-history></div>
@@ -348,13 +349,14 @@
     function draw() { drawModules(); drawHero(); drawMetrics(); drawResult(); drawHistory(); }
 
     const links = App.linksPanel($("[data-links]"));
+    const friends = App.friendsPanel($("[data-friends]"));
     let usageTick = 0;
     const live = App.livePage(host, async () => {
       if (!App.fleetMode) { try { st.legacy = await api("api/proxy"); } catch (e) { st.error = e.message; } }
       if (usageTick++ % 5 === 0) { try { st.usage = await api("api/usage"); } catch (_) {} }
       draw();
     }, 1000);
-    return { destroy() { live.destroy(); links.destroy(); } };
+    return { destroy() { live.destroy(); links.destroy(); friends.destroy(); } };
   };
 
   // ---- 接入信息 (ProxyLinksPanel) ------------------------------------------
@@ -408,6 +410,112 @@
     const load = async () => { if (!alive) return; try { links = await api("api/proxy/links", { unscoped: true }); drawRows(); } catch (_) {} };
     load();
     const t = setInterval(load, 10000);
+    return { destroy() { alive = false; clearInterval(t); } };
+  };
+
+  // ---- 共享给朋友 (friend accounts with traffic quotas) ------------------------
+  const GB = 1073741824;
+  const gbText = (n) => n >= GB ? (n / GB).toFixed(2) + " GB" : n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.round(n / 1024) + " KB";
+  App.friendsPanel = function (el) {
+    let o = null, settings = null, copied = null, alive = true;
+    function friendText(a) {
+      const lines = [`${a.name} 你好，这是我给你开的代理：`, ""];
+      const mods = (App.fleetMode ? App.modules : [{ id: "", name: "蜂窝代理", port: 10909 }]).filter((m) => !a.modules || !a.modules.length || a.modules.includes(m.id));
+      for (const m of mods) {
+        const pub = settings && settings.public_socks && settings.public_socks[m.id];
+        const lan = o && o.address ? `${o.address}:${m.port + o.port_offset}` : "";
+        lines.push(`【${m.name}】SOCKS5 ${pub || lan || "（地址见主人说明）"}`);
+      }
+      lines.push(`用户名：${a.username}`, `密码：${a.password}`);
+      if (a.quota_bytes) lines.push(`流量：${gbText(a.quota_bytes)}${a.reset_day ? `，每月 ${a.reset_day} 日清零` : ""}`);
+      if (a.expires) lines.push(`到期：${a.expires}`);
+      const page = (settings && settings.public_page) || (o && o.page_url) || "";
+      if (page) lines.push("", `查看剩余流量：${page}?user=${encodeURIComponent(a.username)}&pass=${encodeURIComponent(a.password)}`);
+      return lines.join("\n");
+    }
+    function draw() {
+      const list = (o && o.accounts) || [];
+      const mods = App.fleetMode ? App.modules : [];
+      App.setHTML(el, `<div class="card pad18 col" style="gap:12px;border-radius:18px;border:1px solid var(--line);margin-top:14px">
+        <div class="row"><h3>共享给朋友</h3><span class="small muted">每人单独的账号和流量上限</span><span class="grow"></span><button class="btn small primary" data-add>${icon("plus")}添加朋友</button></div>
+        ${!list.length ? '<div class="small muted">还没有朋友账号。添加后，朋友用自己的用户名和密码连接下面的共享端口，用多少记多少，到上限自动停。</div>' : ""}
+        ${list.map((a) => {
+          const pct = a.quota_bytes ? Math.min(100, a.used / a.quota_bytes * 100) : 0;
+          const bad = a.status !== "正常", warn = !bad && pct >= 90;
+          const color = bad ? "var(--red)" : warn ? "var(--orange)" : "var(--accent)";
+          return `<div class="card col" style="gap:8px;padding:12px;background:var(--card-2)">
+            <div class="row" style="gap:8px"><span class="strong">${esc(a.name)}</span><span class="small muted mono">${esc(a.username)}</span><span class="tiny" style="padding:1px 8px;border-radius:10px;background:rgba(128,128,128,0.14);color:${bad ? "var(--red)" : "inherit"}">${esc(a.status)}</span><span class="grow"></span>
+              <label class="switch" title="启用"><input type="checkbox" data-on="${esc(a.id)}" ${a.enabled ? "checked" : ""}><span></span></label></div>
+            ${a.quota_bytes ? `<div style="height:8px;border-radius:4px;background:var(--line)"><div style="height:8px;border-radius:4px;width:${pct.toFixed(1)}%;background:${color}"></div></div>` : ""}
+            <div class="row small muted" style="gap:10px;flex-wrap:wrap"><span>已用 <b style="color:var(--text)">${gbText(a.used)}</b>${a.quota_bytes ? ` / ${gbText(a.quota_bytes)}（剩 ${gbText(Math.max(0, a.quota_bytes - a.used))}）` : "（不限量）"}</span>
+              ${a.next_reset ? `<span>${new Date(a.next_reset).getMonth() + 1} 月 ${new Date(a.next_reset).getDate()} 日清零</span>` : ""}${a.expires ? `<span>到期 ${esc(a.expires)}</span>` : ""}
+              ${a.modules && a.modules.length ? `<span>${esc(a.modules.map((id) => (mods.find((m) => m.id === id) || {}).name || id).join("、"))}</span>` : ""}${a.allow_rotate ? "<span>可换 IP</span>" : ""}
+              ${a.last_seen ? `<span>最近使用 ${fmt.dateTime(a.last_seen)}</span>` : ""}</div>
+            <div class="row" style="gap:6px"><button class="btn small" data-copy="${esc(a.id)}">${copied === a.id ? "已复制" : "复制给朋友"}</button><button class="btn small" data-edit="${esc(a.id)}">编辑</button><button class="btn small" data-reset="${esc(a.id)}">流量清零</button><span class="grow"></span><button class="btn small danger" data-del="${esc(a.id)}">删除</button></div></div>`;
+        }).join("")}
+        ${list.length ? `<div class="col" style="gap:6px">
+          <div class="small strong">朋友怎么连</div>
+          <div class="tiny muted">每个模块有一个共享端口 = 代理端口 + ${o ? o.port_offset : 10000}（${(mods.length ? mods : [{ name: "代理", port: 10909 }]).map((m) => `${esc(m.name)} ${m.port + (o ? o.port_offset : 10000)}`).join("，")}），必须用朋友账号登录，内网穿透过来也一样。局域网里直接用 ${esc((o && o.address) || "本机 IP")}:端口。用内网穿透给外面的朋友：把共享端口和流量页端口 ${o ? o.page_port : 7578} 映射出去，再把外网地址填在下面，“复制给朋友”就会用外网地址。不要把 ${mods.length ? mods.map((m) => m.port).join("、") : "10909"} 本身穿透出去，那个端口本机免密码、不计朋友流量。</div>
+          ${(mods.length ? mods : [{ id: "", name: "代理" }]).map((m) => `<div class="row" style="gap:8px"><span class="small muted" style="width:120px;flex:none">${esc(m.name)} 外网地址</span><input class="field" data-pub="${esc(m.id)}" placeholder="例如 frp.example.com:6001" value="${esc((settings && settings.public_socks && settings.public_socks[m.id]) || "")}" style="flex:1"></div>`).join("")}
+          <div class="row" style="gap:8px"><span class="small muted" style="width:120px;flex:none">流量页外网地址</span><input class="field" data-pubpage placeholder="例如 http://frp.example.com:6008/share" value="${esc((settings && settings.public_page) || "")}" style="flex:1"><button class="btn small" data-savepub>保存</button></div>
+          <div class="tiny muted">流量按代理实际传输的数据计（上传加下载），运营商计费通常多 3%–5%，上限可以留一点余量。</div></div>` : ""}
+      </div>`);
+      el.querySelector("[data-add]").onclick = () => edit(null);
+      el.querySelectorAll("[data-edit]").forEach((b) => { b.onclick = () => edit(list.find((a) => a.id === b.dataset.edit)); });
+      el.querySelectorAll("[data-copy]").forEach((b) => { b.onclick = async () => { await App.copyText(friendText(list.find((a) => a.id === b.dataset.copy))); copied = b.dataset.copy; draw(); setTimeout(() => { copied = null; draw(); }, 1500); }; });
+      el.querySelectorAll("[data-reset]").forEach((b) => { b.onclick = async () => {
+        const a = list.find((x) => x.id === b.dataset.reset);
+        if (!(await App.confirmDialog("把 " + a.name + " 的流量清零？", "已用流量归零，朋友可以重新用满 " + (a.quota_bytes ? gbText(a.quota_bytes) : "不限量") + "。", "清零"))) return;
+        try { o = await api("api/share/reset", { body: { id: a.id }, unscoped: true }); toast("已清零", "success"); draw(); } catch (e) { toast(e.message, "failure"); }
+      }; });
+      el.querySelectorAll("[data-del]").forEach((b) => { b.onclick = async () => {
+        const a = list.find((x) => x.id === b.dataset.del);
+        if (!(await App.confirmDialog("删除 " + a.name + " 的账号？", "朋友马上不能再用这个账号，用量记录一起删除。", "删除", true))) return;
+        try { o = await api("api/share/accounts?id=" + encodeURIComponent(a.id), { method: "DELETE", unscoped: true }); draw(); } catch (e) { toast(e.message, "failure"); }
+      }; });
+      el.querySelectorAll("[data-on]").forEach((c) => { c.onchange = async () => {
+        const a = list.find((x) => x.id === c.dataset.on);
+        try { o = await api("api/share/accounts", { body: Object.assign({}, a, { enabled: c.checked }), unscoped: true }); draw(); } catch (e) { toast(e.message, "failure"); draw(); }
+      }; });
+      const sp = el.querySelector("[data-savepub]");
+      if (sp) sp.onclick = async () => {
+        const pub = {}; el.querySelectorAll("[data-pub]").forEach((i) => { if (i.value.trim()) pub[i.dataset.pub] = i.value.trim(); });
+        try { settings = await api("api/share/settings", { body: { public_socks: pub, public_page: el.querySelector("[data-pubpage]").value.trim() }, unscoped: true }); toast("已保存", "success"); } catch (e) { toast(e.message, "failure"); }
+      };
+    }
+    function edit(a) {
+      const mods = App.fleetMode ? App.modules : [];
+      const v = a || { name: "", username: "", password: Math.random().toString(36).slice(2, 10), quota_bytes: 10 * GB, reset_day: 0, expires: "", modules: [], allow_rotate: false, enabled: true };
+      const m = App.modal(`<h4>${a ? "编辑朋友账号" : "添加朋友"}</h4>
+        <div class="col" style="gap:10px;margin:10px 0">
+          <label class="col small" style="gap:4px">称呼<input class="field" data-f="name" value="${esc(v.name)}" placeholder="例如 小王"></label>
+          <div class="row" style="gap:8px"><label class="col small grow" style="gap:4px">用户名<input class="field" data-f="username" value="${esc(v.username)}" placeholder="字母或数字"></label><label class="col small grow" style="gap:4px">密码<input class="field mono" data-f="password" value="${esc(v.password)}"></label></div>
+          <div class="row" style="gap:8px"><label class="col small grow" style="gap:4px">流量上限（GB，0 = 不限）<input class="field" data-f="quota" type="number" min="0" step="0.5" value="${v.quota_bytes ? +(v.quota_bytes / GB).toFixed(2) : 0}"></label>
+            <label class="col small grow" style="gap:4px">每月清零<select class="field" data-f="reset"><option value="0">不自动清零</option>${Array.from({ length: 28 }, (_, i) => `<option value="${i + 1}" ${v.reset_day === i + 1 ? "selected" : ""}>每月 ${i + 1} 日</option>`).join("")}</select></label></div>
+          <label class="col small" style="gap:4px">到期日（可不填）<input class="field" data-f="expires" type="date" value="${esc(v.expires)}"></label>
+          ${mods.length > 1 ? `<div class="col small" style="gap:4px">可用模块（都不勾 = 全部）<div class="row" style="gap:12px;flex-wrap:wrap">${mods.map((x) => `<label class="row" style="gap:5px"><input type="checkbox" data-mod="${esc(x.id)}" ${(v.modules || []).includes(x.id) ? "checked" : ""}>${esc(x.name)}</label>`).join("")}</div></div>` : ""}
+          <label class="row small" style="gap:6px"><input type="checkbox" data-f="rotate" ${v.allow_rotate ? "checked" : ""}>允许朋友自己换 IP（会同时换掉你在这个模块上的 IP）</label>
+          <div class="small red" data-err></div>
+        </div>
+        <div class="actions"><button class="btn" data-a="no">取消</button><button class="btn primary" data-a="ok">保存</button></div>`);
+      const f = (k) => m.el.querySelector(`[data-f="${k}"]`);
+      m.el.querySelector('[data-a="no"]').onclick = m.close;
+      m.el.querySelector('[data-a="ok"]').onclick = async () => {
+        const body = Object.assign({}, a || {}, {
+          name: f("name").value.trim(), username: f("username").value.trim(), password: f("password").value.trim(),
+          quota_bytes: Math.round(Math.max(0, parseFloat(f("quota").value) || 0) * GB), reset_day: +f("reset").value, expires: f("expires").value,
+          modules: [...m.el.querySelectorAll("[data-mod]:checked")].map((c) => c.dataset.mod), allow_rotate: f("rotate").checked, enabled: a ? a.enabled : true,
+        });
+        try { o = await api("api/share/accounts", { body, unscoped: true }); m.close(); draw(); toast(a ? "已保存" : "已添加，点“复制给朋友”把连接信息发给他", "success"); }
+        catch (e) { m.el.querySelector("[data-err]").textContent = e.message; }
+      };
+    }
+    const load = async () => {
+      if (!alive) return;
+      try { o = await api("api/share/accounts", { unscoped: true }); if (!settings) settings = await api("api/share/settings", { unscoped: true }); draw(); } catch (_) {}
+    };
+    draw(); load();
+    const t = setInterval(() => { if (!document.querySelector(".modal")) load(); }, 5000);
     return { destroy() { alive = false; clearInterval(t); } };
   };
 })();

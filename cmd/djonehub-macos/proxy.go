@@ -89,6 +89,7 @@ type cellularProxy struct {
 	autoStartLoaded bool
 	mu              sync.Mutex
 	listener        net.Listener
+	shareListener   net.Listener // friend share port, while any friend account is on
 	startedAt       time.Time
 	clients         map[net.Conn]bool
 	state           proxyState
@@ -142,6 +143,10 @@ func (p *cellularProxy) stopLocked() {
 		p.listener.Close()
 		p.listener = nil
 	}
+	if p.shareListener != nil {
+		p.shareListener.Close()
+		p.shareListener = nil
+	}
 	for c := range p.clients {
 		c.Close()
 	}
@@ -173,40 +178,65 @@ func (p *cellularProxy) start() error {
 	return nil
 }
 
-// socksLogin reads an RFC 1929 login and answers it.
-func socksLogin(c net.Conn) bool {
+// socksLogin reads an RFC 1929 login and answers it. A friend login returns
+// the friend's account; the LAN sharing login returns nil. On the share port
+// (friendsOnly) only friend logins count.
+func socksLogin(c net.Conn, friendsOnly bool) (*shareAccount, bool) {
+	account, ok := readSOCKSLogin(c, friendsOnly)
+	if !ok {
+		c.Write([]byte{1, 1})
+		return nil, false
+	}
+	c.Write([]byte{1, 0})
+	return account, true
+}
+
+func readSOCKSLogin(c net.Conn, friendsOnly bool) (*shareAccount, bool) {
 	h := make([]byte, 2)
 	if _, err := io.ReadFull(c, h); err != nil || h[0] != 1 {
-		return false
+		return nil, false
 	}
 	user := make([]byte, int(h[1]))
 	if _, err := io.ReadFull(c, user); err != nil {
-		return false
+		return nil, false
 	}
 	n := make([]byte, 1)
 	if _, err := io.ReadFull(c, n); err != nil {
-		return false
+		return nil, false
 	}
 	pass := make([]byte, int(n[0]))
 	if _, err := io.ReadFull(c, pass); err != nil {
-		return false
+		return nil, false
 	}
-	if !lanShare.get().checkLogin(string(user), string(pass)) {
-		c.Write([]byte{1, 1})
-		return false
+	if a, ok := shareLogin(string(user), string(pass)); ok {
+		if allowed, why := shareAllowed(a, scopedModuleID, time.Now()); !allowed {
+			log.Printf("share: %s refused: %s", a.Username, why)
+			return nil, false
+		}
+		return &a, true
 	}
-	c.Write([]byte{1, 0})
-	return true
+	if !friendsOnly && lanShare.get().checkLogin(string(user), string(pass)) {
+		return nil, true
+	}
+	return nil, false
 }
 
 func (p *cellularProxy) accept(ctx context.Context, l net.Listener, iface string) {
+	p.acceptOn(ctx, l, iface, false)
+}
+
+func (p *cellularProxy) acceptOn(ctx context.Context, l net.Listener, iface string, share bool) {
 	for {
 		c, err := l.Accept()
 		if err != nil {
 			return
 		}
 		p.mu.Lock()
-		if p.listener != l || len(p.clients) >= 128 {
+		current := p.listener
+		if share {
+			current = p.shareListener
+		}
+		if current != l || len(p.clients) >= 256 {
 			p.mu.Unlock()
 			c.Close()
 			continue
@@ -215,7 +245,7 @@ func (p *cellularProxy) accept(ctx context.Context, l net.Listener, iface string
 		p.mu.Unlock()
 		go func() {
 			defer func() { c.Close(); p.mu.Lock(); delete(p.clients, c); p.mu.Unlock() }()
-			p.handle(ctx, c, iface)
+			p.handleConn(ctx, c, iface, cellularDial, share)
 		}()
 	}
 }
@@ -231,6 +261,7 @@ func (p *cellularProxy) followLANShare(ctx context.Context, iface string) {
 			return
 		case <-ticker.C:
 		}
+		p.followSharePort(ctx, iface)
 		want := lanBindAddress(proxyListenAddress())
 		p.mu.Lock()
 		if p.listener == nil || p.listener.Addr().String() == want {
@@ -256,11 +287,60 @@ func (p *cellularProxy) followLANShare(ctx context.Context, iface string) {
 	}
 }
 
+// sharePortAddress is a module's friend share port: its SOCKS port + 10000,
+// on every interface so LAN friends and tunnels reach it.
+func sharePortAddress() string {
+	_, port, err := net.SplitHostPort(proxyListenAddress())
+	if err != nil {
+		return ""
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n+sharePortOffset > 65535 {
+		return ""
+	}
+	return net.JoinHostPort("0.0.0.0", strconv.Itoa(n+sharePortOffset))
+}
+
+// followSharePort opens the share port while any friend account is enabled.
+func (p *cellularProxy) followSharePort(ctx context.Context, iface string) {
+	want := shareAnyEnabled()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.listener == nil {
+		return
+	}
+	if want && p.shareListener == nil {
+		addr := sharePortAddress()
+		if addr == "" {
+			return
+		}
+		l, err := net.Listen("tcp4", addr)
+		if err != nil {
+			log.Printf("share: listen on %s failed: %v", addr, err)
+			return
+		}
+		startShareMeter(scopedModuleID)
+		p.shareListener = l
+		log.Printf("share: friend SOCKS port listening on %s", l.Addr())
+		go p.acceptOn(ctx, l, iface, true)
+	} else if !want && p.shareListener != nil {
+		p.shareListener.Close()
+		p.shareListener = nil
+		log.Printf("share: friend SOCKS port closed")
+	}
+}
+
 func socksReply(c net.Conn, code byte) { _, _ = c.Write([]byte{5, code, 0, 1, 0, 0, 0, 0, 0, 0}) }
 func (p *cellularProxy) handle(ctx context.Context, c net.Conn, iface string) {
 	p.handleWithDial(ctx, c, iface, cellularDial)
 }
 func (p *cellularProxy) handleWithDial(ctx context.Context, c net.Conn, iface string, dial func(context.Context, string, string) (net.Conn, error)) {
+	p.handleConn(ctx, c, iface, dial, false)
+}
+
+// handleConn serves one SOCKS5 client. On the share port (share) every client
+// must log in with a friend account, wherever it connects from.
+func (p *cellularProxy) handleConn(ctx context.Context, c net.Conn, iface string, dial func(context.Context, string, string) (net.Conn, error), share bool) {
 	c.SetDeadline(time.Now().Add(15 * time.Second))
 	h := make([]byte, 2)
 	if _, err := io.ReadFull(c, h); err != nil || h[0] != 5 || h[1] == 0 {
@@ -277,17 +357,25 @@ func (p *cellularProxy) handleWithDial(ctx context.Context, c net.Conn, iface st
 		noAuth = noAuth || m == 0
 		userPass = userPass || m == 2
 	}
+	var friend *shareAccount
 	switch {
-	case noAuth && !isLANClient(c):
+	case !share && noAuth && !isLANClient(c):
 		c.Write([]byte{5, 0})
-	case userPass && lanShare.get().Enabled:
+	case userPass && (share || lanShare.get().Enabled):
 		c.Write([]byte{5, 2})
-		if !socksLogin(c) {
+		account, ok := socksLogin(c, share)
+		if !ok {
 			return
 		}
+		friend = account
 	default:
 		c.Write([]byte{5, 255})
 		return
+	}
+	if friend != nil {
+		// Friend traffic counts against the friend's quota from here on.
+		startShareMeter(scopedModuleID)
+		c = &meteredConn{Conn: c, id: friend.ID, blocked: shareBlockFlag(friend.ID)}
 	}
 	req := make([]byte, 4)
 	if _, err := io.ReadFull(c, req); err != nil || req[0] != 5 || req[2] != 0 {
@@ -342,7 +430,13 @@ func (p *cellularProxy) handleWithDial(ctx context.Context, c net.Conn, iface st
 	c.SetDeadline(time.Time{})
 	// Both directions expire on inactivity. Stop cancels pending dials and closes clients.
 	done := make(chan struct{})
-	go func() { defer close(done); relayProxy(upstream, c, &p.uploaded); upstream.(*net.TCPConn).CloseWrite() }()
+	go func() {
+		defer close(done)
+		relayProxy(upstream, c, &p.uploaded)
+		if cw, ok := upstream.(interface{ CloseWrite() error }); ok {
+			cw.CloseWrite()
+		}
+	}()
 	relayProxy(c, upstream, &p.downloaded)
 	c.Close()
 	upstream.Close()

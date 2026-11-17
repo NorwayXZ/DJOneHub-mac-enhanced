@@ -43,4 +43,4 @@
 - 安装包：`windows/DJOneHub.iss`，GitHub Actions 的 Windows 任务构建，随每个版本发布。
 - 66：通话声音（模块 ADB 走 WinUSB，托盘程序用 winmm 把模块的 USB 音频接到电脑麦克风/扬声器，8 kHz，远端 3 kHz 四阶低通、近端回声抑制、静音、立体声录音）、来电铃声、一键更新（服务下载并校验安装包后静默安装，新服务在已登录会话里重新打开窗口）、WebView2 原生窗口、通讯录 vcf/csv 导入导出、设置页补齐。
 - 模块 1（2ca3:4006）当前 USBCFG 的 ADB 位为 0，Mac 和 Windows 都需要先在 设置 › 通话支持 启用后才有通话声音。
-
+- 67：共享给朋友（share.go）：朋友账号 + 流量上限，共享端口 = 代理端口 + 10000 必须登录，用量写 share-usage.json 由各模块进程合并，流量页在 7578 /share。

@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>我的代理流量 · DJOneHub</title>
+<style>
+:root { --bg:#f4f5f4; --card:#fff; --text:#1c1f1e; --muted:#6b726f; --line:#e3e6e4; --accent:#0d7a63; --warn:#c77700; --bad:#c9372c; --track:#e7ebe9; }
+@media (prefers-color-scheme: dark) { :root { --bg:#171717; --card:#222423; --text:#ececec; --muted:#9aa29e; --line:#333735; --accent:#2fb38f; --warn:#ffb340; --bad:#ff6b5e; --track:#323634; } }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+main { max-width:560px; margin:0 auto; padding:28px 16px 40px; display:flex; flex-direction:column; gap:14px; }
+h1 { font-size:20px; margin:0; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:18px; }
+.muted { color:var(--muted); } .small { font-size:13px; }
+.big { font:700 34px/1.1 ui-rounded, -apple-system, "Segoe UI", sans-serif; letter-spacing:-0.5px; }
+.bar { height:10px; border-radius:5px; background:var(--track); overflow:hidden; margin:14px 0 8px; }
+.bar > div { height:100%; border-radius:5px; background:var(--accent); transition:width .4s; }
+.row { display:flex; align-items:center; gap:8px; } .grow { flex:1; }
+.kv { display:flex; justify-content:space-between; padding:9px 0; border-bottom:1px solid var(--line); gap:12px; } .kv:last-child { border-bottom:0; }
+.mono { font-family:ui-monospace, Consolas, monospace; word-break:break-all; }
+input { width:100%; padding:11px 12px; border-radius:10px; border:1px solid var(--line); background:var(--bg); color:var(--text); font-size:15px; }
+button { border:0; border-radius:10px; padding:10px 14px; font-size:14px; cursor:pointer; background:var(--track); color:var(--text); }
+button.primary { background:var(--accent); color:#fff; width:100%; padding:12px; font-size:15px; }
+.pill { font-size:12px; padding:2px 9px; border-radius:20px; background:var(--track); }
+.ok { color:var(--accent); } .warn { color:var(--warn); } .bad { color:var(--bad); }
+.err { color:var(--bad); font-size:14px; min-height:20px; }
+</style>
+</head>
+<body>
+<main id="app"></main>
+<script>
+"use strict";
+const app = document.getElementById("app");
+const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const gb = (n) => n >= 1073741824 ? (n / 1073741824).toFixed(2) + " GB" : n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.round(n / 1024) + " KB";
+const KEY = "djonehub.share.login";
+let login = null, data = null, timer = null;
+try { login = JSON.parse(localStorage.getItem(KEY) || "null"); } catch (_) {}
+const q = new URLSearchParams(location.search);
+if (q.get("user") && q.get("pass")) {
+  login = { user: q.get("user"), pass: q.get("pass") };
+  try { localStorage.setItem(KEY, JSON.stringify(login)); } catch (_) {}
+  history.replaceState(null, "", location.pathname);
+}
+const auth = () => ({ Authorization: "Basic " + btoa(unescape(encodeURIComponent(login.user + ":" + login.pass))) });
+
+function showLogin(msg) {
+  clearInterval(timer);
+  app.innerHTML = `<h1>查看我的代理流量</h1><div class="card" style="display:flex;flex-direction:column;gap:12px">
+    <div class="muted small">输入主人给你的代理用户名和密码。</div>
+    <input id="u" placeholder="用户名" autocomplete="username" value="${esc(login && login.user)}">
+    <input id="p" placeholder="密码" type="password" autocomplete="current-password">
+    <div class="err">${esc(msg || "")}</div>
+    <button class="primary" id="go">查看</button></div>`;
+  const go = () => { login = { user: document.getElementById("u").value.trim(), pass: document.getElementById("p").value.trim() }; load(true); };
+  document.getElementById("go").onclick = go;
+  document.getElementById("p").onkeydown = (e) => { if (e.key === "Enter") go(); };
+}
+
+async function load(fromForm) {
+  try {
+    const r = await fetch("/share/api", { headers: auth(), cache: "no-store" });
+    const body = await r.json().catch(() => ({}));
+    if (r.status === 401) { if (fromForm) showLogin(body.error || "用户名或密码不对"); else { try { localStorage.removeItem(KEY); } catch (_) {} showLogin(); } return; }
+    if (!r.ok) throw new Error(body.error || "HTTP " + r.status);
+    try { localStorage.setItem(KEY, JSON.stringify(login)); } catch (_) {}
+    data = body; draw();
+    if (!timer) timer = setInterval(() => load(false), 10000);
+  } catch (e) {
+    if (data) { draw("连接中断，稍后自动重试"); } else showLogin("连不上：" + e.message);
+  }
+}
+
+function draw(note) {
+  const d = data, limited = d.quota > 0;
+  const pct = limited ? Math.min(100, d.used / d.quota * 100) : 0;
+  const left = limited ? Math.max(0, d.quota - d.used) : 0;
+  const tone = !d.ok ? "bad" : pct >= 90 ? "warn" : "ok";
+  const reset = d.next_reset ? new Date(d.next_reset) : null;
+  app.innerHTML = `<div class="row"><h1 class="grow">${esc(d.name || d.username)}</h1><span class="pill ${tone}">${esc(d.status)}</span></div>
+    <div class="card">
+      <div class="muted small">${limited ? "剩余流量" : "已用流量"}</div>
+      <div class="big ${tone}">${limited ? gb(left) : gb(d.used)}</div>
+      ${limited ? `<div class="bar"><div style="width:${pct.toFixed(1)}%;background:var(--${tone === "ok" ? "accent" : tone})"></div></div>
+      <div class="row small muted"><span>已用 ${gb(d.used)}</span><span class="grow"></span><span>共 ${gb(d.quota)}</span></div>` : '<div class="small muted" style="margin-top:6px">主人没有设流量上限</div>'}
+    </div>
+    <div class="card">
+      ${reset ? `<div class="kv"><span class="muted">下次重置</span><span>${reset.getMonth() + 1} 月 ${reset.getDate()} 日（流量清零）</span></div>` : ""}
+      ${d.expires ? `<div class="kv"><span class="muted">账号到期</span><span>${esc(d.expires)}</span></div>` : ""}
+      <div class="kv"><span class="muted">用户名</span><span class="mono">${esc(d.username)}</span></div>
+      <div class="kv"><span class="muted">更新时间</span><span>${new Date(d.updated).toLocaleTimeString()}</span></div>
+    </div>
+    ${(d.modules || []).map((m) => `<div class="card">
+      <div class="row"><b class="grow">${esc(m.name)}</b><span class="pill ${m.connected ? "ok" : "bad"}">${m.connected ? "在线" : "离线"}</span></div>
+      <div class="kv"><span class="muted">代理类型</span><span>SOCKS5（需要用户名和密码）</span></div>
+      <div class="kv"><span class="muted">地址</span><span class="mono">${esc(m.public || location.hostname + ":" + m.port)}</span></div>
+      ${m.ip ? `<div class="kv"><span class="muted">当前出口 IP</span><span class="mono">${esc(m.ip)}</span></div>` : ""}
+      ${m.rotate ? `<div class="row" style="margin-top:10px"><button data-rotate="${esc(m.rotate)}">换一个 IP</button><span class="small muted" data-msg></span></div>` : ""}
+    </div>`).join("")}
+    <div class="small muted">流量按代理实际传输的数据计算（上传加下载），运营商计费可能略多一些。用完后代理会停止，等主人加流量或到重置日。${note ? "<br><span class='warn'>" + esc(note) + "</span>" : ""}</div>
+    <div><button id="out">退出登录</button></div>`;
+  document.getElementById("out").onclick = () => { try { localStorage.removeItem(KEY); } catch (_) {} login = null; data = null; showLogin(); };
+  app.querySelectorAll("[data-rotate]").forEach((b) => {
+    b.onclick = async () => {
+      const msg = b.parentElement.querySelector("[data-msg]");
+      b.disabled = true; msg.textContent = "正在换 IP，约 30 秒…";
+      try {
+        const r = await fetch(b.dataset.rotate + "?wait=24", { headers: auth(), cache: "no-store" });
+        const body = await r.json().catch(() => ({}));
+        msg.textContent = r.ok ? (body.ip ? "已换成 " + body.ip : (body.message || "正在换，稍后刷新看新 IP")) : (body.error || "换 IP 失败");
+      } catch (e) { msg.textContent = "换 IP 失败：" + e.message; }
+      b.disabled = false; load(false);
+    };
+  });
+}
+
+if (login) load(false); else showLogin();
+</script>
+</body>
+</html>

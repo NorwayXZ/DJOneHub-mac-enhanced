@@ -267,6 +267,17 @@ func serveFleetSupervisor(listen string) error {
 	}()
 	fallback := newWorkerApp().routes()
 	server := &http.Server{Addr: listen, Handler: securityHeaders(c.handler(fallback)), ReadHeaderTimeout: 5 * time.Second}
+	setShareModuleSource(func() []shareModule {
+		out := []shareModule{}
+		for _, m := range c.snapshot().Modules {
+			sm := shareModule{ID: m.ID, Name: m.Name, Port: m.Port, Connected: m.Connected}
+			if m.Proxy != nil {
+				sm.IP = m.Proxy.PublicIP
+			}
+			out = append(out, sm)
+		}
+		return out
+	})
 	go runLANControl(ctx, server.Handler)
 	go func() { <-ctx.Done(); _ = server.Close() }()
 	log.Printf("multi-module supervisor listening on %s", listen)
@@ -400,6 +411,13 @@ func (c *fleetController) handler(fallback http.Handler) http.Handler {
 		}
 		windowsUpdateStartAPI(w, r)
 	})
+	mux.HandleFunc("GET /api/share/accounts", shareAccountsAPI)
+	mux.HandleFunc("POST /api/share/accounts", shareAccountsAPI)
+	mux.HandleFunc("DELETE /api/share/accounts", shareAccountsAPI)
+	mux.HandleFunc("POST /api/share/reset", shareResetAPI)
+	mux.HandleFunc("POST /api/share/delete", shareDeleteAPI)
+	mux.HandleFunc("GET /api/share/settings", shareSettingsAPI)
+	mux.HandleFunc("POST /api/share/settings", shareSettingsAPI)
 	mux.HandleFunc("GET /api/lan-share", lanShareAPI)
 	mux.HandleFunc("POST /api/lan-share", lanShareAPI)
 	mux.HandleFunc("POST /api/update/prepare", func(w http.ResponseWriter, r *http.Request) {

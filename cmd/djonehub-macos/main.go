@@ -52,7 +52,7 @@ func webAppHandler() http.Handler {
 	})
 }
 
-const appVersion = "1.3.0-proxy-preview.66"
+const appVersion = "1.3.0-proxy-preview.67"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
@@ -1341,6 +1341,13 @@ func (a *app) routes() http.Handler {
 	mux.Handle("GET /app/", webAppHandler())
 	mux.HandleFunc("GET /api/desktop/settings", desktopSettingsAPI)
 	mux.HandleFunc("PUT /api/desktop/settings", desktopSettingsAPI)
+	mux.HandleFunc("GET /api/share/accounts", shareAccountsAPI)
+	mux.HandleFunc("POST /api/share/accounts", shareAccountsAPI)
+	mux.HandleFunc("DELETE /api/share/accounts", shareAccountsAPI)
+	mux.HandleFunc("POST /api/share/reset", shareResetAPI)
+	mux.HandleFunc("POST /api/share/delete", shareDeleteAPI)
+	mux.HandleFunc("GET /api/share/settings", shareSettingsAPI)
+	mux.HandleFunc("POST /api/share/settings", shareSettingsAPI)
 	mux.HandleFunc("GET /api/contacts", contactsAPI)
 	mux.HandleFunc("PUT /api/contacts", contactsAPI)
 	if runtime.GOOS == "windows" || a.webConsole {

@@ -196,6 +196,10 @@ func lanShareAPI(w http.ResponseWriter, r *http.Request) {
 // HTTP basic auth.
 func lanRotateHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/share" || r.URL.Path == "/share/" || r.URL.Path == "/share/api" {
+			sharePageHandler(w, r)
+			return
+		}
 		if !isRotatePath(r.URL.Path) {
 			writeError(w, 404, "局域网只开放换 IP 链接")
 			return
@@ -205,7 +209,18 @@ func lanRotateHandler(next http.Handler) http.Handler {
 		if !ok {
 			user, pass = query.Get("user"), query.Get("pass")
 		}
-		if !lanShare.get().checkLogin(user, pass) {
+		// A friend allowed to change IP may use the link of a module the
+		// account covers.
+		if a, ok := shareLogin(user, pass); ok && a.AllowRotate {
+			module := ""
+			if id, found := strings.CutPrefix(r.URL.Path, "/api/modules/"); found {
+				module, _, _ = strings.Cut(id, "/")
+			}
+			if allowed, why := shareAllowed(a, module, time.Now()); !allowed {
+				writeError(w, 403, why)
+				return
+			}
+		} else if !lanShare.get().checkLogin(user, pass) {
 			writeError(w, 401, "用户名或密码不对")
 			return
 		}
@@ -218,7 +233,8 @@ func lanRotateHandler(next http.Handler) http.Handler {
 	})
 }
 
-// runLANControl serves the change-IP link on the LAN while sharing is on.
+// runLANControl serves the change-IP link and the friend share page on the
+// LAN while LAN sharing or any friend account is on.
 func runLANControl(ctx context.Context, handler http.Handler) {
 	var server *http.Server
 	lastErr := ""
@@ -233,7 +249,7 @@ func runLANControl(ctx context.Context, handler http.Handler) {
 	ticker := time.NewTicker(lanShareRecheck)
 	defer ticker.Stop()
 	for {
-		enabled := lanShare.get().Enabled
+		enabled := lanShare.get().Enabled || shareAnyEnabled()
 		if enabled && server == nil {
 			l, err := net.Listen("tcp4", net.JoinHostPort("0.0.0.0", strconv.Itoa(lanControlPort)))
 			if err != nil {
