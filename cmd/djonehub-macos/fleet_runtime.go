@@ -390,7 +390,7 @@ func (c *fleetController) handler(fallback http.Handler) http.Handler {
 			if m.Proxy != nil {
 				link.PublicIP = m.Proxy.PublicIP
 			}
-			link.LANSocks, link.LANRotateURL = lanLinks(link.Socks, "/api/modules/"+m.ID+"/proxy/rotate")
+			link.LANSocks, link.LANRotateURL = lanLinks(link.Socks)
 			links = append(links, link)
 		}
 		writeJSON(w, 200, links)

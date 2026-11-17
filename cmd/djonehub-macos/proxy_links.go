@@ -69,7 +69,7 @@ func (a *app) proxyLinksAPI(w http.ResponseWriter, r *http.Request) {
 		RotateURL: apiBase(r) + "/api/proxy/rotate",
 		PublicIP:  s.PublicIP,
 	}
-	link.LANSocks, link.LANRotateURL = lanLinks(link.Socks, "/api/proxy/rotate")
+	link.LANSocks, link.LANRotateURL = lanLinks(link.Socks)
 	writeJSON(w, 200, []proxyLink{link})
 }
 

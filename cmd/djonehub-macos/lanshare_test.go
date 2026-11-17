@@ -125,3 +125,36 @@ func TestLANControlOnlyRotatesWithLogin(t *testing.T) {
 		t.Fatal("basic auth", w.Code)
 	}
 }
+
+func TestLANShortRotateLink(t *testing.T) {
+	useLANShare(t, lanShareSettings{Enabled: true, Username: "u", Password: "p w"})
+	setShareModuleSource(func() []shareModule { return []shareModule{{ID: "slot-1", Port: 10909}} })
+	t.Cleanup(func() { setShareModuleSource(nil) })
+	var got string
+	h := lanRotateHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.RequestURI()
+		w.WriteHeader(204)
+	}))
+	key := lanShare.get().rotateKey()
+	if len(key) != 10 {
+		t.Fatal(key)
+	}
+	for _, tt := range []struct {
+		url  string
+		code int
+	}{
+		{"http://192.168.1.5:7578/r/10909/" + key + "?wait=5", 204},
+		{"http://192.168.1.5:7578/r/10909/0000000000", 404},
+		{"http://192.168.1.5:7578/r/10910/" + key, 404},
+		{"http://192.168.1.5:7578/r/10909", 404},
+	} {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest("GET", tt.url, nil))
+		if w.Code != tt.code {
+			t.Fatal(tt.url, w.Code)
+		}
+	}
+	if got != "/api/modules/slot-1/proxy/rotate?wait=5" {
+		t.Fatal(got)
+	}
+}

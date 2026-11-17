@@ -2,14 +2,15 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"log"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -150,7 +151,7 @@ func lanAddress() string {
 
 // lanLinks gives the LAN form of a module's SOCKS address and change-IP
 // link, or empty strings while sharing is off.
-func lanLinks(socks, rotatePath string) (string, string) {
+func lanLinks(socks string) (string, string) {
 	settings := lanShare.get()
 	ip := lanAddress()
 	if !settings.Enabled || ip == "" {
@@ -160,8 +161,38 @@ func lanLinks(socks, rotatePath string) (string, string) {
 	if err != nil {
 		return "", ""
 	}
-	query := url.Values{"user": {settings.Username}, "pass": {settings.Password}}
-	return net.JoinHostPort(ip, port), "http://" + net.JoinHostPort(ip, strconv.Itoa(lanControlPort)) + rotatePath + "?" + query.Encode()
+	return net.JoinHostPort(ip, port), "http://" + net.JoinHostPort(ip, strconv.Itoa(lanControlPort)) + "/r/" + port + "/" + settings.rotateKey()
+}
+
+// rotateKey stands in for the LAN login in the short change-IP link
+// /r/<SOCKS port>/<key>. It follows the login, so a new password retires
+// every old link.
+func (s lanShareSettings) rotateKey() string {
+	sum := sha256.Sum256([]byte("djonehub-rotate\x00" + s.Username + "\x00" + s.Password))
+	return hex.EncodeToString(sum[:5])
+}
+
+// shortRotatePath turns /r/<port>/<key> into the module's rotate path when
+// the key matches the LAN login.
+func shortRotatePath(path string) (string, bool) {
+	rest, ok := strings.CutPrefix(path, "/r/")
+	if !ok {
+		return "", false
+	}
+	port, key, _ := strings.Cut(rest, "/")
+	s := lanShare.get()
+	if !s.Enabled || s.Username == "" || s.Password == "" || subtle.ConstantTimeCompare([]byte(key), []byte(s.rotateKey())) != 1 {
+		return "", false
+	}
+	for _, m := range shareModules() {
+		if strconv.Itoa(m.Port) == port {
+			if m.ID == "" {
+				return "/api/proxy/rotate", true
+			}
+			return "/api/modules/" + m.ID + "/proxy/rotate", true
+		}
+	}
+	return "", false
 }
 
 type lanShareView struct {
@@ -198,6 +229,18 @@ func lanRotateHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/share" || r.URL.Path == "/share/" || r.URL.Path == "/share/api" {
 			sharePageHandler(w, r)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/r/") {
+			path, ok := shortRotatePath(r.URL.Path)
+			if !ok {
+				writeError(w, 404, "换 IP 链接无效：局域网密码改过的话，请复制新链接")
+				return
+			}
+			r = r.Clone(r.Context())
+			r.URL.Path, r.URL.RawPath = path, ""
+			r.Header.Del("Authorization")
+			next.ServeHTTP(w, r)
 			return
 		}
 		if !isRotatePath(r.URL.Path) {
