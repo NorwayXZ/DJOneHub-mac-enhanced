@@ -82,18 +82,75 @@
   }
   setInterval(() => { if (calls.active) drawOverlay(); }, 1000);
 
+  // ---- 国家/地区区号 ----------------------------------------------------------
+  // Pick the country, type the number as people there write it; the leading
+  // trunk 0 is dropped and the country code added, so "030 1234567" with
+  // Germany dials +49301234567.
+  const COUNTRIES = [
+    ["CN", "中国", "86"], ["HK", "中国香港", "852"], ["MO", "中国澳门", "853"], ["TW", "中国台湾", "886"],
+    ["US", "美国", "1"], ["CA", "加拿大", "1"], ["GB", "英国", "44"], ["DE", "德国", "49"], ["FR", "法国", "33"],
+    ["IT", "意大利", "39"], ["ES", "西班牙", "34"], ["NL", "荷兰", "31"], ["BE", "比利时", "32"], ["CH", "瑞士", "41"],
+    ["AT", "奥地利", "43"], ["IE", "爱尔兰", "353"], ["PT", "葡萄牙", "351"], ["SE", "瑞典", "46"], ["NO", "挪威", "47"],
+    ["DK", "丹麦", "45"], ["FI", "芬兰", "358"], ["PL", "波兰", "48"], ["CZ", "捷克", "420"], ["GR", "希腊", "30"],
+    ["HU", "匈牙利", "36"], ["RO", "罗马尼亚", "40"], ["TR", "土耳其", "90"], ["RU", "俄罗斯", "7"], ["UA", "乌克兰", "380"],
+    ["JP", "日本", "81"], ["KR", "韩国", "82"], ["SG", "新加坡", "65"], ["MY", "马来西亚", "60"], ["TH", "泰国", "66"],
+    ["VN", "越南", "84"], ["PH", "菲律宾", "63"], ["ID", "印度尼西亚", "62"], ["KH", "柬埔寨", "855"], ["MM", "缅甸", "95"],
+    ["LA", "老挝", "856"], ["MN", "蒙古", "976"], ["IN", "印度", "91"], ["PK", "巴基斯坦", "92"], ["BD", "孟加拉国", "880"],
+    ["NP", "尼泊尔", "977"], ["LK", "斯里兰卡", "94"], ["AE", "阿联酋", "971"], ["SA", "沙特阿拉伯", "966"], ["QA", "卡塔尔", "974"],
+    ["KW", "科威特", "965"], ["IL", "以色列", "972"], ["KZ", "哈萨克斯坦", "7"], ["AU", "澳大利亚", "61"], ["NZ", "新西兰", "64"],
+    ["BR", "巴西", "55"], ["MX", "墨西哥", "52"], ["AR", "阿根廷", "54"], ["CL", "智利", "56"], ["CO", "哥伦比亚", "57"],
+    ["PE", "秘鲁", "51"], ["ZA", "南非", "27"], ["EG", "埃及", "20"], ["NG", "尼日利亚", "234"], ["KE", "肯尼亚", "254"], ["MA", "摩洛哥", "212"],
+  ];
+  const flag = (iso) => iso.replace(/./g, (c) => String.fromCodePoint(127397 + c.charCodeAt(0)));
+  const COUNTRY_KEY = "djonehub.dial.country";
+  let dialCountry = "CN";
+  try { const v = localStorage.getItem(COUNTRY_KEY); if (v !== null) dialCountry = v; } catch (_) {}
+  const countryOf = (iso) => COUNTRIES.find((c) => c[0] === iso) || null;
+  // intlNumber is what the module dials for what was typed.
+  function intlNumber(raw, iso) {
+    const typed = String(raw || "").trim().replace(/[\s\-().]/g, "");
+    const c = countryOf(iso);
+    if (!c || !typed || /[*#]/.test(typed) || typed.startsWith("+")) return typed;
+    if (typed.startsWith("00")) return "+" + typed.slice(2);
+    if (typed.replace(/\D/g, "").length <= 5) return typed; // 110, 10086, 112: local short numbers
+    let national = typed.replace(/\D/g, "");
+    if (c[2] === "7" && /^8\d{10}$/.test(national)) national = national.slice(1);
+    else if (c[2] !== "39") national = national.replace(/^0+/, "");
+    return "+" + c[2] + national;
+  }
+  App.intlNumber = intlNumber;
+  function pickCountry(done) {
+    const m = App.modal(`<h4>拨打哪个国家/地区</h4><div class="col" style="gap:8px;margin-top:8px">
+      <input class="field" data-q placeholder="搜索国家或区号">
+      <div data-list class="col" style="max-height:360px;overflow:auto;gap:2px"></div></div>
+      <div class="actions"><button class="btn" data-a="no">取消</button></div>`);
+    const list = m.el.querySelector("[data-list]"), q = m.el.querySelector("[data-q]");
+    const row = (iso, name, code) => `<button class="btn link" data-iso="${iso}" style="justify-content:flex-start;gap:10px;padding:8px 10px;${iso === dialCountry ? "background:var(--card-2);" : ""}"><span style="font-size:18px">${iso ? flag(iso) : "☎️"}</span><span class="grow" style="text-align:left;color:var(--text)">${esc(name)}</span><span class="muted mono">${code ? "+" + code : ""}</span></button>`;
+    const draw = () => {
+      const t = q.value.trim().replace(/^\+/, "");
+      const hits = COUNTRIES.filter(([iso, name, code]) => !t || name.includes(t) || code.startsWith(t) || iso.toLowerCase() === t.toLowerCase());
+      list.innerHTML = (!t ? row("", "不加国家码（号码原样拨出）", "") : "") + hits.map((c) => row(...c)).join("");
+      list.querySelectorAll("[data-iso]").forEach((b) => { b.onclick = () => { dialCountry = b.dataset.iso; try { localStorage.setItem(COUNTRY_KEY, dialCountry); } catch (_) {} m.close(); done(); }; });
+    };
+    q.oninput = draw;
+    m.el.querySelector('[data-a="no"]').onclick = m.close;
+    draw(); setTimeout(() => q.focus(), 50);
+  }
+
   // ---- 拨号 ------------------------------------------------------------------
   const KEYS = [["1", ""], ["2", "ABC"], ["3", "DEF"], ["4", "GHI"], ["5", "JKL"], ["6", "MNO"], ["7", "PQRS"], ["8", "TUV"], ["9", "WXYZ"], ["*", ""], ["0", "+"], ["#", ""]];
   App.pages.dial = function (host) {
     if (App.pendingDial) { calls.number = App.pendingDial; App.pendingDial = null; }
     host.innerHTML = `<div class="col" style="align-items:center;justify-content:center;min-height:100vh;gap:16px;padding:20px">
+      <button class="btn" data-a="country" style="border-radius:20px;padding:6px 14px;gap:8px"></button>
       <div data-num style="font:300 34px var(--round);min-height:46px;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></div>
       <div data-match class="accent small" style="min-height:18px;cursor:pointer"></div>
+      <div data-intl class="small muted mono" style="min-height:18px;margin-top:-12px"></div>
       <div style="display:grid;grid-template-columns:repeat(3,76px);gap:12px 22px">${KEYS.map(([d, l]) => `<button data-k="${d}" style="width:76px;height:76px;border-radius:50%;border:0;background:var(--card-2);box-shadow:0 2px 6px rgba(0,0,0,0.12);cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center"><span style="font:400 27px var(--round)">${d}</span>${l ? `<span class="tiny muted" style="letter-spacing:1.5px">${l}</span>` : ""}</button>`).join("")}
         <span></span><button data-a="call" style="width:76px;height:76px;border-radius:50%;border:0;background:var(--green);color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center">${icon("phone")}</button>
         <button data-a="del" style="width:76px;height:76px;border:0;background:none;cursor:pointer;font-size:22px;color:var(--text-2)">⌫</button></div>
       <div data-err class="small red" style="text-align:center;max-width:420px"></div></div>`;
-    const num = host.querySelector("[data-num]"), match = host.querySelector("[data-match]"), err = host.querySelector("[data-err]"), callBtn = host.querySelector('[data-a="call"]');
+    const num = host.querySelector("[data-num]"), match = host.querySelector("[data-match]"), err = host.querySelector("[data-err]"), callBtn = host.querySelector('[data-a="call"]'), countryBtn = host.querySelector('[data-a="country"]'), intl = host.querySelector("[data-intl]");
     function draw() {
       num.textContent = calls.number || "输入号码";
       num.style.color = calls.number ? "var(--text)" : "var(--text-3)";
@@ -105,15 +162,20 @@
       callBtn.disabled = !calls.number.trim() || calls.dialing;
       callBtn.style.opacity = calls.number.trim() ? 1 : 0.5;
       err.textContent = calls.error || (!calls.online ? "无法连接 DJOneHub 后台" : "");
+      const c2 = countryOf(dialCountry);
+      countryBtn.innerHTML = c2 ? `<span style="font-size:16px">${flag(c2[0])}</span>${esc(c2[1])} +${c2[2]} ▾` : "不加国家码 ▾";
+      const target = intlNumber(calls.number, dialCountry);
+      intl.textContent = target && target !== calls.number.trim() ? "将拨打 " + target : "";
     }
+    countryBtn.onclick = () => pickCountry(draw);
     host.querySelectorAll("[data-k]").forEach((b) => { b.onclick = () => { calls.number += b.dataset.k; draw(); }; });
     host.querySelector('[data-a="del"]').onclick = () => { calls.number = calls.number.slice(0, -1); draw(); };
-    callBtn.onclick = () => dial();
+    callBtn.onclick = () => dial(intlNumber(calls.number, dialCountry));
     const onKey = (e) => {
       if (e.ctrlKey || e.altKey || e.metaKey || document.getElementById("modal-layer").innerHTML) return;
       if (/^[0-9*#+]$/.test(e.key)) { calls.number += e.key; draw(); }
       else if (e.key === "Backspace") { calls.number = calls.number.slice(0, -1); draw(); }
-      else if (e.key === "Enter") dial();
+      else if (e.key === "Enter") dial(intlNumber(calls.number, dialCountry));
     };
     document.addEventListener("keydown", onKey);
     calls.listeners.add(draw);

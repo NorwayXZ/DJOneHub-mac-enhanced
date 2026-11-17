@@ -52,7 +52,7 @@ func webAppHandler() http.Handler {
 	})
 }
 
-const appVersion = "1.3.0-proxy-preview.68"
+const appVersion = "1.3.0-proxy-preview.69"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
@@ -1913,7 +1913,15 @@ func (a *app) simIdentity(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"phone_number": parseCNUM(response)})
+	number := parseCNUM(response)
+	if iccid := a.simICCID(); number != "" && iccid != "" {
+		_ = updatePlan(iccid, func(p *keepAlivePlan) { p.Phone = number })
+	} else if number == "" {
+		// eSIM Profiles often have no number on the card; use the one
+		// typed in 模块资料.
+		number = a.cardNumber(iccid)
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"phone_number": number})
 }
 
 func parseCNUM(response string) string {
@@ -3222,7 +3230,7 @@ func (a *app) listESIMNotes(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"notes": a.profileNotes})
+	writeJSON(w, http.StatusOK, map[string]any{"notes": a.profileNotes, "numbers": a.cardNumbersLocked()})
 }
 
 func (a *app) saveESIMNote(w http.ResponseWriter, r *http.Request) {
@@ -3636,6 +3644,7 @@ func (a *app) esimHealth(w http.ResponseWriter, _ *http.Request) {
 		"network_mode":   status.NetworkMode,
 		"network_issue":  currentNetworkIssue(),
 		"capability":     cardCapabilityFor(status.ICCID),
+		"phone_number":   a.learnCardNumber(status.ICCID),
 	})
 }
 

@@ -13,6 +13,7 @@ struct MoreView: View {
     @State private var esim: ESIMOverview?
     @State private var esimHealth: ESIMHealth?
     @State private var esimNotes: [String: ESIMNote] = [:]
+    @State private var esimNumbers: [String: String] = [:]
     @State private var probeResult: ESIMPhonebookProbe?
     @State private var probeBusy = false
     @State private var renameProfile: ESIMProfile?
@@ -309,6 +310,19 @@ struct MoreView: View {
                                 VStack(alignment: .leading, spacing: 1) {
                                     Text(profile.name ?? L10n.t("未命名 Profile"))
                                         .font(.footnote.weight(.medium))
+                                    if let number = cardNumber(profile.iccid) {
+                                        Label(number, systemImage: "phone.fill")
+                                            .font(.caption.monospacedDigit())
+                                            .textSelection(.enabled)
+                                    } else {
+                                        Button {
+                                            editNoteProfile = profile
+                                        } label: {
+                                            Text(L10n.t("号码未知 · 填写号码"))
+                                                .font(.caption2)
+                                        }
+                                        .buttonStyle(.link)
+                                    }
                                     Text(profile.iccid ?? "")
                                         .font(.caption2)
                                         .foregroundStyle(.secondary)
@@ -424,12 +438,12 @@ struct MoreView: View {
                 }
             }
             .sheet(item: $editNoteProfile) { profile in
-                ESIMProfileNoteSheet(profile: profile, note: esimNotes[profile.iccid ?? ""]) { label, phone, tags in
+                ESIMProfileNoteSheet(profile: profile, note: esimNotes[profile.iccid ?? ""], knownNumber: cardNumber(profile.iccid)) { label, phone, tags in
                     Task {
                         do {
                             try await calls.apiClient.saveESIMNote(iccid: profile.iccid ?? "", label: label, phone: phone, tags: tags)
                             message = L10n.t("模块资料已保存")
-                            esimNotes = (try? await calls.apiClient.esimNotes()) ?? [:]
+                            await reloadNotes()
                         } catch {
                             message = error.localizedDescription
                         }
@@ -568,7 +582,7 @@ struct MoreView: View {
         async let u: USBProfileStatus? = try? calls.apiClient.usbProfile()
         async let r: [CardReader]? = try? calls.apiClient.cardReaders()
         async let h: ESIMHealth? = try? calls.apiClient.esimHealth()
-        async let n: [String: ESIMNote]? = try? calls.apiClient.esimNotes()
+        async let n: ESIMNotesResponse? = try? calls.apiClient.esimNotesResponse()
         modem = await m
         traffic = await t
         policy = await p
@@ -577,7 +591,24 @@ struct MoreView: View {
         if readers.isEmpty { useReader = false }
         esimHealth = await h
         await reloadESIM()
-        esimNotes = await n ?? [:]
+        let notes = await n
+        esimNotes = notes?.notes ?? [:]
+        esimNumbers = notes?.numbers ?? [:]
+    }
+
+    private func reloadNotes() async {
+        guard let notes = try? await calls.apiClient.esimNotesResponse() else { return }
+        esimNotes = notes.notes
+        esimNumbers = notes.numbers ?? [:]
+    }
+
+    /// The card's own number, if the SIM has it or it was typed in 模块资料.
+    private func cardNumber(_ iccid: String?) -> String? {
+        guard let iccid else { return nil }
+        var key = iccid
+        while key.last == "F" || key.last == "f" { key.removeLast() }
+        let number = esimNumbers[key] ?? ""
+        return number.isEmpty ? nil : number
     }
 
     private func applyUSBProfile(_ mode: String) async {
@@ -776,7 +807,11 @@ struct MoreView: View {
                     await reloadESIM()
                     let seconds = Int(Date().timeIntervalSince(switchStarted ?? Date()))
                     let network = [OperatorName.display(health.operatorName), health.registration].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
-                    switchResult = (L10n.t("已切换到 ") + profile.displayName + (network.isEmpty ? "" : "，" + network) + L10n.t("，用时 \(seconds) 秒。代理会自动恢复。"), true)
+                    await reloadNotes()
+                    let number = (health.phoneNumber ?? "").isEmpty
+                        ? L10n.t("卡里没写号码，可以点「填写号码」记下来。")
+                        : L10n.t("本机号码 ") + (health.phoneNumber ?? "") + "。"
+                    switchResult = (L10n.t("已切换到 ") + profile.displayName + (network.isEmpty ? "" : "，" + network) + L10n.t("，用时 \(seconds) 秒。") + number + L10n.t("代理会自动恢复。"), true)
                     return
                 }
             }
@@ -1205,6 +1240,7 @@ struct ESIMProfileNoteSheet: View {
     @Environment(\.dismiss) private var dismiss
     let profile: ESIMProfile
     let note: ESIMNote?
+    var knownNumber: String? = nil
     let onSave: (String, String, String) -> Void
     @State private var label = ""
     @State private var phone = ""
@@ -1219,8 +1255,12 @@ struct ESIMProfileNoteSheet: View {
                 .foregroundStyle(.secondary)
             TextField(L10n.t("模块内名称（可选）"), text: $label)
                 .textFieldStyle(.roundedBorder)
-            TextField(L10n.t("模块号码（可选）"), text: $phone)
+            TextField(L10n.t("这张卡的号码，例如 +44 7700 900123"), text: $phone)
                 .textFieldStyle(.roundedBorder)
+            Text(L10n.t("很多 eSIM 卡里没写号码，读不出来。号码一般在运营商的开卡邮件、App 或账户页里，填一次就会一直显示。"))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             TextField(L10n.t("用途标签（可选）"), text: $tags)
                 .textFieldStyle(.roundedBorder)
             HStack(spacing: 10) {
@@ -1247,7 +1287,7 @@ struct ESIMProfileNoteSheet: View {
         .padding(20)
         .onAppear {
             label = note?.label ?? ""
-            phone = note?.phone ?? ""
+            phone = (note?.phone ?? "").isEmpty ? (knownNumber ?? "") : (note?.phone ?? "")
             tags = note?.tags ?? ""
         }
     }

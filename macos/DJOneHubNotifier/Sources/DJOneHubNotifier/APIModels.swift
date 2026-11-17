@@ -684,8 +684,12 @@ extension DJOneHubAPI {
     }
 
     func esimNotes() async throws -> [String: ESIMNote] {
-        let response: ESIMNotesResponse = try await get(path: "api/esim/notes")
-        return response.notes
+        try await esimNotesResponse().notes
+    }
+
+    /// Notes plus each card's number (typed in 模块资料, or read from the SIM).
+    func esimNotesResponse() async throws -> ESIMNotesResponse {
+        try await get(path: "api/esim/notes")
     }
 
     func saveESIMNote(iccid: String, label: String, phone: String, tags: String) async throws {
@@ -806,9 +810,11 @@ struct ESIMHealth: Codable, Sendable {
     let networkMode: String?
     var networkIssue: NetworkIssue? = nil
     var capability: CardCapability? = nil
+    var phoneNumber: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case ok, message, registration, registered, imsi, capability
+        case phoneNumber = "phone_number"
         case networkIssue = "network_issue"
         case activeProfile = "active_profile"
         case moduleICCID = "module_iccid"
@@ -826,6 +832,7 @@ struct ESIMNote: Codable, Sendable {
 
 struct ESIMNotesResponse: Codable, Sendable {
     let notes: [String: ESIMNote]
+    var numbers: [String: String]? = nil
 }
 
 struct ESIMPhonebookProbe: Codable, Sendable {

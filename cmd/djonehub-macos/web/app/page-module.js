@@ -254,6 +254,7 @@
     const profiles = () => ((st.esim && st.esim.profiles) || []).flatMap((g) => g.profiles || []);
     const capFor = (iccid) => { if (!iccid || !st.esim || !st.esim.capabilities) return null; const k = /F$/i.test(iccid) ? iccid.slice(0, -1) : iccid; return st.esim.capabilities[k] || st.esim.capabilities[iccid] || null; };
     const pname = (p) => p.name || p.service_provider_name || p.iccid || "未命名 Profile";
+    const numberOf = (iccid) => { const k = String(iccid || "").replace(/[Ff]+$/, ""); return (st.numbers && st.numbers[k]) || ""; };
     function drawESIM() {
       const e = st.esim, h = st.health;
       const chip = e && e.chip_info;
@@ -281,7 +282,7 @@
       profiles().forEach((p) => {
         const cap = capFor(p.iccid);
         const enabled = p.state === 1;
-        rows += div + `<div class="col" style="padding:6px 14px;gap:6px"><div class="row" style="gap:8px"><span class="col grow" style="gap:1px"><span class="small strong">${esc(pname(p))}</span><span class="tiny muted mono">${esc(p.iccid || "")}</span></span>
+        rows += div + `<div class="col" style="padding:6px 14px;gap:6px"><div class="row" style="gap:8px"><span class="col grow" style="gap:1px"><span class="small strong">${esc(pname(p))}</span>${numberOf(p.iccid) ? `<span class="small mono" style="color:var(--text)">${icon("phone")} ${esc(numberOf(p.iccid))}</span>` : `<button class="btn link tiny" data-num="${esc(p.iccid)}" style="padding:0;justify-content:flex-start">号码未知 · 填写号码</button>`}<span class="tiny muted mono">${esc(p.iccid || "")}</span></span>
           ${cap ? `<span class="tiny strong" style="padding:2px 6px;border-radius:9px;color:var(--${cap.kind === "data_only" ? "orange" : "green"});background:color-mix(in srgb,var(--${cap.kind === "data_only" ? "orange" : "green"}) 14%,transparent)" title="${esc(cap.detail)}">${cap.kind === "data_only" ? "仅流量" : "可收短信"}</span>` : ""}
           ${enabled ? '<span class="tiny strong accent">使用中</span>' : ""}</div>
           <div class="row" style="gap:8px">${st.switching && st.switching.profile.iccid === p.iccid ? '<div class="spinner"></div><span class="small muted">切换中…</span>' : !enabled ? `<button class="btn small" data-sw="${esc(p.iccid)}" ${st.switching || (e && e.offline) ? "disabled" : ""}>切换</button>` : ""}
@@ -298,6 +299,7 @@
       el.querySelectorAll("[data-sw]").forEach((b) => { b.onclick = () => switchProfile(find(b.dataset.sw)); });
       el.querySelectorAll("[data-rn]").forEach((b) => { b.onclick = async () => { const p = find(b.dataset.rn); const name = await App.promptDialog("重命名 Profile", "新名称", p.name || ""); if (name == null) return; toast("正在修改名称…", "progress"); try { await api("api/esim/profile", { method: "PATCH", body: { iccid: p.iccid, name }, timeout: 60 }); say("Profile 名称已修改"); loadESIM(); } catch (x) { say(x.message); } }; });
       el.querySelectorAll("[data-note]").forEach((b) => { b.onclick = () => editNote(find(b.dataset.note)); });
+      el.querySelectorAll("[data-num]").forEach((b) => { b.onclick = () => editNote(find(b.dataset.num)); });
       el.querySelectorAll("[data-del]").forEach((b) => { b.onclick = async () => { const p = find(b.dataset.del); if (!(await App.confirmDialog("确认删除 Profile？", "删除不可恢复，确定删除当前 Profile 吗？", "删除", true))) return; toast("正在删除 " + pname(p) + "…", "progress"); try { await api("api/esim/profile", { method: "DELETE", body: { iccid: p.iccid }, timeout: 90 }); say("Profile 已删除"); loadESIM(); } catch (x) { say(x.message); } }; });
       const on = (a, fn) => { const b = el.querySelector(`[data-a="${a}"]`); if (b) b.onclick = fn; };
       on("closeresult", () => { st.switchResult = null; drawESIM(); });
@@ -307,13 +309,13 @@
     function editNote(p) {
       const n = st.notes[p.iccid] || {};
       const m = App.modal(`<h4>模块资料 · ${esc(pname(p))}</h4><div class="col" style="gap:10px;margin-top:8px">
-        <input class="field" data-label placeholder="标签（例如：工作号）" value="${esc(n.label || "")}"><input class="field" data-phone placeholder="号码" value="${esc(n.phone || "")}"><input class="field" data-tags placeholder="备注" value="${esc(n.tags || "")}"></div>
+        <input class="field" data-label placeholder="标签（例如：工作号）" value="${esc(n.label || "")}"><input class="field" data-phone placeholder="这张卡的号码，例如 +44 7700 900123" value="${esc(n.phone || numberOf(p.iccid))}"><div class="tiny muted" style="margin-top:-4px">很多 eSIM 卡里没写号码，读不出来。号码一般在运营商的开卡邮件、App 或账户页里，填一次就会一直显示。</div><input class="field" data-tags placeholder="备注" value="${esc(n.tags || "")}"></div>
         <div class="actions"><button class="btn" data-a="no">取消</button><button class="btn primary" data-a="ok">保存</button></div>`);
       m.el.querySelector('[data-a="no"]').onclick = m.close;
       m.el.querySelector('[data-a="ok"]').onclick = async () => {
         const body = { iccid: p.iccid, label: m.el.querySelector("[data-label]").value.trim(), phone: m.el.querySelector("[data-phone]").value.trim(), tags: m.el.querySelector("[data-tags]").value.trim() };
         m.close();
-        try { await api("api/esim/notes", { method: "PUT", body }); say("模块资料已保存"); const r = await api("api/esim/notes"); st.notes = (r && r.notes) || {}; } catch (x) { say(x.message); }
+        try { await api("api/esim/notes", { method: "PUT", body }); say("模块资料已保存"); const r = await api("api/esim/notes"); st.notes = (r && r.notes) || {}; st.numbers = (r && r.numbers) || {}; drawESIM(); } catch (x) { say(x.message); }
       };
     }
     function downloadSheet() {
@@ -358,7 +360,7 @@
               st.health = h;
               const secs = Math.round((Date.now() - st.switching.started) / 1000);
               const net = [h.operator, h.registration].filter(Boolean).join(" · ");
-              st.switchResult = { text: "已切换到 " + pname(p) + (net ? "，" + net : "") + `，用时 ${secs} 秒。代理会自动恢复。`, ok: true };
+              st.switchResult = { text: "已切换到 " + pname(p) + (net ? "，" + net : "") + `，用时 ${secs} 秒。` + (h.phone_number ? "本机号码 " + h.phone_number + "。" : "卡里没写号码，可以点「填写号码」记下来。") + "代理会自动恢复。", ok: true };
               return;
             }
           }
@@ -389,7 +391,7 @@
       api("api/network/cellular-policy").then((p) => { st.policy = p; }).catch(() => {}),
       api("api/gps").then((g) => { st.gps = g; }).catch(() => {}),
       api("api/esim/health", { timeout: 20 }).then((h) => { st.health = h; }).catch(() => {}),
-      api("api/esim/notes").then((r) => { st.notes = (r && r.notes) || {}; }).catch(() => {}),
+      api("api/esim/notes").then((r) => { st.notes = (r && r.notes) || {}; st.numbers = (r && r.numbers) || {}; }).catch(() => {}),
     ]).then(() => { drawNet(); drawESIM(); });
     loadESIM();
     const timer = setInterval(async () => {

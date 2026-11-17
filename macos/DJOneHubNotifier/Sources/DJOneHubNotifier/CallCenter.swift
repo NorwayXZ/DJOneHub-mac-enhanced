@@ -105,8 +105,8 @@ final class CallCenter: ObservableObject {
         }
     }
 
-    func dial() {
-        let number = numberInput.trimmingCharacters(in: .whitespaces)
+    func dial(_ override: String? = nil) {
+        let number = (override ?? numberInput).trimmingCharacters(in: .whitespaces)
         guard !number.isEmpty else { return }
         isDialing = true
         Task {

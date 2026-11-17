@@ -170,6 +170,13 @@ struct PhoneCard: ViewModifier {
 struct DialPadView: View {
     @EnvironmentObject private var calls: CallCenter
     @EnvironmentObject private var contacts: ContactStore
+    @AppStorage("dialCountry") private var dialCountry = "CN"
+    @State private var pickingCountry = false
+
+    /// The number the module will dial, with the chosen country's code.
+    private var dialTarget: String { DialCountry.international(calls.numberInput, country: dialCountry) }
+
+    private func dialNow() { calls.dial(dialTarget) }
 
     /// 完整/后缀匹配到的联系人（显示头像与姓名）
     private var matchedContact: ContactStore.Contact? {
@@ -207,6 +214,28 @@ struct DialPadView: View {
         VStack(spacing: 16) {
             Spacer(minLength: 6)
 
+            Button {
+                pickingCountry = true
+            } label: {
+                HStack(spacing: 6) {
+                    if let country = DialCountry.find(dialCountry) {
+                        Text(country.flag)
+                        Text(country.name + " +" + country.code)
+                    } else {
+                        Text(L10n.t("不加国家码"))
+                    }
+                    Image(systemName: "chevron.down").font(.caption2)
+                }
+                .font(.callout)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 5)
+                .background(Capsule().fill(Color.secondary.opacity(0.12)))
+            }
+            .buttonStyle(.plain)
+            .sheet(isPresented: $pickingCountry) {
+                DialCountryPicker(selection: $dialCountry)
+            }
+
             Text(calls.numberInput.isEmpty ? L10n.t("输入号码") : calls.numberInput)
                 .font(.system(size: 34, weight: .light, design: .rounded))
                 .foregroundStyle(calls.numberInput.isEmpty ? Color.secondary : Color.primary)
@@ -241,6 +270,12 @@ struct DialPadView: View {
             .frame(height: 20)
             .padding(.horizontal, 24)
 
+            Text(!dialTarget.isEmpty && dialTarget != calls.numberInput.trimmingCharacters(in: .whitespaces) ? L10n.t("将拨打 ") + dialTarget : " ")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(height: 16)
+                .padding(.top, -10)
+
             VStack(spacing: 12) {
                 ForEach(Self.rows, id: \.self) { row in
                     HStack(spacing: 22) {
@@ -254,7 +289,7 @@ struct DialPadView: View {
                 HStack(spacing: 22) {
                     Color.clear.frame(width: 76, height: 76)
                     Button {
-                        calls.dial()
+                        dialNow()
                     } label: {
                         ZStack {
                             Circle().fill(Color.green).frame(width: 76, height: 76)
@@ -304,7 +339,7 @@ struct DialPadView: View {
                 calls.numberInput.removeLast()
             }
         case "\r", "\n":
-            calls.dial()
+            dialNow()
         default:
             break
         }
