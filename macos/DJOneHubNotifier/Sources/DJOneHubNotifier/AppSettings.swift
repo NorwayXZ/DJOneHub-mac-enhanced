@@ -288,6 +288,8 @@ enum L10n {
         "不加国家码（号码原样拨出）": "No country code (dial as typed)",
         "不加国家码": "No country code",
         "将拨打 ": "Will dial ",
+        "将发送到 ": "Will send to ",
+        "对方号码所在的国家/地区": "Country or region of the number",
         "已切换 Profile，模块正在重启并重新读取新卡…": "Profile switched; module is restarting to load the new card…",
         "可用": "Free",
         "完全退出": "Quit All",

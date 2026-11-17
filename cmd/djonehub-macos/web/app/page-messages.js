@@ -32,7 +32,8 @@
     const m = App.modal(`<div class="col" style="gap:0;margin:-20px">
       <div class="row" style="padding:12px 16px"><button class="btn link" data-a="cancel">取消</button><span class="grow" style="text-align:center;font-weight:600">新信息</span><button class="btn link strong" data-a="send">发送</button></div>
       <div class="divider" style="margin:0"></div>
-      <div class="row" style="padding:9px 16px;gap:8px"><button class="btn link" data-a="pick" title="从通讯录选择">${icon("plus")}</button><span class="muted">收件人：</span><input data-to placeholder="输入号码或姓名" style="border:0;background:none;outline:none;flex:1" value="${esc(initial || "")}"></div>
+      <div class="row" style="padding:9px 16px;gap:8px"><button class="btn link" data-a="pick" title="从通讯录选择">${icon("plus")}</button><span class="muted">收件人：</span><button class="btn small" data-a="country" title="对方号码所在的国家/地区" style="padding:2px 8px"></button><input data-to placeholder="输入号码或姓名" style="border:0;background:none;outline:none;flex:1" value="${esc(initial || "")}"></div>
+      <div data-intl class="tiny muted mono" style="padding:0 16px 6px"></div>
       <div data-sugg></div>
       <div class="divider" style="margin:0"></div>
       <div style="height:200px"></div>
@@ -45,18 +46,25 @@
     const to = m.el.querySelector("[data-to]");
     const body = m.el.querySelector("[data-body]");
     const sugg = m.el.querySelector("[data-sugg]");
+    const countryBtn = m.el.querySelector('[data-a="country"]'), intl = m.el.querySelector("[data-intl]");
+    // A typed number gets the chosen country's code, like the dial pad.
+    const target = () => { const v = to.value.trim(); return App.intlNumber && /^[0-9+\-() ]+$/.test(v) ? App.intlNumber(v, App.dialCountry()) : v; };
+    const showIntl = () => { countryBtn.textContent = App.dialCountryLabel ? App.dialCountryLabel() + " ▾" : ""; const t = target(); intl.textContent = t && t !== to.value.trim() ? "将发送到 " + t : ""; };
+    countryBtn.onclick = () => App.pickCountry && App.pickCountry(showIntl);
+    showIntl();
     (initial ? body : to).focus();
     to.oninput = () => {
+      showIntl();
       const q = to.value.trim().toLowerCase();
       const list = q ? App.contacts.list.filter((c) => (c.name || "").toLowerCase().includes(q) || (c.phones || []).some((p) => p.includes(q))).slice(0, 5) : [];
       sugg.innerHTML = list.length ? `<div class="divider" style="margin:0"></div><div class="row" style="padding:8px 16px;gap:8px;overflow-x:auto">${list.map((c) => `<button class="btn small" data-p="${esc((c.phones || [])[0] || c.name)}">${esc(c.name)} <span class="muted">${esc((c.phones || [])[0] || "")}</span></button>`).join("")}</div>` : "";
-      sugg.querySelectorAll("[data-p]").forEach((b) => { b.onclick = () => { to.value = b.dataset.p; sugg.innerHTML = ""; body.focus(); }; });
+      sugg.querySelectorAll("[data-p]").forEach((b) => { b.onclick = () => { to.value = b.dataset.p; sugg.innerHTML = ""; showIntl(); body.focus(); }; });
     };
     m.el.querySelector('[data-a="pick"]').onclick = () => { to.value = ""; to.focus(); to.dispatchEvent(new Event("input")); if (!App.contacts.list.length) toast("通讯录为空，可在“通讯录”页添加", "info"); };
     m.el.querySelector('[data-a="cancel"]').onclick = m.close;
     let sending = false;
     async function send() {
-      const phone = to.value.trim(), text = body.value.trim();
+      const phone = target(), text = body.value.trim();
       if (!phone || !text || sending) return;
       sending = true;
       try { await sendSMS(phone, text); m.close(); toast("短信已发送", "success"); onSent(phone); }

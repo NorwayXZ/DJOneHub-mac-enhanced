@@ -1009,6 +1009,8 @@ private struct ComposeMessageView: View {
     @EnvironmentObject private var calls: CallCenter
     @EnvironmentObject private var contacts: ContactStore
     @State private var recipient: String
+    @AppStorage("dialCountry") private var dialCountry = "CN"
+    @State private var pickingCountry = false
     @State private var content = ""
     @State private var sending = false
     @State private var errorText: String?
@@ -1099,12 +1101,42 @@ private struct ComposeMessageView: View {
                     .font(.system(size: 14))
                     .foregroundStyle(.secondary)
                     .layoutPriority(0)
+                Button {
+                    pickingCountry = true
+                } label: {
+                    HStack(spacing: 3) {
+                        if let country = DialCountry.find(dialCountry) {
+                            Text(country.flag + " +" + country.code)
+                        } else {
+                            Text(L10n.t("不加国家码"))
+                        }
+                        Image(systemName: "chevron.down").font(.system(size: 8))
+                    }
+                    .font(.system(size: 12))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(Color.secondary.opacity(0.12)))
+                }
+                .buttonStyle(.plain)
+                .help(L10n.t("对方号码所在的国家/地区"))
+                .sheet(isPresented: $pickingCountry) {
+                    DialCountryPicker(selection: $dialCountry)
+                }
                 TextField(L10n.t("输入号码或姓名"), text: $recipient)
                     .textFieldStyle(.plain)
                     .font(.system(size: 14))
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 9)
+
+            if sendTarget != recipient.trimmingCharacters(in: .whitespaces) {
+                Text(L10n.t("将发送到 ") + sendTarget)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 6)
+            }
 
             if !suggestions.isEmpty {
                 Divider()
@@ -1399,8 +1431,15 @@ private struct ComposeMessageView: View {
         contactSearch = ""
     }
 
+    /// A typed number gets the chosen country's code, like the dial pad.
+    private var sendTarget: String {
+        let typed = recipient.trimmingCharacters(in: .whitespaces)
+        guard !typed.isEmpty, typed.allSatisfy({ "0123456789+-() ".contains($0) }) else { return typed }
+        return DialCountry.international(typed, country: dialCountry)
+    }
+
     private func sendNow() async {
-        let phone = recipient.trimmingCharacters(in: .whitespaces)
+        let phone = sendTarget
         let text = content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !phone.isEmpty, !text.isEmpty else { return }
         sending = true
@@ -2575,7 +2614,6 @@ struct CallActiveView: View {
     @EnvironmentObject private var calls: CallCenter
     @EnvironmentObject private var contacts: ContactStore
     let call: CallRecord
-    @State private var now = Date()
     @State private var showKeypad = false
 
     private var ringing: Bool {
@@ -2598,7 +2636,7 @@ struct CallActiveView: View {
         }
     }
 
-    private var durationText: String {
+    private func durationText(at now: Date) -> String {
         let seconds = Int(calls.callDuration(now: now))
         let hours = seconds / 3600
         let minutes = (seconds % 3600) / 60
@@ -2629,11 +2667,15 @@ struct CallActiveView: View {
                 .font(.system(size: 14))
                 .foregroundStyle(.secondary)
             if inCall {
-                Text(durationText)
-                    .font(.system(size: 42, weight: .light, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(.primary)
-                    .padding(.top, 6)
+                // Its own clock: the call screen redraws more often than once
+                // a second, which kept restarting a timer kept in the body.
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    Text(durationText(at: context.date))
+                        .font(.system(size: 42, weight: .light, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(.primary)
+                        .padding(.top, 6)
+                }
             }
             Spacer()
 
@@ -2680,9 +2722,6 @@ struct CallActiveView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         // 通话界面跟随系统外观（浅色/深色），不再硬编码深色
         .background(PhoneStyle.appBackground)
-        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
-            now = Date()
-        }
     }
 
     /// 通话中 DTMF 键盘：点按数字直接发送双音多频到运营商线路

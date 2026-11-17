@@ -119,6 +119,10 @@
     return "+" + c[2] + national;
   }
   App.intlNumber = intlNumber;
+  // The SMS composer shares the chosen country.
+  App.dialCountry = () => dialCountry;
+  App.dialCountryLabel = () => { const c = countryOf(dialCountry); return c ? flag(c[0]) + " +" + c[2] : "不加国家码"; };
+  App.pickCountry = (done) => pickCountry(done);
   function pickCountry(done) {
     const m = App.modal(`<h4>拨打哪个国家/地区</h4><div class="col" style="gap:8px;margin-top:8px">
       <input class="field" data-q placeholder="搜索国家或区号">
