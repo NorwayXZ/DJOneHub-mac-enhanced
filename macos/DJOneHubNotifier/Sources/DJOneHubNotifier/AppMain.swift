@@ -461,6 +461,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let newMessages = messages.filter { !seenMessageIDs.contains($0.identity) }
             seenMessageIDs.formUnion(messages.map(\.identity))
             for message in newMessages { systemNotifications.postMessage(message) }
+            // The newest code from the last few minutes goes on the clipboard.
+            if systemNotifications.autoCopyCode,
+               let fresh = newMessages.filter({ ($0.code ?? "").isEmpty == false && Date().timeIntervalSince($0.timestamp) < 600 })
+                   .max(by: { $0.timestamp < $1.timestamp }),
+               let code = fresh.code {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(code, forType: .string)
+                Toast.shared.show(L10n.f("验证码 %@ 已复制，可直接粘贴", code), .success)
+            }
             if lastActiveCallID == nil, let newest = newMessages.first { showMessage(newest) }
         } catch {
             // Call polling owns the offline warning to avoid duplicate banners.

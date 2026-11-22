@@ -18,6 +18,8 @@ type desktopSettings struct {
 	Notifications bool   `json:"notifications"`
 	ShowContents  bool   `json:"show_contents"`
 	Ringtone      string `json:"ringtone"`
+	// CopyCode puts a new SMS's verification code on the clipboard.
+	CopyCode bool `json:"copy_code"`
 	// QuitAt is set by 完全退出; the tray exits when it sees it.
 	QuitAt time.Time `json:"quit_at,omitempty"`
 }
@@ -31,7 +33,7 @@ func desktopSettingsPath() string {
 }
 
 func loadDesktopSettings() desktopSettings {
-	s := desktopSettings{Notifications: true, Ringtone: "Ring01"}
+	s := desktopSettings{Notifications: true, Ringtone: "Ring01", CopyCode: true}
 	if b, err := os.ReadFile(desktopSettingsPath()); err == nil {
 		_ = json.Unmarshal(b, &s)
 	}
@@ -52,12 +54,13 @@ func desktopSettingsAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodPut {
-		var body desktopSettings
+		// Fields the client leaves out keep their saved values.
+		current := loadDesktopSettings()
+		body := current
 		if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&body); err != nil {
 			writeError(w, 400, "invalid request")
 			return
 		}
-		current := loadDesktopSettings()
 		body.QuitAt = current.QuitAt
 		if err := saveDesktopSettings(body); err != nil {
 			writeError(w, 500, err.Error())

@@ -175,7 +175,7 @@
   function notifyPanel(el) {
     function draw() {
       const s = desktop || { notifications: true, show_contents: false };
-      el.innerHTML = `<div class="col" style="gap:8px">${toggle("notifications", s.notifications, "Windows 通知：新短信和来电")}${toggle("show_contents", s.show_contents, "在通知中显示短信内容和验证码")}
+      el.innerHTML = `<div class="col" style="gap:8px">${toggle("notifications", s.notifications, "Windows 通知：新短信和来电")}${toggle("show_contents", s.show_contents, "在通知中显示短信内容和验证码")}${toggle("copy_code", s.copy_code !== false, "收到验证码自动复制（直接 Ctrl+V 粘贴）")}
         <div class="small muted">默认隐藏短信正文和验证码，只显示发件人。通知由右下角托盘里的 DJOneHub 发出，托盘退出后不再通知（代理照常运行）。</div></div>`;
       el.querySelectorAll("[data-dk]").forEach((c) => { c.onchange = () => saveDesktop({ [c.dataset.dk]: c.checked }).then(draw).catch((e) => toast(e.message, "failure")); });
     }

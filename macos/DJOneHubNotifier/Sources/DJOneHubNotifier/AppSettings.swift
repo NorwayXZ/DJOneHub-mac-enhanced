@@ -167,6 +167,7 @@ enum L10n {
 		"这会删除 SIM 卡和模块存储中的全部短信，无法恢复。": "This permanently deletes all SMS stored on the SIM card and module.",
         "暂无短信": "No Messages",
         "验证码 %@": "Code %@",
+        "验证码 %@ 已复制，可直接粘贴": "Code %@ copied, ready to paste",
         "%@ 条": "%@ messages",
         // 通讯录
         "搜索姓名或号码": "Search name or number",

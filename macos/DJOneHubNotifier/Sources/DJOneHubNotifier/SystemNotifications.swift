@@ -18,6 +18,10 @@ final class SystemNotifications: NSObject, ObservableObject, UNUserNotificationC
             if !showMessageContents { Task { await removeSMSPreviews() } }
         }
     }
+    /// Put a new SMS's verification code on the clipboard (on unless turned off).
+    @Published var autoCopyCode = UserDefaults.standard.object(forKey: "djonehub.autoCopyCode") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(autoCopyCode, forKey: "djonehub.autoCopyCode") }
+    }
     @Published private(set) var permissionText = "尚未检查通知权限"
     @Published private(set) var lastError: String?
     @Published private(set) var testStatus: String?
@@ -196,6 +200,7 @@ struct SystemNotificationSettings: View {
         VStack(alignment: .leading, spacing: 12) {
             Toggle("通知中心：新短信和未接来电", isOn: $notifications.enabled)
             Toggle("在通知中显示短信内容和验证码", isOn: $notifications.showMessageContents)
+            Toggle("收到验证码自动复制（直接 ⌘V 粘贴）", isOn: $notifications.autoCopyCode)
             Text("默认隐藏短信正文和验证码；此设置也适用于 App 短信弹窗。来电接听窗口继续保留。")
                 .font(.caption).foregroundStyle(.secondary)
             Text(notifications.permissionText).font(.caption).foregroundStyle(.secondary)

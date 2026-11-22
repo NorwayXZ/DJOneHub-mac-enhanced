@@ -216,6 +216,7 @@ type desktopSettings struct {
 	Notifications bool      `json:"notifications"`
 	ShowContents  bool      `json:"show_contents"`
 	Ringtone      string    `json:"ringtone"`
+	CopyCode      bool      `json:"copy_code"`
 	QuitAt        time.Time `json:"quit_at"`
 }
 
@@ -295,7 +296,12 @@ func watch() {
 			offlineSince, warned = time.Time{}, false
 			latest := newest
 			for _, m := range messages {
-				if !newest.IsZero() && m.Timestamp.After(newest) && settings.Notifications {
+				fresh := !newest.IsZero() && m.Timestamp.After(newest)
+				copied := false
+				if fresh && settings.CopyCode && m.Code != "" {
+					copied = copyToClipboard(m.Code) == nil
+				}
+				if fresh && settings.Notifications {
 					title, text := "新短信 · "+m.Sender, "收到一条新短信"
 					if settings.ShowContents {
 						text = strings.TrimSpace(m.Content)
@@ -305,6 +311,9 @@ func watch() {
 					}
 					if m.ModuleName != "" {
 						title += "（" + m.ModuleName + "）"
+					}
+					if copied {
+						title = "验证码已复制 · " + title
 					}
 					notify(title, text, "messages")
 				}
