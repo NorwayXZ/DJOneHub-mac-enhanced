@@ -185,6 +185,8 @@ func serveModuleWorker(socket string) error {
 	go a.startSignalRecovery(ctx)
 	go a.runProxyAutoStart(ctx)
 	go a.runUsageLedger(ctx)
+	// Each module resets its LTE band lock when its SIM changes.
+	go a.runBandGuard(ctx)
 	routes := a.routes()
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" && r.URL.Path == "/api/network/cellular-policy" {
