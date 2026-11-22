@@ -64,12 +64,23 @@ func (c usbComposition) isLegacyUACTarget() bool {
 		len(c.Flags) == 7 && strings.Join(intSliceStrings(c.Flags), ",") == "1,1,1,1,1,0,1"
 }
 
-// isCallAudioCapable covers both known module USB Audio compositions. Some
-// QDC507 revisions expose UAC with ADB disabled and acknowledge, but retain,
-// that legacy bit layout. Rewriting it to the full ADB layout is unnecessary
-// for call audio and makes a successful no-op look like a failed setup.
+// isCallAudioCapable needs ADB as well as UAC: the voice route is deployed
+// and started over ADB, so the legacy layout (UAC with ADB off) connects
+// calls with no sound. Some QDC507 firmware answers OK to turning ADB on but
+// keeps it off; see noCallAudioStatus.
 func (c usbComposition) isCallAudioCapable() bool {
-	return c.isUACTarget() || c.isLegacyUACTarget()
+	return c.isUACTarget()
+}
+
+const noCallAudioSummary = "这个模块的固件不让打开声音通道，接打电话会没有声音"
+
+func noCallAudioStatus(composition usbComposition) moduleSetupStatus {
+	return moduleSetupStatus{
+		State:     "no_call_audio",
+		Summary:   noCallAudioSummary,
+		Detail:    composition.command() + "\n上网和短信不受影响。需要通话的卡请放到能通话的模块上。",
+		UpdatedAt: time.Now().Format(time.RFC3339),
+	}
 }
 
 func (c usbComposition) isFactoryDJI() bool {
@@ -167,6 +178,9 @@ func (a *app) inspectModuleSetup() moduleSetupStatus {
 			return moduleSetupStatus{State: "ready", Summary: "模块已具备通话音频与 VoLTE 能力", Detail: composition.command(), UpdatedAt: time.Now().Format(time.RFC3339)}
 		}
 		return moduleSetupStatus{State: "needs_initialization", Summary: "模块音频已就绪，需要启用 VoLTE", Detail: composition.command(), CanInitialize: true, RequiresConfirmation: true, UpdatedAt: time.Now().Format(time.RFC3339)}
+	}
+	if composition.isLegacyUACTarget() {
+		return noCallAudioStatus(composition)
 	}
 	if composition.isFactoryDJI() {
 		return moduleSetupStatus{State: "needs_initialization", Summary: "发现原始 USB 配置，可启用通话支持", Detail: composition.command(), CanInitialize: true, RequiresConfirmation: true, UpdatedAt: time.Now().Format(time.RFC3339)}
@@ -301,7 +315,11 @@ func (a *app) runModuleSetup() {
 		actual, parseErr := parseUSBComposition(readBack)
 		if err != nil || parseErr != nil || !actual.isCallAudioCapable() {
 			detail := firstNonEmpty(errString(err), errString(parseErr), readBack)
-			a.setModuleSetup(moduleSetupStatus{State: "failed", Summary: "USB 配置回读未确认，未重启模块", Detail: detail, BackupPath: backupPath})
+			status := moduleSetupStatus{State: "failed", Summary: "USB 配置回读未确认，未重启模块", Detail: detail, BackupPath: backupPath}
+			if parseErr == nil && actual.isLegacyUACTarget() {
+				status.Summary = noCallAudioSummary
+			}
+			a.setModuleSetup(status)
 			return
 		}
 	}
@@ -327,27 +345,37 @@ func (a *app) runModuleSetup() {
 		return
 	}
 	a.markUSBATDetached("first-use module setup reboot")
-	for deadline := time.Now().Add(90 * time.Second); time.Now().Before(deadline); time.Sleep(2 * time.Second) {
+	// The module keeps its old USB layout for a few seconds after CFUN=1,1;
+	// checking right away reads the old interfaces and wrongly rolls back.
+	time.Sleep(moduleSetupRebootSettle)
+	lastErr := errors.New("模块没有在 120 秒内重新出现")
+	for deadline := time.Now().Add(120 * time.Second); time.Now().Before(deadline); time.Sleep(3 * time.Second) {
 		if err := a.ensureUSBAT(); err != nil {
+			lastErr = err
 			continue
 		}
 		imsResponse, imsErr := a.runATCommand(`AT+QCFG="ims"`, 4*time.Second)
 		imsConfig, volteCapability, imsParseErr := parseIMSConfiguration(imsResponse)
 		if imsErr != nil || imsParseErr != nil || imsConfig != 1 || volteCapability != 1 {
+			lastErr = errors.New("IMS 尚未就绪：" + firstNonEmpty(errString(imsErr), errString(imsParseErr), imsResponse))
 			continue
 		}
 		a.setModuleSetup(moduleSetupStatus{State: "verifying", Summary: "正在验证 4G、短信与通话路由", BackupPath: backupPath})
-		if err := a.ensureModuleVoiceRouteBudgeted(35 * time.Second); err == nil {
-			a.stopModuleVoiceRoute()
-			a.setModuleSetup(moduleSetupStatus{State: "ready", Summary: "通话支持已启用，可直接使用", BackupPath: backupPath})
-			return
-		} else {
-			a.rollbackModuleSetup(original, backupPath, "通话路由验证失败："+err.Error())
-			return
+		// The audio (ADB) interface can enumerate a little after the AT port.
+		if err := a.ensureModuleVoiceRouteBudgeted(35 * time.Second); err != nil {
+			lastErr = err
+			continue
 		}
+		a.stopModuleVoiceRoute()
+		a.setModuleSetup(moduleSetupStatus{State: "ready", Summary: "通话支持已启用，可直接使用", BackupPath: backupPath})
+		return
 	}
-	a.rollbackModuleSetup(original, backupPath, "通话路由未在 90 秒内验证")
+	a.rollbackModuleSetup(original, backupPath, "通话路由验证失败："+lastErr.Error())
 }
+
+// moduleSetupRebootSettle is how long the module needs to actually drop off
+// USB after AT+CFUN=1,1.
+var moduleSetupRebootSettle = 15 * time.Second
 
 func parseIMSConfiguration(response string) (configuration int, volteCapability int, err error) {
 	for _, line := range strings.Split(response, "\n") {

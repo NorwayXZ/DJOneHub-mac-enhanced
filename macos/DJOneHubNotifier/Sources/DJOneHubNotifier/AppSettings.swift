@@ -289,6 +289,8 @@ enum L10n {
         "不加国家码": "No country code",
         "将拨打 ": "Will dial ",
         "将发送到 ": "Will send to ",
+        "这个模块的固件不让打开声音通道，接打电话会没有声音": "This module's firmware won't open the audio channel, so calls will have no sound",
+        "这个模块还没开通话支持，接了会没有声音。可以在 设置 › 通话支持 里开启": "Call support isn't on for this module, so calls will have no sound. Turn it on in Settings › Call Support",
         "对方号码所在的国家/地区": "Country or region of the number",
         "已切换 Profile，模块正在重启并重新读取新卡…": "Profile switched; module is restarting to load the new card…",
         "可用": "Free",

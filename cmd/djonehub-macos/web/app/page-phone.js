@@ -64,6 +64,7 @@
       <span style="width:96px;height:96px;border-radius:50%;background:rgba(128,128,128,0.12);display:flex;align-items:center;justify-content:center">${App.avatar(App.contacts.name(c.number), 96)}</span>
       <div style="font:600 28px var(--round)">${esc(App.contacts.name(c.number))}</div>
       <div class="muted">${esc(STATE[c.state] || "通话状态")}${c.module_name ? " · " + esc(c.module_name) : ""}</div>
+      ${c.audio_warning ? `<div class="strong orange" style="max-width:420px;text-align:center">${icon("micOff")} ${esc(c.audio_warning)}</div>` : ""}
       ${dur ? `<div class="mono" style="font-size:20px">${dur}</div>` : ""}
       ${audioLine(c)}
       <div style="flex:1"></div>

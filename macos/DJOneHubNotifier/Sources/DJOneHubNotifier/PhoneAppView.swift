@@ -2663,9 +2663,16 @@ struct CallActiveView: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.6)
                 .foregroundStyle(.primary)
-            Text(statusText)
+            Text(statusText + (call.moduleName.map { " · " + $0 } ?? ""))
                 .font(.system(size: 14))
                 .foregroundStyle(.secondary)
+            if let warning = call.audioWarning, !warning.isEmpty {
+                Label(L10n.t(warning), systemImage: "speaker.slash.fill")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.orange)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 30)
+            }
             if inCall {
                 // Its own clock: the call screen redraws more often than once
                 // a second, which kept restarting a timer kept in the body.

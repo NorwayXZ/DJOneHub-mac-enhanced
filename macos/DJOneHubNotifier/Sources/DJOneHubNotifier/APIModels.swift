@@ -13,10 +13,13 @@ struct CallRecord: Codable, Equatable, Sendable, Identifiable {
     /// Set in multi-module mode: the module the call came in on.
     var moduleID: String? = nil
     var moduleName: String? = nil
+    /// Set on the active call when the module can't carry its sound.
+    var audioWarning: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case id, index, direction, state, number, missed
         case moduleID = "module_id", moduleName = "module_name"
+        case audioWarning = "audio_warning"
         case startedAt = "started_at"
         case updatedAt = "updated_at"
         case endedAt = "ended_at"

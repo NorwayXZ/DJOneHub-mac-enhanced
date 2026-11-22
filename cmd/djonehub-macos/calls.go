@@ -22,6 +22,8 @@ type callRecord struct {
 	UpdatedAt time.Time  `json:"updated_at"`
 	EndedAt   *time.Time `json:"ended_at,omitempty"`
 	Missed    bool       `json:"missed"`
+	// AudioWarning, on the active call only, says the call will have no sound.
+	AudioWarning string `json:"audio_warning,omitempty"`
 }
 
 type parsedCall struct {
@@ -312,11 +314,13 @@ func (a *app) setCallPollStatus(err error) {
 }
 
 func (a *app) callStatus(w http.ResponseWriter, _ *http.Request) {
+	warning := a.callAudioWarning()
 	a.callMu.RLock()
 	defer a.callMu.RUnlock()
 	var active *callRecord
 	if a.activeCall != nil {
 		copy := *a.activeCall
+		copy.AudioWarning = warning
 		active = &copy
 	}
 	history := append([]callRecord(nil), a.callHistory...)
