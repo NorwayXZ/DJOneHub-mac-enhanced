@@ -52,7 +52,7 @@ func webAppHandler() http.Handler {
 	})
 }
 
-const appVersion = "1.3.0-proxy-preview.73"
+const appVersion = "1.3.0-proxy-preview.74"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
@@ -1168,14 +1168,21 @@ func (a *app) checkModuleLink() {
 	}
 	a.lastLinkCheck = time.Now()
 	found, usable := moduleLinkState(discoverMacNetworkInterfaces(), fleetSessionForInterface, scopedUSBSession)
-	if !found || usable {
+	// A module worker runs only while its module is on USB, so no adapter at
+	// all means macOS's network driver attached without creating one (seen
+	// after the module re-enumerates). Only a module reboot brings it back.
+	if usable || (!found && scopedUSBSession == 0) {
 		a.linkDownSince = time.Time{}
 		return
 	}
 	if a.linkDownSince.IsZero() {
 		a.linkDownSince = time.Now()
-		a.linkRadioCycled = false
-		log.Printf("cellular link: module is registered but the Mac has no address from it")
+		a.linkRadioCycled = !found
+		if found {
+			log.Printf("cellular link: module is registered but the Mac has no address from it")
+		} else {
+			log.Printf("cellular link: module is registered but the Mac has no network adapter for it")
+		}
 		return
 	}
 	step := linkRecoveryStep(time.Since(a.linkDownSince), a.linkRadioCycled, time.Since(lastSignalReboot()))

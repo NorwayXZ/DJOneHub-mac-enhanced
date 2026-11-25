@@ -99,7 +99,7 @@ func cellularAdapter() (windowsAdapter, error) {
 	switch len(found) {
 	case 0:
 		if scopedUSBSession != 0 {
-			return windowsAdapter{}, errors.New("模块已连接，但它的网卡还没有给电脑分配地址，正在自动恢复，约 1～2 分钟，恢复后代理会自动开启")
+			return windowsAdapter{}, errors.New("模块已连接，但它的网卡还没有给电脑分配地址，正在自动恢复（必要时自动重启模块），约 3～4 分钟，恢复后代理会自动开启")
 		}
 		return windowsAdapter{}, errors.New("未找到模块的蜂窝网卡，请检查模块是否已连接并完成上网初始化")
 	case 1:
