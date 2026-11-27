@@ -162,6 +162,12 @@ final class RealtimeVoiceSession: NSObject, @unchecked Sendable {
     private var closed = false
     private var leftover = Data()   // odd byte carry for 24 kHz output
     private var baseInstructions = ""
+    // Nothing is heard or said until the server confirms our instructions;
+    // before that it answers with its own generic assistant persona.
+    private var sessionConfig: [String: Any] = [:]
+    private var updateSent = false
+    private var ready = false
+    private var queuedResponse: [String: Any]?
 
     func connect(base: String, model: String, key: String, session: [String: Any]) {
         let wsBase = base.replacingOccurrences(of: "https://", with: "wss://")
@@ -176,14 +182,26 @@ final class RealtimeVoiceSession: NSObject, @unchecked Sendable {
         self.task = task
         task.resume()
         baseInstructions = session["instructions"] as? String ?? ""
-        send(["type": "session.update", "session": session])
+        sessionConfig = session
         receive()
+        // Some relays skip session.created/updated: don't wait forever.
+        queue.asyncAfter(deadline: .now() + 3) { [weak self] in
+            guard let self, !self.closed, !self.updateSent else { return }
+            self.updateSent = true
+            self.send(["type": "session.update", "session": self.sessionConfig])
+        }
+        queue.asyncAfter(deadline: .now() + 6) { [weak self] in
+            guard let self, !self.closed, !self.ready else { return }
+            AICallLog.write("no session.updated after 6s, going ahead")
+            self.ready = true
+            if let r = self.queuedResponse { self.queuedResponse = nil; self.send(r) }
+        }
     }
 
     /// Adds 8 kHz call/mic audio; sent in ~100 ms batches.
     func appendAudio8k(_ pcm: Data) {
         queue.async { [weak self] in
-            guard let self, !self.closed else { return }
+            guard let self, !self.closed, self.ready else { return }
             self.pending.append(pcm)
             guard self.pending.count >= 1_600 else { return }
             let chunk = PCM.up3(self.pending)
@@ -197,7 +215,11 @@ final class RealtimeVoiceSession: NSObject, @unchecked Sendable {
     func requestResponse(_ extra: String? = nil) {
         var response: [String: Any] = [:]
         if let extra { response["instructions"] = baseInstructions + "\n\nRight now: " + extra }
-        send(["type": "response.create", "response": response])
+        let event: [String: Any] = ["type": "response.create", "response": response]
+        queue.async { [weak self] in
+            guard let self, !self.closed else { return }
+            if self.ready { self.send(event) } else { self.queuedResponse = event }
+        }
     }
 
     func close() {
@@ -238,7 +260,20 @@ final class RealtimeVoiceSession: NSObject, @unchecked Sendable {
         guard let data = text.data(using: .utf8),
               let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = event["type"] as? String else { return }
+        AICallLog.write(type == "error" ? "error \(text.prefix(300))" : type)
         switch type {
+        case "session.created":
+            queue.async { [weak self] in
+                guard let self, !self.updateSent else { return }
+                self.updateSent = true
+                self.send(["type": "session.update", "session": self.sessionConfig])
+            }
+        case "session.updated":
+            queue.async { [weak self] in
+                guard let self, !self.ready else { return }
+                self.ready = true
+                if let r = self.queuedResponse { self.queuedResponse = nil; self.send(r) }
+            }
         case "response.output_audio.delta", "response.audio.delta":
             if let b64 = event["delta"] as? String, var pcm = Data(base64Encoded: b64) {
                 if !leftover.isEmpty { pcm = leftover + pcm; leftover.removeAll() }
@@ -677,5 +712,29 @@ final class SpeakerGate: @unchecked Sendable {
     var isSpeaking: Bool {
         lock.lock(); defer { lock.unlock() }
         return Date() < until.addingTimeInterval(0.4)
+    }
+}
+
+/// Event names (no audio, no keys) for diagnosing AI calls.
+enum AICallLog {
+    private static let queue = DispatchQueue(label: "djonehub.ai.log")
+    private static let url: URL = {
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/DJOneHub", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("ai-call.log")
+    }()
+
+    static func write(_ line: String) {
+        guard !line.hasSuffix(".delta") else { return }
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        queue.async {
+            let data = Data("\(stamp) \(line)\n".utf8)
+            if let h = try? FileHandle(forWritingTo: url) {
+                h.seekToEndOfFile(); h.write(data); try? h.close()
+            } else {
+                try? data.write(to: url)
+            }
+        }
     }
 }
