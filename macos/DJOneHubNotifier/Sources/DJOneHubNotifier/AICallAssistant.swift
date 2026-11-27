@@ -27,6 +27,8 @@ final class AICallSettings: ObservableObject {
         var base = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         while base.hasSuffix("/") { base.removeLast() }
         if base.hasSuffix("/v1") { base.removeLast(3) }
+        // The OpenAI website address is easy to paste by mistake.
+        base = base.replacingOccurrences(of: "platform.openai.com", with: "api.openai.com")
         return base.isEmpty ? "https://api.openai.com" : base
     }
 }
@@ -159,6 +161,7 @@ final class RealtimeVoiceSession: NSObject, @unchecked Sendable {
     private var pending = Data()
     private var closed = false
     private var leftover = Data()   // odd byte carry for 24 kHz output
+    private var baseInstructions = ""
 
     func connect(base: String, model: String, key: String, session: [String: Any]) {
         let wsBase = base.replacingOccurrences(of: "https://", with: "wss://")
@@ -172,6 +175,7 @@ final class RealtimeVoiceSession: NSObject, @unchecked Sendable {
         let task = URLSession.shared.webSocketTask(with: request)
         self.task = task
         task.resume()
+        baseInstructions = session["instructions"] as? String ?? ""
         send(["type": "session.update", "session": session])
         receive()
     }
@@ -188,9 +192,11 @@ final class RealtimeVoiceSession: NSObject, @unchecked Sendable {
         }
     }
 
-    func requestResponse(_ instructions: String? = nil) {
+    /// Asks the AI to speak now. `extra` is added to (not instead of) the
+    /// session's instructions, so the goal is never lost.
+    func requestResponse(_ extra: String? = nil) {
         var response: [String: Any] = [:]
-        if let instructions { response["instructions"] = instructions }
+        if let extra { response["instructions"] = baseInstructions + "\n\nRight now: " + extra }
         send(["type": "response.create", "response": response])
     }
 
@@ -406,7 +412,9 @@ final class AICallAssistant: ObservableObject {
             audio?.sendAssistantSpeech(PCM.down3(pcm))
             audio?.playAssistant(pcm)
         }
+        let heard = SpeakerGate()
         s.onSpeechStarted = { [weak audio] in
+            heard.extend(by: 60)
             // They started talking: stop the AI mid-sentence, like a person would.
             audio?.clearAssistantUplink()
             audio?.stopAssistantPlayback()
@@ -422,9 +430,15 @@ final class AICallAssistant: ObservableObject {
         mode = .agent
         status = screening ? "AI 正在替你接听，问清对方是谁、什么事" : "AI 正在替你通话"
         if speakFirst {
-            s.requestResponse(screening
+            // Give them a moment to say "hello" first (that answer starts the
+            // AI by itself); speak up only if the line stays quiet.
+            let kick = screening
                 ? "Greet the caller briefly in \(language.id) as the assistant and ask who is calling and why."
-                : "Start the call: greet briefly in \(language.id) and state why you are calling.")
+                : "The call just connected. Greet briefly in \(language.id) and state why you are calling."
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak s] in
+                guard let s, !heard.isSpeaking else { return }
+                s.requestResponse(kick)
+            }
         }
     }
 
@@ -583,6 +597,49 @@ final class AICallAssistant: ObservableObject {
         return content.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// Opens a live voice session and asks for one spoken word, to prove the
+    /// whole speech path (not just the key) works before a real call.
+    static func realtimeVoiceCheck() async -> String {
+        let s = AICallSettings.shared
+        let session = RealtimeVoiceSession()
+        return await withCheckedContinuation { (cont: CheckedContinuation<String, Never>) in
+            let lock = NSLock()
+            var done = false
+            var bytes = 0
+            func finish(_ text: String) {
+                lock.lock(); defer { lock.unlock() }
+                guard !done else { return }
+                done = true
+                session.close()
+                cont.resume(returning: text)
+            }
+            session.onAudio = { pcm in
+                lock.lock(); bytes += pcm.count; let enough = bytes >= 24_000; lock.unlock()
+                if enough { finish("连接正常，实时语音也能说话，可以用") }
+            }
+            session.onSaid = { _ in
+                lock.lock(); let got = bytes; lock.unlock()
+                finish(got > 0 ? "连接正常，实时语音也能说话，可以用" : "实时语音连上了，但没收到声音")
+            }
+            session.onError = { e in finish("Key 正常，但实时语音不行：\(e)") }
+            session.connect(
+                base: s.trimmedBase,
+                model: s.realtimeModel,
+                key: s.apiKey,
+                session: RealtimeVoiceSession.config(
+                    instructions: "Reply with one short word.",
+                    voice: s.voice,
+                    interrupt: true,
+                    transcribe: false
+                )
+            )
+            session.requestResponse("Say: hello.")
+            DispatchQueue.global().asyncAfter(deadline: .now() + 20) {
+                finish("实时语音 20 秒没回应（网络慢或模型 \(s.realtimeModel) 不可用）")
+            }
+        }
+    }
+
     /// Checks the key and address with a tiny request.
     static func testConnection() async -> String {
         let s = AICallSettings.shared
@@ -596,7 +653,7 @@ final class AICallAssistant: ObservableObject {
             let (_, response) = try await URLSession.shared.data(for: request)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
             switch code {
-            case 200: return "连接正常，可以用"
+            case 200: return await realtimeVoiceCheck()
             case 401: return "API Key 不对"
             case 404: return "这个 Key 用不了实时语音模型 \(s.realtimeModel)"
             default: return "服务器返回 \(code)"
