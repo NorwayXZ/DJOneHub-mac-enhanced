@@ -311,12 +311,22 @@ final class RealtimeVoiceSession: NSObject, @unchecked Sendable {
     ) -> [String: Any] {
         var input: [String: Any] = [
             "format": ["type": "audio/pcm", "rate": 24_000],
-            "turn_detection": [
-                "type": "server_vad",
-                "silence_duration_ms": 600,
-                "create_response": true,
-                "interrupt_response": interrupt,
-            ],
+            // The talking agent waits until the person has actually finished
+            // their thought (semantic VAD), which feels far less robotic than
+            // jumping in after a fixed silence. Interpreters keep fast server VAD.
+            "turn_detection": interrupt
+                ? [
+                    "type": "semantic_vad",
+                    "eagerness": "high",
+                    "create_response": true,
+                    "interrupt_response": true,
+                ] as [String: Any]
+                : [
+                    "type": "server_vad",
+                    "silence_duration_ms": 500,
+                    "create_response": true,
+                    "interrupt_response": false,
+                ] as [String: Any],
         ]
         if transcribe { input["transcription"] = ["model": "gpt-4o-mini-transcribe"] }
         return [
@@ -387,7 +397,8 @@ final class AICallAssistant: ObservableObject {
         }
         inbound.onHeard = { [weak self] t in Task { @MainActor in self?.add(.them, t) } }
         inbound.onSaid = { [weak self] t in Task { @MainActor in self?.attachChinese(t, to: .them) } }
-        outbound.onAudio = { [weak audio] pcm in audio?.sendAssistantSpeech(PCM.down3(pcm)) }
+        let outDecimator = PhoneDecimator()
+        outbound.onAudio = { [weak audio] pcm in audio?.sendAssistantSpeech(outDecimator.process(pcm)) }
         outbound.onHeard = { [weak self] t in Task { @MainActor in self?.add(.me, t) } }
         outbound.onSaid = { [weak self] t in Task { @MainActor in self?.add(.ai, t) } }
         for s in [inbound, outbound] {
@@ -437,14 +448,38 @@ final class AICallAssistant: ObservableObject {
               """
         let instructions = """
         \(task)
-        Speak \(language.id) by default. If the other person speaks a different language, \
-        switch to theirs. Speak like a natural, brief human caller: one or two sentences per \
-        turn, then let them talk. If asked whether you are an AI, say you are \(ownerText)'s AI \
-        assistant.
+
+        # Language
+        Speak \(language.id) by default. If the other person speaks a different language, switch \
+        to theirs and stay there.
+
+        # How you sound
+        You are on a real phone call. Sound like a relaxed, friendly person, not a customer-service \
+        bot or a voice assistant.
+        - Talk casually, with contractions and everyday words. Short sentences. Usually one thought \
+        per turn, then stop and let them talk.
+        - React before you answer, like people do: "oh, okay", "ah, got it", "mm, right", "oh nice". \
+        In Chinese: "嗯", "哦这样啊", "好的好的", "对对". Use them naturally, not every time.
+        - A small filler or self-correction now and then is fine ("um", "so, uh", "I mean"); never \
+        overdo it.
+        - Never recap or repeat back everything they said. Never say "I've noted that", "Thank you \
+        for your help", "Is there anything else I can help you with", "Certainly", "Absolutely", \
+        or "Great question". Don't over-thank and don't over-apologize.
+        - No lists, no formal summaries, no reading out structure. Just talk.
+        - Match their energy and pace. If they're brief, be brief. If they joke, it's fine to smile \
+        in your voice.
+        - Warm, natural intonation; speak at a normal conversational speed, a little faster than a \
+        news reader.
+        - If you didn't catch something, just ask like a person: "sorry, what was that?"
+        - End calls the way people do: a quick "okay, thanks, bye!" — not a speech.
+
+        Don't volunteer that you're an AI. If they ask directly, be honest: you're \(ownerText)'s \
+        AI assistant, then carry on naturally.
         """
         let s = RealtimeVoiceSession()
+        let decimator = PhoneDecimator()
         s.onAudio = { [weak audio] pcm in
-            audio?.sendAssistantSpeech(PCM.down3(pcm))
+            audio?.sendAssistantSpeech(decimator.process(pcm))
             audio?.playAssistant(pcm)
         }
         let heard = SpeakerGate()
@@ -468,8 +503,8 @@ final class AICallAssistant: ObservableObject {
             // Give them a moment to say "hello" first (that answer starts the
             // AI by itself); speak up only if the line stays quiet.
             let kick = screening
-                ? "Greet the caller briefly in \(language.id) as the assistant and ask who is calling and why."
-                : "The call just connected. Greet briefly in \(language.id) and state why you are calling."
+                ? "Pick up like a person would: a quick casual hello, say \(ownerText) can't come to the phone, and ask who's calling."
+                : "The call just connected and they're silent. Open like a real person would, in one breath: a quick casual hi, then why you're calling."
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak s] in
                 guard let s, !heard.isSpeaking else { return }
                 s.requestResponse(kick)
@@ -736,5 +771,51 @@ enum AICallLog {
                 try? data.write(to: url)
             }
         }
+    }
+}
+
+/// 24 kHz -> 8 kHz for the phone line with a proper low-pass first, so the AI's
+/// voice comes through clean instead of buzzy (plain averaging aliases).
+final class PhoneDecimator: @unchecked Sendable {
+    private static let taps: [Float] = {
+        let n = 31, fc: Float = 3_600 / 24_000
+        var h = [Float](repeating: 0, count: n)
+        for i in 0 ..< n {
+            let m = Float(i - n / 2)
+            let sinc = m == 0 ? 2 * fc : sin(2 * .pi * fc * m) / (.pi * m)
+            let w = 0.54 - 0.46 * cos(2 * .pi * Float(i) / Float(n - 1))
+            h[i] = sinc * w
+        }
+        let sum = h.reduce(0, +)
+        return h.map { $0 / sum }
+    }()
+    private let lock = NSLock()
+    private var history = [Float](repeating: 0, count: 30)
+    private var phase = 0
+
+    func process(_ data: Data) -> Data {
+        lock.lock(); defer { lock.unlock() }
+        let n = data.count / 2
+        guard n > 0 else { return Data() }
+        var x = history
+        x.reserveCapacity(history.count + n)
+        data.withUnsafeBytes { raw in
+            let s = raw.bindMemory(to: Int16.self)
+            for i in 0 ..< n { x.append(Float(Int16(littleEndian: s[i]))) }
+        }
+        let taps = Self.taps
+        var out: [Int16] = []
+        out.reserveCapacity(n / 3 + 1)
+        var i = history.count + phase
+        while i < x.count {
+            var acc: Float = 0
+            let start = i - (taps.count - 1)
+            for k in 0 ..< taps.count { acc += taps[k] * x[start + k] }
+            out.append(Int16(max(-32_768, min(32_767, acc))))
+            i += 3
+        }
+        phase = i - x.count
+        history = Array(x.suffix(30))
+        return out.withUnsafeBytes { Data($0) }
     }
 }
