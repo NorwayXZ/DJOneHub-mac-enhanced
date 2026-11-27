@@ -9,6 +9,21 @@ import Foundation
 final class VoiceAudioService {
     var onError: ((String) -> Void)?
 
+    /// Who the call audio goes to while an AI assistant is on the line.
+    enum AIRouting: Equatable {
+        /// Plain call: Mac microphone -> call, caller -> speaker.
+        case off
+        /// Interpreter: microphone -> AI only; caller ducked under the AI's Chinese.
+        case translate
+        /// AI talks for you: microphone muted; you hear both sides.
+        case agent
+    }
+
+    /// Caller audio, 8 kHz PCM16 mono, delivered off the main thread.
+    var onRemoteAudio: ((Data) -> Void)?
+    /// Microphone audio, 8 kHz PCM16 mono, delivered only while AI routing is on.
+    var onLocalAudio: ((Data) -> Void)?
+
     private struct DeferredUACCleanup {
         let pointer: OpaquePointer
         var lastCallbackSequence: UInt64
@@ -25,6 +40,12 @@ final class VoiceAudioService {
     private var activeUAC: OpaquePointer?
     private var engine: AVAudioEngine?
     private var player: AVAudioPlayerNode?
+    private var assistantPlayer: AVAudioPlayerNode?
+    private var aiRouting: AIRouting = .off
+    // Speech the AI sends into the call, paced out at 8 kHz by the IO loops.
+    private var assistantUplink = Data()
+    private let assistantUplinkLimit = 8_000 * 2 * 120
+    private var assistantPaceAt: UInt64 = 0
     private var running = false
     private var mediaEnabled = false
     private var pcmFlowReady = true
@@ -407,6 +428,59 @@ final class VoiceAudioService {
         stateLock.withLock { running }
     }
 
+    func setAIRouting(_ routing: AIRouting) {
+        stateLock.withLock { aiRouting = routing }
+        clearUploadBytes()
+        clearAssistantUplink()
+        playbackQueue.async { [weak self] in
+            guard let self else { return }
+            self.player?.volume = routing == .translate ? 0.18 : 1
+            if routing == .off { self.assistantPlayer?.stop(); self.assistantPlayer?.play() }
+        }
+    }
+
+    /// Queues 8 kHz PCM16 speech to be sent to the other party.
+    func sendAssistantSpeech(_ pcm: Data) {
+        guard !pcm.isEmpty else { return }
+        uploadLock.withLock {
+            assistantUplink.append(pcm)
+            if assistantUplink.count > assistantUplinkLimit {
+                assistantUplink.removeFirst(assistantUplink.count - assistantUplinkLimit)
+            }
+        }
+    }
+
+    /// Drops speech not yet sent, e.g. when the other party interrupts.
+    func clearAssistantUplink() {
+        uploadLock.withLock { assistantUplink.removeAll(keepingCapacity: true) }
+    }
+
+    /// Plays 24 kHz PCM16 mono AI speech on the Mac speaker.
+    func playAssistant(_ pcm: Data, sampleRate: Double = 24_000) {
+        playbackQueue.async { [weak self] in
+            guard let self, let node = self.assistantPlayer else { return }
+            let frames = pcm.count / 2
+            guard frames > 0,
+                  let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1),
+                  let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)),
+                  let out = buffer.floatChannelData?[0] else { return }
+            buffer.frameLength = AVAudioFrameCount(frames)
+            pcm.withUnsafeBytes { raw in
+                let samples = raw.bindMemory(to: Int16.self)
+                for i in 0 ..< frames { out[i] = Float(Int16(littleEndian: samples[i])) / 32_768 }
+            }
+            node.scheduleBuffer(buffer, completionHandler: nil)
+        }
+    }
+
+    /// Stops AI speech already queued on the speaker.
+    func stopAssistantPlayback() {
+        playbackQueue.async { [weak self] in
+            self?.assistantPlayer?.stop()
+            self?.assistantPlayer?.play()
+        }
+    }
+
     var isRecording: Bool { recorder.isRecording }
 
     func startRecording() throws -> String { try recorder.start() }
@@ -469,6 +543,13 @@ final class VoiceAudioService {
             )!
             engine.attach(player)
             engine.connect(player, to: engine.mainMixerNode, format: playbackFormat)
+            let assistant = AVAudioPlayerNode()
+            engine.attach(assistant)
+            engine.connect(
+                assistant,
+                to: engine.mainMixerNode,
+                format: AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1)!
+            )
 
             let input = engine.inputNode
             let voiceProcessingEnabled: Bool
@@ -497,8 +578,11 @@ final class VoiceAudioService {
             engine.prepare()
             try engine.start()
             player.play()
+            assistant.play()
+            player.volume = stateLock.withLock { aiRouting } == .translate ? 0.18 : 1
             self.engine = engine
             self.player = player
+            self.assistantPlayer = assistant
             return voiceProcessingEnabled
         }
     }
@@ -508,9 +592,11 @@ final class VoiceAudioService {
             if let engine {
                 engine.inputNode.removeTap(onBus: 0)
                 player?.stop()
+                assistantPlayer?.stop()
                 engine.stop()
             }
             self.player = nil
+            self.assistantPlayer = nil
             self.engine = nil
             scheduledPlaybackFrames = 0
         }
@@ -538,7 +624,7 @@ final class VoiceAudioService {
 
     private func resampleAndQueue(_ samples: [Float], sampleRate: Double, session: UInt64) {
         let state = stateLock.withLock {
-            (sessionGeneration == session, running, mediaEnabled, muted)
+            (sessionGeneration == session, running, mediaEnabled, muted, aiRouting)
         }
         guard state.0, state.1, state.2 else { return }
         if captureSampleRate != sampleRate {
@@ -572,7 +658,11 @@ final class VoiceAudioService {
             captureSamples.removeFirst(consumed)
             capturePosition -= Double(consumed)
         }
-        appendUploadBytes(pcm)
+        switch state.4 {
+        case .off: appendUploadBytes(pcm)
+        case .translate: if !state.3 { onLocalAudio?(pcm) }
+        case .agent: break
+        }
     }
 
     private func runUACLoop(_ uac: OpaquePointer, session: UInt64) -> String? {
@@ -759,6 +849,7 @@ final class VoiceAudioService {
             sessionGeneration == session && running && mediaEnabled
         }
         guard shouldPlay else { return }
+        onRemoteAudio?(pcm)
         playbackQueue.async { [weak self] in
             guard let self,
                   self.isActiveSession(session),
@@ -810,7 +901,15 @@ final class VoiceAudioService {
     }
 
     private func takeUploadChunkOrSilence() -> Data {
-        uploadLock.withLock {
+        let ai = stateLock.withLock { aiRouting } != .off
+        return uploadLock.withLock {
+            if ai {
+                let n = min(transmitChunkBytes, assistantUplink.count)
+                var chunk = Data(assistantUplink.prefix(n))
+                assistantUplink.removeFirst(n)
+                chunk.append(Data(repeating: 0, count: transmitChunkBytes - n))
+                return chunk
+            }
             if uploadBytes.count >= transmitChunkBytes {
                 let chunk = Data(uploadBytes.prefix(transmitChunkBytes))
                 uploadBytes.removeFirst(transmitChunkBytes)
@@ -825,7 +924,31 @@ final class VoiceAudioService {
 
     private func takeUploadSamples(into samples: inout [Int16]) -> Int {
         guard !samples.isEmpty else { return 0 }
+        let ai = stateLock.withLock { aiRouting } != .off
         return uploadLock.withLock {
+            if ai {
+                // Release AI speech at real-time 8 kHz pace; the loop runs
+                // every few ms, so hand over only the frames due since last time.
+                let now = DispatchTime.now().uptimeNanoseconds
+                if assistantPaceAt == 0 || now - assistantPaceAt > 200_000_000 {
+                    assistantPaceAt = now &- 20_000_000
+                }
+                let due = Int(Double(now - assistantPaceAt) * 8_000 / 1_000_000_000)
+                let frameCount = min(samples.count, assistantUplink.count / 2, due)
+                guard frameCount > 0 else {
+                    if assistantUplink.isEmpty { assistantPaceAt = now }
+                    return 0
+                }
+                assistantPaceAt &+= UInt64(Double(frameCount) * 1_000_000_000 / 8_000)
+                assistantUplink.withUnsafeBytes { raw in
+                    let b = raw.bindMemory(to: UInt8.self)
+                    for f in 0 ..< frameCount {
+                        samples[f] = Int16(bitPattern: UInt16(b[f * 2]) | UInt16(b[f * 2 + 1]) << 8)
+                    }
+                }
+                assistantUplink.removeFirst(frameCount * 2)
+                return frameCount
+            }
             let frameCount = min(
                 samples.count,
                 uploadBytes.count / MemoryLayout<Int16>.size

@@ -172,6 +172,7 @@ struct DialPadView: View {
     @EnvironmentObject private var contacts: ContactStore
     @AppStorage("dialCountry") private var dialCountry = "CN"
     @State private var pickingCountry = false
+    @State private var aiDialing = false
 
     /// The number the module will dial, with the chosen country's code.
     private var dialTarget: String { DialCountry.international(calls.numberInput, country: dialCountry) }
@@ -287,7 +288,21 @@ struct DialPadView: View {
                     }
                 }
                 HStack(spacing: 22) {
-                    Color.clear.frame(width: 76, height: 76)
+                    Button {
+                        aiDialing = true
+                    } label: {
+                        VStack(spacing: 2) {
+                            Image(systemName: "sparkles")
+                                .font(.system(size: 22, weight: .semibold))
+                            Text(L10n.t("AI 代打")).font(.caption2)
+                        }
+                        .foregroundStyle(.purple)
+                        .frame(width: 76, height: 76)
+                    }
+                    .buttonStyle(.plain)
+                    .help(L10n.t("告诉 AI 要办什么事，让它用对方的语言替你打"))
+                    .disabled(calls.numberInput.trimmingCharacters(in: .whitespaces).isEmpty || calls.isDialing)
+                    .opacity(calls.numberInput.trimmingCharacters(in: .whitespaces).isEmpty ? 0.4 : 1)
                     Button {
                         dialNow()
                     } label: {
@@ -328,6 +343,7 @@ struct DialPadView: View {
         }
         .padding(.bottom, 16)
         .modifier(DialKeyboardMonitor(onKey: handleDialKey))
+        .sheet(isPresented: $aiDialing) { AIDialSheet(number: dialTarget) }
     }
 
     private func handleDialKey(_ key: String) {
@@ -2026,6 +2042,9 @@ private struct SettingsView: View {
                     MoreSectionTitle(L10n.t("状态"))
                     DeviceStatusCard()
 
+                    MoreSectionTitle("AI 通话助手")
+                    AICallSettingsCard().modifier(PhoneCard())
+
                     MoreSectionTitle("通话支持")
                     ModuleSetupCard()
 
@@ -2612,6 +2631,7 @@ private struct RecordingSection: View {
 
 struct CallActiveView: View {
     @EnvironmentObject private var calls: CallCenter
+    @EnvironmentObject private var ai: AICallAssistant
     @EnvironmentObject private var contacts: ContactStore
     let call: CallRecord
     @State private var showKeypad = false
@@ -2673,6 +2693,10 @@ struct CallActiveView: View {
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 30)
             }
+            if inCall || !ai.captions.isEmpty {
+                AICallPanel(connected: call.state == "active")
+                    .padding(.top, 4)
+            }
             if inCall {
                 // Its own clock: the call screen redraws more often than once
                 // a second, which kept restarting a timer kept in the body.
@@ -2695,6 +2719,11 @@ struct CallActiveView: View {
                 HStack(spacing: 44) {
                     CallRoundButton(icon: "phone.down.fill", tint: .red, label: L10n.t("拒接"), filled: true) {
                         calls.reject()
+                    }
+                    if call.audioWarning == nil {
+                        CallRoundButton(icon: "sparkles", tint: .purple, label: L10n.t("让 AI 接"), filled: true) {
+                            calls.answerWithAI()
+                        }
                     }
                     CallRoundButton(icon: "phone.fill", tint: PhoneStyle.green, label: L10n.t("接听"), filled: true) {
                         calls.answer()

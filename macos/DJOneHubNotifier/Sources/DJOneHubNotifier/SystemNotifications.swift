@@ -131,6 +131,20 @@ final class SystemNotifications: NSObject, ObservableObject, UNUserNotificationC
         }
     }
 
+    /// The live instance, for helpers that are not views (the call AI).
+    static weak var shared: SystemNotifications?
+
+    func post(title: String, body: String) {
+        Task {
+            guard await authorize(), enabled else { return }
+            let content = UNMutableNotificationContent()
+            content.title = title
+            content.body = body
+            content.userInfo = ["destination": "phone"]
+            await deliver(id: "djonehub.ai.\(UUID().uuidString)", content: content)
+        }
+    }
+
     func postUsageAlert(title: String, body: String) {
         Task {
             guard await authorize(), enabled else { return }

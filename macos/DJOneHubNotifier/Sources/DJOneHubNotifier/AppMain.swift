@@ -135,6 +135,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         healthCheck = arguments.contains("--health-check")
         reviewSafe = arguments.contains("--review-safe")
         callCenter = CallCenter(api: api)
+        SystemNotifications.shared = systemNotifications
         contactStore = ContactStore()
         panel = NotifierPanel()
         panel.contactStore = contactStore
@@ -1003,6 +1004,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if mainWindow == nil {
             let rootView = PhoneAppView()
                 .environmentObject(callCenter)
+                .environmentObject(callCenter.ai)
+                .environmentObject(AICallSettings.shared)
                 .environmentObject(contactStore)
                 .environmentObject(ringtoneStore)
                 .environmentObject(appSettings)

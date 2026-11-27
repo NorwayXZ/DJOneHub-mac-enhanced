@@ -23,6 +23,10 @@ final class CallCenter: ObservableObject {
     private var maVoAudioStarting = false
     private var maVoAudioCallID: String?
     private var maVoHostRegistered = false
+    /// The call AI (interpreter / talks for you).
+    let ai = AICallAssistant()
+    private var aiScreenPending = false
+    private var autoScreenTask: Task<Void, Never>?
 
     /// 新来电（呼入且响铃/等待）时回调，用于弹窗/聚焦主窗口。
     var onIncoming: ((CallRecord) -> Void)?
@@ -73,6 +77,9 @@ final class CallCenter: ObservableObject {
             history = status.history ?? []
 
             if status.active == nil, previousID != nil {
+                ai.callEnded()
+                aiScreenPending = false
+                autoScreenTask?.cancel()
                 if isRecording { maVoAudio.stopRecording { _ in } }
                 isRecording = false
                 maVoAudio.stop()
@@ -90,6 +97,7 @@ final class CallCenter: ObservableObject {
                active.id != lastActiveID {
                 lastActiveID = active.id
                 onIncoming?(active)
+                scheduleAutoScreen(for: active)
             } else if status.active == nil {
                 lastActiveID = nil
             }
@@ -148,6 +156,7 @@ final class CallCenter: ObservableObject {
     }
 
     func hangup() {
+        ai.callEnded()
         isMuted = false
         if isRecording { maVoAudio.stopRecording { _ in } }
         isRecording = false
@@ -219,6 +228,7 @@ final class CallCenter: ObservableObject {
                         case .success:
                             self.maVoAudio.setMediaEnabled(true)
                             self.lastActionError = nil
+                            self.startPendingAI(for: call)
                         case .failure(let message):
                             self.lastActionError = "MaVo 音频启动失败：\(message)"
                             self.maVoAudioCallID = nil
@@ -252,6 +262,68 @@ final class CallCenter: ObservableObject {
         guard let call = activeCall else { return 0 }
         let end = call.endedAt ?? now
         return max(0, end.timeIntervalSince(call.startedAt))
+    }
+
+    // MARK: - Call AI
+
+    /// Dial and let the AI talk once the other side picks up.
+    func dialWithAI(_ number: String, goal: String, language: CallLanguage) {
+        ai.pendingGoal = goal
+        ai.pendingLanguage = language
+        dial(number)
+    }
+
+    /// Answer an incoming call and let the AI ask who it is.
+    func answerWithAI() {
+        aiScreenPending = true
+        answer()
+    }
+
+    func startAITranslate() {
+        guard let call = activeCall else { return }
+        ai.startTranslate(callID: call.id, number: call.number, audio: maVoAudio)
+    }
+
+    func startAIAgent(goal: String) {
+        guard let call = activeCall else { return }
+        ai.startAgent(callID: call.id, number: call.number, goal: goal, screening: false,
+                      audio: maVoAudio, speakFirst: true)
+    }
+
+    func aiTakeOver() {
+        ai.takeOver()
+        isMuted = false
+        maVoAudio.setMuted(false)
+    }
+
+    private func startPendingAI(for call: CallRecord) {
+        if aiScreenPending {
+            aiScreenPending = false
+            ai.language = CallLanguage.guess(for: call.number)
+            ai.startAgent(callID: call.id, number: call.number, goal: "", screening: true,
+                          audio: maVoAudio, speakFirst: true)
+        } else if let goal = ai.pendingGoal, call.direction != "incoming" {
+            ai.language = ai.pendingLanguage ?? CallLanguage.guess(for: call.number)
+            ai.pendingGoal = nil
+            ai.startAgent(callID: call.id, number: call.number, goal: goal, screening: false,
+                          audio: maVoAudio, speakFirst: true)
+        } else {
+            ai.language = CallLanguage.guess(for: call.number)
+        }
+    }
+
+    /// With "AI 自动接听" on, the AI picks up after a few rings.
+    private func scheduleAutoScreen(for call: CallRecord) {
+        autoScreenTask?.cancel()
+        guard AICallSettings.shared.autoScreenIncoming, AICallSettings.shared.isConfigured,
+              call.audioWarning == nil else { return }
+        autoScreenTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(6))
+            guard let self, !Task.isCancelled,
+                  let now = self.activeCall, now.id == call.id,
+                  now.state == "incoming" || now.state == "waiting" else { return }
+            self.answerWithAI()
+        }
     }
 
     func dialNumber(_ number: String) {
