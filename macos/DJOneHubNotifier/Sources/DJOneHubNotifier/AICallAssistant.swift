@@ -9,7 +9,7 @@ import SwiftUI
 final class AICallSettings: ObservableObject {
     static let shared = AICallSettings()
 
-    @Published var apiKey: String { didSet { Keychain.set(apiKey, for: "openai-api-key") } }
+    @Published var apiKey: String { didSet { KeyFile.write(apiKey) } }
     @AppStorage("ai.baseURL") var baseURL = "https://api.openai.com"
     @AppStorage("ai.realtimeModel") var realtimeModel = "gpt-realtime-2.1"
     @AppStorage("ai.textModel") var textModel = "gpt-5.4-mini"
@@ -20,7 +20,17 @@ final class AICallSettings: ObservableObject {
     var isConfigured: Bool { !apiKey.trimmingCharacters(in: .whitespaces).isEmpty }
 
     private init() {
-        apiKey = Keychain.get("openai-api-key") ?? ""
+        // A private file, not the keychain: keychain items made by an app are
+        // tied to its signature, so every update popped an "allow" dialog.
+        if let saved = KeyFile.read() {
+            apiKey = saved
+        } else if let old = Keychain.get("openai-api-key"), !old.isEmpty {
+            apiKey = old
+            KeyFile.write(old)
+            Keychain.set("", for: "openai-api-key")
+        } else {
+            apiKey = ""
+        }
     }
 
     var trimmedBase: String {
@@ -30,6 +40,32 @@ final class AICallSettings: ObservableObject {
         // The OpenAI website address is easy to paste by mistake.
         base = base.replacingOccurrences(of: "platform.openai.com", with: "api.openai.com")
         return base.isEmpty ? "https://api.openai.com" : base
+    }
+}
+
+/// The AI key in Application Support, readable only by this user (0600).
+enum KeyFile {
+    private static var url: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/DJOneHub/ai-call.key")
+    }
+
+    static func read() -> String? {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        let key = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return key.isEmpty ? nil : key
+    }
+
+    static func write(_ key: String) {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            try? FileManager.default.removeItem(at: url)
+            return
+        }
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: url.path, contents: Data(trimmed.utf8),
+                                       attributes: [.posixPermissions: 0o600])
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 }
 
@@ -307,26 +343,22 @@ final class RealtimeVoiceSession: NSObject, @unchecked Sendable {
         instructions: String,
         voice: String,
         interrupt: Bool,
-        transcribe: Bool = true
+        transcribe: Bool = true,
+        eagerness: String = "high"
     ) -> [String: Any] {
         var input: [String: Any] = [
             "format": ["type": "audio/pcm", "rate": 24_000],
             // The talking agent waits until the person has actually finished
             // their thought (semantic VAD), which feels far less robotic than
             // jumping in after a fixed silence. Interpreters keep fast server VAD.
-            "turn_detection": interrupt
-                ? [
-                    "type": "semantic_vad",
-                    "eagerness": "high",
-                    "create_response": true,
-                    "interrupt_response": true,
-                ] as [String: Any]
-                : [
-                    "type": "server_vad",
-                    "silence_duration_ms": 500,
-                    "create_response": true,
-                    "interrupt_response": false,
-                ] as [String: Any],
+            // Interpreters too: translating half a thought is what makes it
+            // sound broken, so they wait for the speaker to finish (eagerness).
+            "turn_detection": [
+                "type": "semantic_vad",
+                "eagerness": eagerness,
+                "create_response": true,
+                "interrupt_response": interrupt,
+            ] as [String: Any],
         ]
         if transcribe { input["transcription"] = ["model": "gpt-4o-mini-transcribe"] }
         return [
@@ -383,10 +415,10 @@ final class AICallAssistant: ObservableObject {
         let inbound = RealtimeVoiceSession()
         let outbound = RealtimeVoiceSession()
         let base = """
-        You are a live phone interpreter. You never take part in the conversation, \
-        never answer questions, never add comments or greetings. You only repeat \
-        what you just heard, translated, in a natural spoken style, keeping names, \
-        numbers, dates and addresses exact.
+        You are a skilled live phone interpreter between your client and the other person. \
+        You never take part in the conversation yourself: never answer questions, never add \
+        comments, greetings or "they said". You speak only the translation, in first person, \
+        sounding like a real person on the phone — natural, warm, not robotic.
         """
         // While the Chinese translation plays on the speaker, the microphone
         // would hear it; hold the mic back so it isn't translated again.
@@ -408,8 +440,23 @@ final class AICallAssistant: ObservableObject {
         audio.onLocalAudio = { [weak outbound] pcm in
             if !gate.isSpeaking { outbound?.appendAudio8k(pcm) }
         }
-        connect(inbound, instructions: base + "\nTranslate everything you hear into Simplified Chinese (Mandarin).", interrupt: false)
-        connect(outbound, instructions: base + "\nThe speaker talks Chinese. Translate everything into \(lang).", interrupt: false)
+        connect(inbound, instructions: base + """
+
+            Translate what the other person says into natural spoken Simplified Chinese (Mandarin) \
+            for your client. Convey the meaning faithfully and completely, in the way a Chinese \
+            speaker would actually say it; skip their filler words and false starts.
+            """, interrupt: false, eagerness: "medium")
+        connect(outbound, instructions: base + """
+
+            Your client speaks Chinese, often thinking aloud: pauses, "这个", "那个", "就是", "嗯", \
+            repeating themselves, changing their mind mid-sentence. Work out what they actually \
+            mean, then say it in clear, natural, fluent \(lang) the way a native speaker would \
+            put it — complete and polite, not word for word. Drop fillers, hesitations and \
+            repetitions; when they correct themselves, use only the corrected version. Keep every \
+            fact exact (names, numbers, dates, times, addresses, prices). Don't add information \
+            they didn't give, and don't answer for them. If what they said is too unclear to \
+            translate, say nothing rather than guess.
+            """, interrupt: false, eagerness: "low")
         sessions = [inbound, outbound]
         audio.setAIRouting(.translate)
         mode = .translate
@@ -577,7 +624,8 @@ final class AICallAssistant: ObservableObject {
         return true
     }
 
-    private func connect(_ s: RealtimeVoiceSession, instructions: String, interrupt: Bool) {
+    private func connect(_ s: RealtimeVoiceSession, instructions: String, interrupt: Bool,
+                         eagerness: String = "high") {
         AICallLog.write("timing: AI connecting")
         s.connect(
             base: settings.trimmedBase,
@@ -586,7 +634,8 @@ final class AICallAssistant: ObservableObject {
             session: RealtimeVoiceSession.config(
                 instructions: instructions,
                 voice: settings.voice,
-                interrupt: interrupt
+                interrupt: interrupt,
+                eagerness: eagerness
             )
         )
     }

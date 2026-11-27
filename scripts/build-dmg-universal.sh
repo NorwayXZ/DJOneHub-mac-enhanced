@@ -69,6 +69,19 @@ for arch in arm64 x86_64; do
   lipo "${BUILD_ROOT}/DJOneHubNotifier-universal" -verify_arch "${arch}"
 done
 
+# A fixed signing identity keeps macOS permissions (microphone, keychain)
+# across updates; an ad-hoc signature looks like a new app on every build.
+# DJONEHUB_SIGN_ID overrides; otherwise use "Local Code Sign" when present.
+SIGN_ID="${DJONEHUB_SIGN_ID:-}"
+if [[ -z "${SIGN_ID}" ]]; then
+  if security find-identity -v -p codesigning 2>/dev/null | grep -q '"Local Code Sign"'; then
+    SIGN_ID="Local Code Sign"
+  else
+    SIGN_ID="-"
+  fi
+fi
+echo "==> signing identity: ${SIGN_ID}"
+
 echo "==> 3/4 组装安装目录"
 rm -rf "${PARTS}" "${STAGE}"
 mkdir -p "${PARTS}/DJOneHubNotifier.app/Contents/MacOS" "${PARTS}/DJOneHubNotifier.app/Contents/Resources"
@@ -77,7 +90,7 @@ cp "${BUILD_ROOT}/DJOneHubNotifier-universal" "${PARTS}/DJOneHubNotifier.app/Con
 cp "${NOTIFIER_SRC}/Info.plist" "${PARTS}/DJOneHubNotifier.app/Contents/Info.plist"
 cp "${NOTIFIER_SRC}/Resources/AppIcon.icns" "${PARTS}/DJOneHubNotifier.app/Contents/Resources/AppIcon.icns"
 chmod 755 "${PARTS}/DJOneHubNotifier.app/Contents/MacOS/DJOneHubNotifier"
-codesign --force --deep --sign - "${PARTS}/DJOneHubNotifier.app"
+codesign --force --deep --sign "${SIGN_ID}" "${PARTS}/DJOneHubNotifier.app"
 codesign --verify --deep --strict "${PARTS}/DJOneHubNotifier.app"
 plutil -lint "${PARTS}/DJOneHubNotifier.app/Contents/Info.plist"
 for binary in \
@@ -98,7 +111,7 @@ ditto --norsrc --noextattr --noqtn --noacl "${PARTS}/DJOneHubNotifier.app" "${LA
 ditto --norsrc --noextattr --noqtn --noacl "${PARTS}/djonehub" "${LAUNCHER}/Contents/Resources/djonehub"
 cp "${ROOT_DIR}/scripts/dmg/install.sh" "${LAUNCHER}/Contents/Resources/install.sh"
 chmod 755 "${LAUNCHER}/Contents/Resources/install.sh"
-codesign --force --deep --sign - "${LAUNCHER}"
+codesign --force --deep --sign "${SIGN_ID}" "${LAUNCHER}"
 codesign --verify --deep --strict "${LAUNCHER}"
 ln -s /Applications "${STAGE}/Applications"
 cp "${ROOT_DIR}/scripts/dmg/卸载 DJOneHub.command" "${STAGE}/卸载 DJOneHub.command"

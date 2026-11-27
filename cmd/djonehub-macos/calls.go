@@ -99,9 +99,24 @@ func (a *app) startCallPoller(ctx context.Context) {
 			if err := a.pollCallOnce(); err != nil {
 				log.Printf("call poll failed: %v", err)
 			}
-			timer.Reset(interval)
+			timer.Reset(a.nextCallPoll(interval))
 		}
 	}
+}
+
+// nextCallPoll checks often while a call is ringing so a pickup is noticed
+// within half a second (the AI and the audio start from that moment), and
+// falls back to the normal interval otherwise.
+func (a *app) nextCallPoll(normal time.Duration) time.Duration {
+	a.callMu.RLock()
+	defer a.callMu.RUnlock()
+	if a.activeCall != nil {
+		switch a.activeCall.State {
+		case "dialing", "alerting", "incoming", "waiting":
+			return 500 * time.Millisecond
+		}
+	}
+	return normal
 }
 
 func (a *app) pollCallOnce() error {

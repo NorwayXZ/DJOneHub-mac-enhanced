@@ -41,7 +41,13 @@ final class CallCenter: ObservableObject {
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.pollOnce()
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                // While a call is ringing, look more often so the pickup (and
+                // the AI's first words) aren't held back by the poll interval.
+                let ringing = await MainActor.run { () -> Bool in
+                    guard let state = self?.activeCall?.state else { return false }
+                    return ["dialing", "alerting", "incoming", "waiting"].contains(state)
+                }
+                try? await Task.sleep(nanoseconds: ringing ? 300_000_000 : 1_000_000_000)
             }
         }
     }
