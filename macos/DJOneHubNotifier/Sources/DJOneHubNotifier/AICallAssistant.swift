@@ -423,10 +423,71 @@ final class AICallAssistant: ObservableObject {
         goal: String,
         screening: Bool,
         audio: VoiceAudioService,
-        speakFirst: Bool
+        speakFirst: Bool,
+        lateStart: Bool = false
     ) {
         guard prepare(callID: callID, number: number, audio: audio) else { return }
         self.goal = goal
+        let agent: AgentSession
+        if let warm = prewarmed, warm.goal == goal, warm.screening == screening {
+            agent = warm
+            AICallLog.write("timing: using prewarmed AI session")
+        } else {
+            prewarmed?.session.close()
+            agent = makeAgent(goal: goal, screening: screening, audio: audio)
+        }
+        prewarmed = nil
+        let s = agent.session
+        audio.onRemoteAudio = { [weak s] pcm in s?.appendAudio8k(pcm) }
+        audio.onLocalAudio = nil
+        sessions = [s]
+        audio.setAIRouting(.agent)
+        mode = .agent
+        status = screening ? "AI 正在替你接听，问清对方是谁、什么事" : "AI 正在替你通话"
+        if speakFirst {
+            // Give them a moment to say "hello" first (that answer starts the
+            // AI by itself); speak up only if the line stays quiet. When the
+            // audio came up late they have most likely said hello already.
+            let kick = screening
+                ? "Pick up like a person would: a quick casual hello, say \(agent.ownerText) can't come to the phone, and ask who's calling."
+                : lateStart
+                    ? "The call connected a few seconds ago and they already said hello. Jump in naturally, in one breath: a quick casual hi, then why you're calling."
+                    : "The call just connected and they're silent. Open like a real person would, in one breath: a quick casual hi, then why you're calling."
+            let heard = agent.heard
+            DispatchQueue.main.asyncAfter(deadline: .now() + (lateStart ? 0.3 : 2.0)) { [weak s] in
+                guard let s, !heard.isSpeaking else { return }
+                s.requestResponse(kick)
+            }
+        }
+    }
+
+    /// Connects the agent while the phone is still ringing, so it is ready
+    /// the moment they pick up.
+    func prewarmAgent(goal: String, language: CallLanguage, audio: VoiceAudioService) {
+        guard settings.isConfigured, prewarmed == nil else { return }
+        self.language = language
+        prewarmed = makeAgent(goal: goal, screening: false, audio: audio)
+        AICallLog.write("timing: prewarming AI while ringing")
+    }
+
+    func dropPrewarmed() {
+        prewarmed?.session.close()
+        prewarmed = nil
+    }
+
+    var hasPrewarmed: Bool { prewarmed != nil }
+
+    private struct AgentSession {
+        let session: RealtimeVoiceSession
+        let heard: SpeakerGate
+        let goal: String
+        let screening: Bool
+        let ownerText: String
+    }
+
+    private var prewarmed: AgentSession?
+
+    private func makeAgent(goal: String, screening: Bool, audio: VoiceAudioService) -> AgentSession {
         let owner = settings.ownerName.trimmingCharacters(in: .whitespaces)
         let ownerText = owner.isEmpty ? "the owner of this phone" : owner
         let task = screening
@@ -492,24 +553,8 @@ final class AICallAssistant: ObservableObject {
         s.onHeard = { [weak self] t in Task { @MainActor in self?.add(.them, t, translate: true) } }
         s.onSaid = { [weak self] t in Task { @MainActor in self?.add(.ai, t, translate: true) } }
         s.onError = { [weak self] e in Task { @MainActor in self?.fail(e) } }
-        audio.onRemoteAudio = { [weak s] pcm in s?.appendAudio8k(pcm) }
-        audio.onLocalAudio = nil
         connect(s, instructions: instructions, interrupt: true)
-        sessions = [s]
-        audio.setAIRouting(.agent)
-        mode = .agent
-        status = screening ? "AI 正在替你接听，问清对方是谁、什么事" : "AI 正在替你通话"
-        if speakFirst {
-            // Give them a moment to say "hello" first (that answer starts the
-            // AI by itself); speak up only if the line stays quiet.
-            let kick = screening
-                ? "Pick up like a person would: a quick casual hello, say \(ownerText) can't come to the phone, and ask who's calling."
-                : "The call just connected and they're silent. Open like a real person would, in one breath: a quick casual hi, then why you're calling."
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak s] in
-                guard let s, !heard.isSpeaking else { return }
-                s.requestResponse(kick)
-            }
-        }
+        return AgentSession(session: s, heard: heard, goal: goal, screening: screening, ownerText: ownerText)
     }
 
     private func prepare(callID: String, number: String?, audio: VoiceAudioService) -> Bool {
@@ -533,6 +578,7 @@ final class AICallAssistant: ObservableObject {
     }
 
     private func connect(_ s: RealtimeVoiceSession, instructions: String, interrupt: Bool) {
+        AICallLog.write("timing: AI connecting")
         s.connect(
             base: settings.trimmedBase,
             model: settings.realtimeModel,
@@ -557,6 +603,7 @@ final class AICallAssistant: ObservableObject {
 
     /// The call ended.
     func callEnded() {
+        dropPrewarmed()
         let wasAgent = mode == .agent
         stopSessions()
         if wasAgent, captions.contains(where: { $0.speaker == .them }) { summarize() }

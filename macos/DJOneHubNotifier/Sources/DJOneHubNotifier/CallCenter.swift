@@ -27,6 +27,7 @@ final class CallCenter: ObservableObject {
     let ai = AICallAssistant()
     private var aiScreenPending = false
     private var autoScreenTask: Task<Void, Never>?
+    private var activeSeenAt: Date?
 
     /// 新来电（呼入且响铃/等待）时回调，用于弹窗/聚焦主窗口。
     var onIncoming: ((CallRecord) -> Void)?
@@ -105,7 +106,18 @@ final class CallCenter: ObservableObject {
                 isMuted = false
             }
             if let active = status.active, active.state == "active" {
+                if activeSeenAt == nil { activeSeenAt = Date() }
                 startMaVoAudioIfNeeded(for: active)
+            } else {
+                activeSeenAt = nil
+            }
+            // Outgoing AI call still ringing: get the AI connected now.
+            if let active = status.active, active.direction != "incoming",
+               active.state == "dialing" || active.state == "alerting",
+               let goal = ai.pendingGoal, !ai.hasPrewarmed {
+                ai.prewarmAgent(goal: goal,
+                                language: ai.pendingLanguage ?? CallLanguage.guess(for: active.number),
+                                audio: maVoAudio)
             }
         } catch {
             isOnline = false
@@ -201,6 +213,7 @@ final class CallCenter: ObservableObject {
 
     private func startMaVoAudioIfNeeded(for call: CallRecord) {
         guard !maVoAudio.isRunning, !maVoAudioStarting, maVoAudioCallID != call.id else { return }
+        AICallLog.write("timing: call active seen, starting audio")
         maVoAudioStarting = true
         maVoAudioCallID = call.id
         // Keep MaVo's ordering: acquire microphone permission before creating
@@ -216,7 +229,9 @@ final class CallCenter: ObservableObject {
             }
             Task {
                 do {
+                    AICallLog.write("timing: mic ok, waiting for route")
                     let config = try await self.waitForMaVoRoute()
+                    AICallLog.write("timing: route ready, opening UAC")
                     self.maVoAudio.startUAC(
                         vendorID: config.vendorID,
                         productID: config.productID,
@@ -224,6 +239,7 @@ final class CallCenter: ObservableObject {
                     ) { [weak self] result in
                         guard let self else { return }
                         self.maVoAudioStarting = false
+                        AICallLog.write("timing: UAC result \(result)")
                         switch result {
                         case .success:
                             self.maVoAudio.setMediaEnabled(true)
@@ -297,6 +313,7 @@ final class CallCenter: ObservableObject {
     }
 
     private func startPendingAI(for call: CallRecord) {
+        let late = activeSeenAt.map { Date().timeIntervalSince($0) > 2 } ?? false
         if aiScreenPending {
             aiScreenPending = false
             ai.language = CallLanguage.guess(for: call.number)
@@ -306,7 +323,7 @@ final class CallCenter: ObservableObject {
             ai.language = ai.pendingLanguage ?? CallLanguage.guess(for: call.number)
             ai.pendingGoal = nil
             ai.startAgent(callID: call.id, number: call.number, goal: goal, screening: false,
-                          audio: maVoAudio, speakFirst: true)
+                          audio: maVoAudio, speakFirst: true, lateStart: late)
         } else {
             ai.language = CallLanguage.guess(for: call.number)
         }
