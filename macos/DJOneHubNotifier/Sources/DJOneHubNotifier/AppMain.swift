@@ -87,6 +87,17 @@ enum SelfTest {
         let loudSamples: [Int16] = [10_000, -10_000, 10_000, -10_000]
         let loudRMS = PCM.rms16(loudSamples.withUnsafeBytes { Data($0) })
         precondition(loudRMS > 0.25)
+        // Verify native AudioToolbox 48 kHz Opus codec round-trip (24 kHz PCM <-> Opus)
+        if let opus = NativeOpusCodec() {
+            var tone24k = [Int16](repeating: 0, count: 960) // 40 ms @ 24 kHz -> 2 Opus frames
+            for i in 0 ..< tone24k.count {
+                tone24k[i] = Int16(12_000.0 * sin(2.0 * .pi * 440.0 * Double(i) / 24_000.0)).littleEndian
+            }
+            let pkts = opus.encode24k(tone24k.withUnsafeBytes { Data($0) })
+            precondition(pkts.count == 2)
+            let decoded = opus.decodeTo24k(pkts[1])
+            precondition(decoded != nil && PCM.rms16(decoded!) > 0.1)
+        }
         print("DJOneHubNotifier self-test passed")
     }
 }

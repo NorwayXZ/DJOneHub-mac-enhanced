@@ -1,5 +1,12 @@
 # 更新记录
 
+## 2026-11-29 · v1.3.0-proxy-preview.12 — 96（蜂窝代理）
+
+- **全面升级 WebRTC UDP 通道（替代 WebSocket）**：内置纯 Go WebRTC 媒体桥（`pion/webrtc`）+ macOS 原生 AudioToolbox 48 kHz Opus 编解码，直接通过低延迟 UDP 连 OpenAI，不卡顿、省带宽，遇到限制 UDP 的网络自动无缝回退 WebSocket；上行缓冲压紧至 120 ms。
+- **默认切回 ChatGPT 旗舰真人声（`gpt-realtime-2.1` + WebRTC）**：声音像真人一样自然温暖（可选 `cedar` / `marin` 等音色），采用 280 ms 快速停顿判定和地道口语同传提示词，告别生硬逐字机翻。
+- **彻底修好中文被错认成日语/俄语 & 聊天气泡错位**：你这边的麦克风严格锁定中文识别（`gpt-4o-transcribe` + `language=zh`），不再把“你好”听成“こんにちは”；聊天气泡改为严格先进先出配对，延迟到达的译文不会再贴到下一句话上。
+- **新增「极速三段接力」引擎（听写 → 意译 → 超拟真人声）**：支持 Deepgram Nova-3（留空则用 OpenAI 锁定语种听写）→ `gpt-5.4-nano`（或自定义 Groq / Cerebras 等极速地址，按子句流式翻译）→ Cartesia Sonic / ElevenLabs Flash v2.5 / OpenAI `gpt-4o-mini-tts` 真人流式播报，不配第三方 Key 也能立刻用，配了更飞快。
+
 ## 2026-11-29 · v1.3.0-proxy-preview.12 — 95（蜂窝代理）
 
 - 修复同声传译模式下说中文客户听不到英文声音：OpenAI 同传接口在没人说话时也会持续发 0.4 秒一段的纯静音音频包，导致外放防回声闸门一直误以为扬声器正在播中文、把你的麦克风整场通话都锁成了静音；同时也避免了静音包堆积在发给客户的外语队列里造成额外延迟。

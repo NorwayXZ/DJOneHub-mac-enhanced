@@ -121,8 +121,7 @@ struct AICallPanel: View {
                     Button {
                         calls.startAITranslate()
                     } label: {
-                        Label(aiSettings.usesSimultaneous ? "开启 AI 同传" : "开启 AI 翻译",
-                              systemImage: "waveform.and.mic")
+                        Label("开启 AI 同传", systemImage: "waveform.and.mic")
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(PhoneStyle.green)
@@ -196,9 +195,7 @@ struct AICallWorkspaceView: View {
                         ScrollView {
                             LazyVStack(alignment: .leading, spacing: 10) {
                                 if ai.captions.isEmpty {
-                                    Text(ai.isSimultaneousActive
-                                         ? "同声传译已就绪：你直接说中文，客户那边 1–2 秒内就能听到\(ai.language.name)；客户开口后中文也会实时显示在这里。"
-                                         : "等待对话开始…")
+                                    Text("AI 同传已就绪（\(ai.activeEngineBadge)）：你直接说中文，客户那边马上听到地道\(ai.language.name)；客户开口后中文也会实时显示在这里。")
                                         .font(.callout)
                                         .foregroundStyle(.secondary)
                                         .padding(.top, 20)
@@ -517,23 +514,23 @@ struct AICallSettingsCard: View {
     @State private var showingHistory = false
     @State private var showAdvancedModels = false
 
-    private let voices = ["marin", "cedar", "alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse"]
+    private let voices = ["cedar", "marin", "ash", "coral", "sage", "verse", "alloy", "ballad", "echo", "shimmer"]
     private let geminiVoices = ["Kore", "Aoede", "Leda", "Zephyr", "Puck", "Charon", "Fenrir", "Orus"]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("打电话时让 AI 做同声传译（边说边翻），并自动把聊过的内容实时总结成中文谈话概要。")
+            Text("打电话时让 AI 用真人般自然的口语同声传译，并自动把聊过的内容实时总结成中文谈话概要。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
             row("AI 引擎") {
                 Picker("", selection: $aiSettings.provider) {
-                    Text("OpenAI（支持同传）").tag("openai")
-                    Text("Gemini（逐句）").tag("gemini")
+                    Text("OpenAI（推荐）").tag("openai")
+                    Text("Gemini Live").tag("gemini")
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(width: 260)
+                .frame(width: 240)
                 Spacer()
             }
 
@@ -567,45 +564,122 @@ struct AICallSettingsCard: View {
                     TextField("https://api.openai.com", text: $aiSettings.baseURL)
                         .textFieldStyle(.roundedBorder)
                 }
-                row("翻译方式") {
-                    Picker("", selection: $aiSettings.translateStyle) {
-                        Text("同声传译（边说边翻 · 推荐）").tag("simultaneous")
-                        Text("逐句翻译（说完再翻，整理语句）").tag("turn")
+                row("翻译模式") {
+                    Picker("", selection: $aiSettings.translateEngine) {
+                        Text("ChatGPT 真人声 · WebRTC（最自然 · 推荐）").tag("realtime_webrtc")
+                        Text("极速三段接力（听写→意译→超拟真人声）").tag("cascade")
+                        Text("OpenAI 同传模型 · WebRTC（边说边翻）").tag("simultaneous_webrtc")
                     }
                     .labelsHidden()
-                    .frame(width: 260)
+                    .frame(width: 300)
                     Spacer()
                 }
-                if aiSettings.usesSimultaneous {
-                    Text("同声传译使用 OpenAI 专用同传模型（gpt-realtime-translate），会自动贴近说话人自己的音色语气，并启用官方降噪与 24 kHz 高清麦克风输入。")
+
+                if aiSettings.translateEngine == "realtime_webrtc" {
+                    Text("使用 ChatGPT 旗舰语音模型（gpt-realtime-2.1），走低延迟 WebRTC UDP 通道，人声最像真人、口语翻译最地道，并且把你的麦克风锁死为中文识别（绝不乱认成日语/俄语）。")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .padding(.leading, 102)
+                    row("AI 的声音") {
+                        Picker("", selection: $aiSettings.voice) {
+                            ForEach(voices, id: \.self) { Text($0).tag($0) }
+                        }
+                        .labelsHidden()
+                        .frame(width: 140)
+                        Text("推荐 cedar（男声）或 marin（女声）")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                    }
+                    Toggle("使用 WebRTC UDP 通道（比 WebSocket 更快更稳，连不上时自动切回 WebSocket）", isOn: $aiSettings.useWebRTC)
+                        .font(.caption)
+                        .padding(.leading, 102)
+                } else if aiSettings.translateEngine == "cascade" {
+                    Text("拆成「极速听写 → 极速口语意译 → 超拟真流式人声」三段接力。不填下面第三方 Key 也能直接用你现有的 OpenAI Key 跑通；配上 Deepgram + Cartesia / ElevenLabs 延迟还能再压低！")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 102)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        row("听写 Key") {
+                            SecureField("可选：Deepgram Key（留空则用 OpenAI 锁定语种听写）", text: $aiSettings.deepgramKey)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                        row("意译模型") {
+                            TextField("gpt-5.4-nano", text: $aiSettings.cascadeMTModel)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                        row("意译地址") {
+                            TextField("可选：Groq/Cerebras 兼容地址（留空则用 OpenAI）", text: $aiSettings.cascadeMTBaseURL)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                        if !aiSettings.cascadeMTBaseURL.trimmingCharacters(in: .whitespaces).isEmpty {
+                            row("意译 Key") {
+                                SecureField("第三方意译 API Key", text: $aiSettings.cascadeMTKey)
+                                    .textFieldStyle(.roundedBorder)
+                            }
+                        }
+                        row("人声引擎") {
+                            Picker("", selection: $aiSettings.cascadeTTSProvider) {
+                                Text("OpenAI 真人声（免额外 Key）").tag("openai")
+                                Text("Cartesia Sonic（~80ms 极速）").tag("cartesia")
+                                Text("ElevenLabs Flash（超拟真）").tag("elevenlabs")
+                            }
+                            .labelsHidden()
+                            .frame(width: 240)
+                            Spacer()
+                        }
+                        if aiSettings.cascadeTTSProvider == "openai" {
+                            row("AI 的声音") {
+                                Picker("", selection: $aiSettings.voice) {
+                                    ForEach(voices, id: \.self) { Text($0).tag($0) }
+                                }
+                                .labelsHidden()
+                                .frame(width: 140)
+                                Spacer()
+                            }
+                        } else if aiSettings.cascadeTTSProvider == "cartesia" {
+                            row("Cartesia Key") {
+                                SecureField("Cartesia API Key", text: $aiSettings.cartesiaKey)
+                                    .textFieldStyle(.roundedBorder)
+                            }
+                            row("Voice ID") {
+                                TextField("可选：留空使用默认自然人声", text: $aiSettings.cartesiaVoiceID)
+                                    .textFieldStyle(.roundedBorder)
+                            }
+                        } else if aiSettings.cascadeTTSProvider == "elevenlabs" {
+                            row("Eleven Key") {
+                                SecureField("ElevenLabs API Key", text: $aiSettings.elevenLabsKey)
+                                    .textFieldStyle(.roundedBorder)
+                            }
+                            row("Voice ID") {
+                                TextField("可选：留空使用默认自然人声", text: $aiSettings.elevenLabsVoiceID)
+                                    .textFieldStyle(.roundedBorder)
+                            }
+                        }
+                    }
+                    .padding(10)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.04)))
+                } else {
+                    Text("使用 OpenAI 专职同传模型（gpt-realtime-translate）边说边翻，支持 WebRTC UDP 通道；声音偏直译，追求像真人说话请用「ChatGPT 真人声」或「极速三段接力」。")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 102)
+                    Toggle("使用 WebRTC UDP 通道（连不上自动切回 WebSocket）", isOn: $aiSettings.useWebRTC)
+                        .font(.caption)
+                        .padding(.leading, 102)
                 }
+
                 row("概要文字模型") {
                     TextField("gpt-5.4-mini", text: $aiSettings.textModel)
                         .textFieldStyle(.roundedBorder)
                 }
 
-                DisclosureGroup(
-                    aiSettings.usesSimultaneous ? "逐句翻译 / AI 代打高级模型设置" : "语音模型与音色设置",
-                    isExpanded: Binding(
-                        get: { !aiSettings.usesSimultaneous || showAdvancedModels },
-                        set: { showAdvancedModels = $0 }
-                    )
-                ) {
+                DisclosureGroup("高级语音模型设置", isExpanded: $showAdvancedModels) {
                     VStack(alignment: .leading, spacing: 8) {
                         row("实时语音模型") {
                             TextField("gpt-realtime-2.1", text: $aiSettings.realtimeModel)
                                 .textFieldStyle(.roundedBorder)
-                        }
-                        row("AI 的声音") {
-                            Picker("", selection: $aiSettings.voice) {
-                                ForEach(voices, id: \.self) { Text($0).tag($0) }
-                            }
-                            .labelsHidden()
-                            .frame(width: 140)
-                            Spacer()
                         }
                     }
                     .padding(.top, 6)

@@ -400,6 +400,7 @@ func (c *fleetController) handler(fallback http.Handler) http.Handler {
 	mux.Handle("GET /app/", webAppHandler())
 	mux.HandleFunc("GET /api/contacts", contactsAPI)
 	mux.HandleFunc("PUT /api/contacts", contactsAPI)
+	mux.HandleFunc("GET /api/ai/webrtc", aiWebRTCBridgeAPI)
 	mux.HandleFunc("GET /api/desktop/settings", desktopSettingsAPI)
 	mux.HandleFunc("PUT /api/desktop/settings", desktopSettingsAPI)
 	mux.HandleFunc("POST /api/desktop/quit", desktopQuitAPI)

@@ -1067,13 +1067,10 @@ final class VoiceAudioService {
         let useAI = stateLock.withLock { aiRouting != .off && !(aiRouting == .translate && directMicPassthrough) }
         return uploadLock.withLock {
             if useAI {
-                // Keep the device ~200 ms ahead: it pulls audio in large
-                // IOProc chunks (often 512 frames = 64 ms), and a nearly empty
-                // ring leaves silent gaps inside every word, heard on the far
-                // end as hiss/crackle. `assistantPaceAt` is the moment up to
-                // which speech has been handed over (the ring holds 2048 frames).
+                // Keep the device ~120 ms ahead (nearly 2x the 64 ms IOProc
+                // pull chunk): prevents crackle while keeping latency tight.
                 let now = DispatchTime.now().uptimeNanoseconds
-                let lead: UInt64 = 200_000_000
+                let lead: UInt64 = 120_000_000
                 if assistantPaceAt < now { assistantPaceAt = now }
                 let target = now + lead
                 let due = assistantPaceAt < target

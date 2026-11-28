@@ -59,7 +59,7 @@ xcrun swiftc -O -target x86_64-apple-macosx13.0 -sdk "$(xcrun --show-sdk-path)" 
   -I Sources/CModemBridge/include -I Sources/CUACProbe/include \
   Sources/DJOneHubNotifier/*.swift "${INTEL_ROOT}/ModemBridge.o" "${INTEL_ROOT}/CUACProbe.o" \
   -framework CoreAudio -framework CoreFoundation -framework IOKit -framework AVFoundation \
-  -framework AppKit -framework UserNotifications -framework Contacts \
+  -framework AudioToolbox -framework AppKit -framework UserNotifications -framework Contacts \
   -o "${INTEL_ROOT}/DJOneHubNotifier"
 rm -f "${BUILD_ROOT}/DJOneHubNotifier-universal"
 lipo -create "${NOTIFIER_SRC}/.build/release/DJOneHubNotifier" "${INTEL_ROOT}/DJOneHubNotifier" \

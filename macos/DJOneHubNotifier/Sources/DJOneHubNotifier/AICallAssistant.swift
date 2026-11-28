@@ -13,15 +13,32 @@ final class AICallSettings: ObservableObject {
     @AppStorage("ai.baseURL") var baseURL = "https://api.openai.com"
     @AppStorage("ai.realtimeModel") var realtimeModel = "gpt-realtime-2.1"
     @AppStorage("ai.textModel") var textModel = "gpt-5.4-mini"
-    @AppStorage("ai.voice") var voice = "marin"
+    @AppStorage("ai.voice") var voice = "cedar"
     @AppStorage("ai.ownerName") var ownerName = ""
     @AppStorage("ai.autoScreen") var autoScreenIncoming = false
-    /// "simultaneous": OpenAI's live interpreter speaks while you talk.
-    /// "turn": translates each sentence after you finish (can tidy up wording).
-    @AppStorage("ai.translateStyle") var translateStyle = "simultaneous"
+
+    /// Translation engine choice (OpenAI provider):
+    /// - "realtime_webrtc": ChatGPT flagship lifelike voice (`gpt-realtime-2.1`) over WebRTC UDP + fast 280 ms VAD + locked source language (default & recommended)
+    /// - "cascade": Ultra-fast 3-stage pipeline (Deepgram/OpenAI STT -> gpt-5.4-nano/Groq MT -> Cartesia/ElevenLabs/OpenAI lifelike TTS)
+    /// - "simultaneous_webrtc": OpenAI `gpt-realtime-translate` streaming model over WebRTC UDP
+    @AppStorage("ai.translateEngine") var translateEngine = "realtime_webrtc"
+    /// Use WebRTC UDP/Opus bridge (falls back to WebSocket automatically if UDP fails).
+    @AppStorage("ai.useWebRTC") var useWebRTC = true
+
+    // Fast Cascade optional extra keys (stored in 0600 private files under Application Support)
+    @Published var deepgramKey: String { didSet { KeyFile.write(deepgramKey, name: "ai-deepgram.key") } }
+    @AppStorage("ai.cascadeMTBaseURL") var cascadeMTBaseURL = ""
+    @Published var cascadeMTKey: String { didSet { KeyFile.write(cascadeMTKey, name: "ai-cascade-mt.key") } }
+    @AppStorage("ai.cascadeMTModel") var cascadeMTModel = "gpt-5.4-nano"
+    /// "openai" | "cartesia" | "elevenlabs"
+    @AppStorage("ai.cascadeTTSProvider") var cascadeTTSProvider = "openai"
+    @Published var cartesiaKey: String { didSet { KeyFile.write(cartesiaKey, name: "ai-cartesia.key") } }
+    @AppStorage("ai.cartesiaVoiceID") var cartesiaVoiceID = ""
+    @Published var elevenLabsKey: String { didSet { KeyFile.write(elevenLabsKey, name: "ai-elevenlabs.key") } }
+    @AppStorage("ai.elevenLabsVoiceID") var elevenLabsVoiceID = ""
+
     /// Headset mode: disables the speaker echo-gate so you can speak naturally
-    /// while hearing the Chinese translation, and switches OpenAI noise reduction
-    /// to `near_field`.
+    /// while hearing the Chinese translation, and switches noise reduction to `near_field`.
     @AppStorage("ai.headsetMode") var headsetMode = false
     /// Original caller voice volume underneath the Chinese translation (0.0 – 0.6).
     @AppStorage("ai.callerMonitorVolume") var callerMonitorVolume: Double = 0.18
@@ -30,8 +47,6 @@ final class AICallSettings: ObservableObject {
     /// Auto-detect caller language at the start of a call. Off by default so
     /// accented English doesn't unexpectedly flip mid-call.
     @AppStorage("ai.autoDetectLanguage") var autoDetectLanguage = false
-
-    var usesSimultaneous: Bool { !usesGemini && translateStyle == "simultaneous" }
 
     /// "openai" or "gemini": which live voice engine the call AI uses.
     @Published var provider = UserDefaults.standard.string(forKey: "ai.provider") ?? "openai" {
@@ -43,6 +58,8 @@ final class AICallSettings: ObservableObject {
     @AppStorage("ai.geminiVoice") var geminiVoice = "Kore"
 
     var usesGemini: Bool { provider == "gemini" }
+    var usesSimultaneous: Bool { !usesGemini && translateEngine == "simultaneous_webrtc" }
+    var usesCascade: Bool { !usesGemini && translateEngine == "cascade" }
     var isConfigured: Bool {
         let key = usesGemini ? geminiKey : apiKey
         return !key.trimmingCharacters(in: .whitespaces).isEmpty
@@ -50,6 +67,10 @@ final class AICallSettings: ObservableObject {
 
     private init() {
         geminiKey = KeyFile.read("ai-gemini.key") ?? ""
+        deepgramKey = KeyFile.read("ai-deepgram.key") ?? ""
+        cascadeMTKey = KeyFile.read("ai-cascade-mt.key") ?? ""
+        cartesiaKey = KeyFile.read("ai-cartesia.key") ?? ""
+        elevenLabsKey = KeyFile.read("ai-elevenlabs.key") ?? ""
         if let saved = KeyFile.read() {
             apiKey = saved
         } else if let old = Keychain.get("openai-api-key"), !old.isEmpty {
@@ -172,8 +193,8 @@ enum Keychain {
 // MARK: - Languages
 
 struct CallLanguage: Identifiable, Hashable {
-    let id: String      // English name, used in prompts
-    let name: String    // shown to the user
+    let id: String
+    let name: String
 
     static let all: [CallLanguage] = [
         ("English", "英语"), ("Japanese", "日语"), ("Korean", "韩语"), ("German", "德语"),
@@ -188,7 +209,7 @@ struct CallLanguage: Identifiable, Hashable {
 
     static func find(_ id: String) -> CallLanguage { all.first { $0.id == id } ?? all[0] }
 
-    /// ISO 639-1 code for the live interpreter.
+    /// ISO 639-1 code for STT / translation APIs.
     var code: String {
         let codes = [
             "English": "en", "Japanese": "ja", "Korean": "ko", "German": "de", "French": "fr",
@@ -202,7 +223,6 @@ struct CallLanguage: Identifiable, Hashable {
         return codes[id] ?? "en"
     }
 
-    /// Languages with their own writing system, recognised without a model.
     static func byScript(_ text: String) -> CallLanguage? {
         var counts: [String: Int] = [:]
         for u in text.unicodeScalars {
@@ -243,14 +263,12 @@ struct CallLanguage: Identifiable, Hashable {
         "HK": "Cantonese", "MO": "Cantonese", "TW": "Mandarin Chinese", "CN": "Mandarin Chinese",
     ]
 
-    /// Picks remembered customer language first, then guesses from country code (default English).
     static func preferred(for number: String?) -> CallLanguage {
         if let saved = CallLanguageMemory.language(for: number) { return saved }
         let guessed = guess(for: number)
         return guessed.id == "Mandarin Chinese" ? find("English") : guessed
     }
 
-    /// A likely language for a phone number, from its country code.
     static func guess(for number: String?) -> CallLanguage {
         var digits = (number ?? "").filter { $0.isNumber || $0 == "+" }
         if digits.hasPrefix("00") { digits = "+" + digits.dropFirst(2) }
@@ -327,13 +345,12 @@ final class AtomicBool: @unchecked Sendable {
     }
 }
 
-// MARK: - Realtime session (turn-by-turn / agent)
+// MARK: - Realtime WebSocket session (fallback + Gemini alternative)
 
-/// One OpenAI Realtime speech-to-speech conversation over a WebSocket.
 final class RealtimeVoiceSession: NSObject, @unchecked Sendable {
-    var onAudio: ((Data) -> Void)?              // 24 kHz PCM16
-    var onHeard: ((String) -> Void)?            // transcript of what came in
-    var onSaid: ((String) -> Void)?             // transcript of what the AI said
+    var onAudio: ((Data) -> Void)?
+    var onHeard: ((String) -> Void)?
+    var onSaid: ((String) -> Void)?
     var onSpeechStarted: (() -> Void)?
     var onSpeechStopped: (() -> Void)?
     var tag = ""
@@ -347,7 +364,7 @@ final class RealtimeVoiceSession: NSObject, @unchecked Sendable {
     private var pending = Data()
     private var pending24k = Data()
     private var closed = false
-    private var leftover = Data()   // odd byte carry for 24 kHz output
+    private var leftover = Data()
     private var baseInstructions = ""
     private var sessionConfig: [String: Any] = [:]
     private var updateSent = false
@@ -388,24 +405,22 @@ final class RealtimeVoiceSession: NSObject, @unchecked Sendable {
         }
     }
 
-    /// Adds 8 kHz call audio; sent in ~60 ms batches.
     func appendAudio8k(_ pcm: Data) {
         queue.async { [weak self] in
             guard let self, !self.closed, self.ready else { return }
             self.pending.append(pcm)
-            guard self.pending.count >= 960 else { return }
+            guard self.pending.count >= 640 else { return } // 40 ms
             let chunk = PCM.up3(self.pending)
             self.pending.removeAll(keepingCapacity: true)
             self.send(["type": "input_audio_buffer.append", "audio": chunk.base64EncodedString()])
         }
     }
 
-    /// Adds native 24 kHz microphone audio directly; sent in ~60 ms batches.
     func appendAudio24k(_ pcm: Data) {
         queue.async { [weak self] in
             guard let self, !self.closed, self.ready else { return }
             self.pending24k.append(pcm)
-            guard self.pending24k.count >= 2_880 else { return }
+            guard self.pending24k.count >= 1_920 else { return } // 40 ms
             let chunk = self.pending24k
             self.pending24k.removeAll(keepingCapacity: true)
             self.send(["type": "input_audio_buffer.append", "audio": chunk.base64EncodedString()])
@@ -535,32 +550,67 @@ final class RealtimeVoiceSession: NSObject, @unchecked Sendable {
         }
     }
 
+    /// Builds OpenAI Realtime session config (used for both WebRTC `/v1/realtime/calls`
+    /// and WebSocket `/v1/realtime`).
+    /// - `sourceLanguage`: explicit ISO-639-1 lock (e.g. `"zh"` on user mic!) so
+    ///   Chinese is never misheard as Japanese/Russian.
+    /// - `fastServerVAD`: uses responsive 280 ms server_vad for live interpreting
+    ///   instead of multi-second semantic_vad.
     static func config(
+        model: String? = nil,
         instructions: String,
         voice: String,
         interrupt: Bool,
         transcribe: Bool = true,
-        eagerness: String = "high"
+        sourceLanguage: String? = nil,
+        noiseReduction: String? = nil,
+        fastServerVAD: Bool = false,
+        eagerness: String = "high",
+        forWebRTC: Bool = false
     ) -> [String: Any] {
-        var input: [String: Any] = [
-            "format": ["type": "audio/pcm", "rate": 24_000],
-            "turn_detection": [
+        var input: [String: Any] = [:]
+        if !forWebRTC {
+            input["format"] = ["type": "audio/pcm", "rate": 24_000]
+        }
+        if fastServerVAD {
+            input["turn_detection"] = [
+                "type": "server_vad",
+                "threshold": 0.52,
+                "prefix_padding_ms": 180,
+                "silence_duration_ms": 280,
+                "create_response": true,
+                "interrupt_response": interrupt,
+            ] as [String: Any]
+        } else {
+            input["turn_detection"] = [
                 "type": "semantic_vad",
                 "eagerness": eagerness,
                 "create_response": true,
                 "interrupt_response": interrupt,
-            ] as [String: Any],
-        ]
-        if transcribe { input["transcription"] = ["model": "gpt-4o-mini-transcribe"] }
-        return [
+            ] as [String: Any]
+        }
+        if let nr = noiseReduction {
+            input["noise_reduction"] = ["type": nr]
+        }
+        if transcribe {
+            var tr: [String: Any] = ["model": "gpt-4o-transcribe"]
+            if let lang = sourceLanguage, !lang.isEmpty { tr["language"] = lang }
+            input["transcription"] = tr
+        }
+        var output: [String: Any] = ["voice": voice]
+        if !forWebRTC {
+            output["format"] = ["type": "audio/pcm", "rate": 24_000]
+        }
+        var sess: [String: Any] = [
             "type": "realtime",
             "instructions": instructions,
             "output_modalities": ["audio"],
-            "audio": [
-                "input": input,
-                "output": ["format": ["type": "audio/pcm", "rate": 24_000], "voice": voice],
-            ],
+            "audio": ["input": input, "output": output],
         ]
+        if let model, forWebRTC {
+            sess["model"] = model
+        }
+        return sess
     }
 }
 
@@ -577,7 +627,6 @@ struct AICaption: Identifiable, Equatable {
     /// For `.me` in translate mode: foreign translation spoken to the caller.
     var translation: String?
     var timestamp = Date()
-    /// Still being spoken: words appear as they are recognised.
     var live = false
 }
 
@@ -590,22 +639,18 @@ final class AICallAssistant: ObservableObject {
     @Published var language: CallLanguage = CallLanguage.find("English")
     @Published private(set) var status = ""
     @Published private(set) var phase = ""
-    /// Live rolling structured summary updated throughout the call.
     @Published private(set) var liveSummary: StructuredCallSummary?
     @Published private(set) var isSummarizing = false
     @Published private(set) var summaryError: String?
-    /// Legacy plain-text summary (kept in sync with `liveSummary`).
     @Published private(set) var summary: String?
-    /// Most recent previous AI call with this same customer number.
     @Published private(set) var previousCall: AICallRecord?
     @Published private(set) var lastError: String?
     @Published private(set) var directMicPassthrough = false
-    @Published private(set) var isSimultaneousActive = false
+    @Published private(set) var activeEngineBadge = ""
     @Published var autoLanguage: Bool = AICallSettings.shared.autoDetectLanguage {
         didSet { AICallSettings.shared.autoDetectLanguage = autoLanguage }
     }
 
-    /// Pending actions chosen on the dial pad before connecting.
     var pendingGoal: String?
     var pendingLanguage: CallLanguage?
     var pendingTranslate = false
@@ -623,113 +668,295 @@ final class AICallAssistant: ObservableObject {
     private var summaryTask: Task<Void, Never>?
     private var autoDetectedOnce = false
 
+    // Strict FIFO queues preventing late translations from attaching to the NEXT sentence!
+    private var inboundAwaitingChinese: [UUID] = []
+    private var outboundAwaitingTranslation: [UUID] = []
+
     var isOn: Bool { mode != .off }
 
-    // MARK: Prompts
+    // MARK: Natural Human Interpreter Prompts
 
-    static let interpreterBase = """
-    You are a skilled live phone interpreter between your client and the other person. \
-    You never take part in the conversation yourself: never answer questions, never add \
-    comments, greetings or "they said". You speak only the translation, in first person, \
-    sounding like a real person on the phone — natural, warm, not robotic.
-    """
-
-    static let inboundPrompt = interpreterBase + """
-
-        Translate what the other person says into natural spoken Simplified Chinese (Mandarin) \
-        for your client. Convey the meaning faithfully and completely, in the way a Chinese \
-        speaker would actually say it; skip their filler words and false starts.
+    static func interpreterBase(ownerName: String) -> String {
+        let nameHint = ownerName.trimmingCharacters(in: .whitespaces).isEmpty
+            ? ""
+            : " Your client's name is \(ownerName.trimmingCharacters(in: .whitespaces)); never mispronounce or alter it."
+        return """
+        You are a warm, natural, native-level human phone interpreter.\(nameHint) \
+        Speak ONLY the translation in first person — never add greetings, commentary, \
+        explanations, or "he said". Sound like a real friendly human talking naturally \
+        on a phone call: relaxed conversational speed, contractions, everyday phrasing, \
+        natural emotion matching the speaker — NEVER stiff, robotic, or word-for-word.
         """
+    }
 
-    /// Both interpreter connections (optionally prewarmed for "带同传拨打").
+    static func inboundPrompt(ownerName: String) -> String {
+        interpreterBase(ownerName: ownerName) + """
+
+        Translate what the caller says into natural, colloquial spoken Simplified Chinese (Mandarin). \
+        Convey the real meaning the way a native Chinese speaker would casually say it on a phone call. \
+        Keep all names, numbers, prices, dates and times exact.
+        """
+    }
+
+    static func outboundPrompt(ownerName: String, language lang: String) -> String {
+        interpreterBase(ownerName: ownerName) + """
+
+        Your client speaks Mandarin Chinese casually on the phone (sometimes pausing, saying "这个/那个/嗯", \
+        or rephrasing). Understand what they actually mean and say it immediately in smooth, idiomatic, \
+        natural spoken \(lang) the way a real native \(lang) speaker talks on the phone — NEVER translate \
+        literally word for word (for example, "吃饭了没有" -> "Have you eaten yet?", "你说话怎么这么奇怪" -> \
+        "Why do you sound so weird?"). Drop Chinese filler words; if they correct themselves, say only the \
+        final intent. Keep every fact, name, number, price, date and time 100% exact. Always speak \(lang).
+        """
+    }
+
+    /// Both interpreter connections (for any of the 3 engines).
     @MainActor private final class InterpreterPair {
         let inbound: any VoiceAISession
         let outbound: any VoiceAISession
         var language: String
         let callID: String
-        let simultaneous: Bool
+        let engineKey: String
+        let usesContinuousStream: Bool
+        let label: String
         var broken = false
+
         init(inbound: any VoiceAISession, outbound: any VoiceAISession, language: String, callID: String,
-             simultaneous: Bool) {
-            self.inbound = inbound; self.outbound = outbound; self.language = language; self.callID = callID
-            self.simultaneous = simultaneous
+             engineKey: String, usesContinuousStream: Bool, label: String) {
+            self.inbound = inbound
+            self.outbound = outbound
+            self.language = language
+            self.callID = callID
+            self.engineKey = engineKey
+            self.usesContinuousStream = usesContinuousStream
+            self.label = label
         }
-        func retarget(_ lang: String) {
+
+        func retarget(_ lang: String, ownerName: String) {
             language = lang
+            let code = CallLanguage.find(lang).code
             if let live = outbound as? TranslateStreamSession {
-                live.setLanguage(CallLanguage.find(lang).code)
+                live.setLanguage(code)
+            } else if let rtc = outbound as? WebRTCVoiceSession {
+                if usesContinuousStream {
+                    rtc.setTranslationLanguage(code)
+                } else {
+                    rtc.updateInstructions(AICallAssistant.outboundPrompt(ownerName: ownerName, language: lang))
+                }
+            } else if let cascade = outbound as? FastCascadeSession {
+                cascade.setTargetLanguage(name: lang, code: code)
             } else {
-                outbound.updateInstructions(AICallAssistant.outboundPrompt(base: AICallAssistant.interpreterBase,
-                                                                          language: lang))
+                outbound.updateInstructions(AICallAssistant.outboundPrompt(ownerName: ownerName, language: lang))
             }
         }
+
         func setHeadsetMode(_ headset: Bool) {
+            let nr = headset ? "near_field" : "far_field"
             if let liveOut = outbound as? TranslateStreamSession {
-                liveOut.setNoiseReduction(headset ? "near_field" : "far_field")
+                liveOut.setNoiseReduction(nr)
+            } else if let rtcOut = outbound as? WebRTCVoiceSession {
+                rtcOut.setNoiseReduction(nr)
             }
         }
+
         func close() { inbound.close(); outbound.close() }
     }
 
     private var warmInterpreter: InterpreterPair?
     private var interpreterPair: InterpreterPair?
+    private var webrtcUnavailable = false
     private var simultaneousUnavailable = false
 
-    /// Loads the customer's previous AI call brief so you immediately remember
-    /// what you discussed last time as soon as the call rings or connects.
     func loadPreviousCall(for number: String?, excludingID: String? = nil) {
         previousCall = AICallHistory.latestRecord(matchingNumber: number, excludingID: excludingID)
     }
 
+    private func desiredEngineKey() -> String {
+        if settings.usesGemini { return "gemini" }
+        if settings.translateEngine == "cascade" { return "cascade" }
+        let rtc = settings.useWebRTC && !webrtcUnavailable
+        if settings.translateEngine == "simultaneous_webrtc" && !simultaneousUnavailable {
+            return rtc ? "simultaneous_webrtc" : "simultaneous_ws"
+        }
+        return rtc ? "realtime_webrtc" : "realtime_ws"
+    }
+
     private func makeInterpreter(language lang: String, callID: String) -> InterpreterPair {
-        let live = settings.usesSimultaneous && !simultaneousUnavailable
-        if live {
+        let engine = desiredEngineKey()
+        let outNR = settings.headsetMode ? "near_field" : "far_field"
+        let owner = settings.ownerName
+        let customerCode = autoLanguage ? nil : CallLanguage.find(lang).code
+
+        switch engine {
+        case "cascade":
+            let inCfg = FastCascadeSession.Config(
+                sourceLangName: lang,
+                sourceLangCode: customerCode,
+                targetLangName: "Simplified Chinese (Mandarin)",
+                targetLangCode: "zh",
+                ownerName: owner,
+                noiseReduction: "far_field",
+                openAIBase: settings.trimmedBase,
+                openAIKey: settings.apiKey,
+                openAIVoice: settings.voice,
+                deepgramKey: settings.deepgramKey,
+                mtBaseURL: settings.cascadeMTBaseURL,
+                mtKey: settings.cascadeMTKey,
+                mtModel: settings.cascadeMTModel,
+                ttsProvider: settings.cascadeTTSProvider,
+                cartesiaKey: settings.cartesiaKey,
+                cartesiaVoiceID: settings.cartesiaVoiceID,
+                elevenLabsKey: settings.elevenLabsKey,
+                elevenLabsVoiceID: settings.elevenLabsVoiceID
+            )
+            let outCfg = FastCascadeSession.Config(
+                sourceLangName: "Mandarin Chinese",
+                sourceLangCode: "zh",
+                targetLangName: lang,
+                targetLangCode: CallLanguage.find(lang).code,
+                ownerName: owner,
+                noiseReduction: outNR,
+                openAIBase: settings.trimmedBase,
+                openAIKey: settings.apiKey,
+                openAIVoice: settings.voice,
+                deepgramKey: settings.deepgramKey,
+                mtBaseURL: settings.cascadeMTBaseURL,
+                mtKey: settings.cascadeMTKey,
+                mtModel: settings.cascadeMTModel,
+                ttsProvider: settings.cascadeTTSProvider,
+                cartesiaKey: settings.cartesiaKey,
+                cartesiaVoiceID: settings.cartesiaVoiceID,
+                elevenLabsKey: settings.elevenLabsKey,
+                elevenLabsVoiceID: settings.elevenLabsVoiceID
+            )
+            let inbound = FastCascadeSession(config: inCfg)
+            let outbound = FastCascadeSession(config: outCfg)
+            inbound.tag = "in"
+            outbound.tag = "out"
+            let sttTag = settings.deepgramKey.isEmpty ? "OpenAI听写" : "Deepgram"
+            let ttsTag = settings.cascadeTTSProvider == "cartesia" && !settings.cartesiaKey.isEmpty ? "Cartesia"
+                : settings.cascadeTTSProvider == "elevenlabs" && !settings.elevenLabsKey.isEmpty ? "ElevenLabs"
+                : "OpenAI真人声"
+            let pair = InterpreterPair(inbound: inbound, outbound: outbound, language: lang, callID: callID,
+                                       engineKey: engine, usesContinuousStream: false,
+                                       label: "极速三段接力 · \(sttTag)→\(ttsTag)")
+            attachWarmError(pair)
+            inbound.connect()
+            outbound.connect()
+            return pair
+
+        case "simultaneous_webrtc":
+            let inbound = WebRTCVoiceSession(mode: .translation)
+            let outbound = WebRTCVoiceSession(mode: .translation)
+            inbound.tag = "in"
+            outbound.tag = "out"
+            let pair = InterpreterPair(inbound: inbound, outbound: outbound, language: lang, callID: callID,
+                                       engineKey: engine, usesContinuousStream: true,
+                                       label: "同传模型 · WebRTC UDP")
+            attachWarmError(pair)
+            let inSess: [String: Any] = [
+                "model": "gpt-realtime-translate",
+                "audio": [
+                    "input": ["transcription": ["model": "gpt-realtime-whisper"], "noise_reduction": ["type": "far_field"]],
+                    "output": ["language": "zh"],
+                ],
+            ]
+            let outSess: [String: Any] = [
+                "model": "gpt-realtime-translate",
+                "audio": [
+                    "input": ["transcription": ["model": "gpt-realtime-whisper"], "noise_reduction": ["type": outNR]],
+                    "output": ["language": CallLanguage.find(lang).code],
+                ],
+            ]
+            inbound.connect(base: settings.trimmedBase, key: settings.apiKey, session: inSess)
+            outbound.connect(base: settings.trimmedBase, key: settings.apiKey, session: outSess)
+            return pair
+
+        case "simultaneous_ws":
             let inbound = TranslateStreamSession()
             let outbound = TranslateStreamSession()
             inbound.tag = "in"
             outbound.tag = "out"
             let pair = InterpreterPair(inbound: inbound, outbound: outbound, language: lang, callID: callID,
-                                       simultaneous: true)
-            for s in [pair.inbound, pair.outbound] {
-                s.onError = { [weak pair] e in
-                    AICallLog.write("warm interpreter error: \(e)")
-                    Task { @MainActor in pair?.broken = true }
-                }
-            }
-            let outNR = settings.headsetMode ? "near_field" : "far_field"
-            AICallLog.write("timing: AI connecting (live simultaneous → \(lang), outNR=\(outNR))")
-            // Inbound comes from 8 kHz cellular line: far_field helps strip line noise.
+                                       engineKey: engine, usesContinuousStream: true,
+                                       label: "同传模型 · WebSocket")
+            attachWarmError(pair)
             inbound.connect(base: settings.trimmedBase, key: settings.apiKey, language: "zh",
                             transcribe: true, noiseReduction: "far_field")
             outbound.connect(base: settings.trimmedBase, key: settings.apiKey,
                              language: CallLanguage.find(lang).code,
                              transcribe: true, noiseReduction: outNR)
             return pair
+
+        case "realtime_webrtc":
+            let inbound = WebRTCVoiceSession(mode: .realtime)
+            let outbound = WebRTCVoiceSession(mode: .realtime)
+            inbound.tag = "in"
+            outbound.tag = "out"
+            let pair = InterpreterPair(inbound: inbound, outbound: outbound, language: lang, callID: callID,
+                                       engineKey: engine, usesContinuousStream: false,
+                                       label: "ChatGPT 真人声 · WebRTC UDP")
+            attachWarmError(pair)
+            let inSess = RealtimeVoiceSession.config(
+                model: settings.realtimeModel,
+                instructions: Self.inboundPrompt(ownerName: owner),
+                voice: settings.voice,
+                interrupt: false,
+                transcribe: true,
+                sourceLanguage: customerCode,
+                noiseReduction: "far_field",
+                fastServerVAD: true,
+                forWebRTC: true
+            )
+            let outSess = RealtimeVoiceSession.config(
+                model: settings.realtimeModel,
+                instructions: Self.outboundPrompt(ownerName: owner, language: lang),
+                voice: settings.voice,
+                interrupt: false,
+                transcribe: true,
+                sourceLanguage: "zh",
+                noiseReduction: outNR,
+                fastServerVAD: true,
+                forWebRTC: true
+            )
+            inbound.connect(base: settings.trimmedBase, key: settings.apiKey, session: inSess)
+            outbound.connect(base: settings.trimmedBase, key: settings.apiKey, session: outSess)
+            return pair
+
+        default:
+            // realtime_ws or gemini
+            let inbound = Self.makeSession()
+            let outbound = Self.makeSession()
+            inbound.tag = "in"
+            outbound.tag = "out"
+            let lbl = settings.usesGemini ? "Gemini Live" : "ChatGPT 真人声 · WebSocket"
+            let pair = InterpreterPair(inbound: inbound, outbound: outbound, language: lang, callID: callID,
+                                       engineKey: engine, usesContinuousStream: false, label: lbl)
+            attachWarmError(pair)
+            Self.connect(inbound, instructions: Self.inboundPrompt(ownerName: owner), interrupt: false,
+                         sourceLanguage: customerCode, noiseReduction: "far_field", fastServerVAD: true)
+            Self.connect(outbound, instructions: Self.outboundPrompt(ownerName: owner, language: lang), interrupt: false,
+                         sourceLanguage: "zh", noiseReduction: outNR, fastServerVAD: true)
+            return pair
         }
-        let pair = InterpreterPair(inbound: Self.makeSession(), outbound: Self.makeSession(),
-                                   language: lang, callID: callID, simultaneous: false)
+    }
+
+    private func attachWarmError(_ pair: InterpreterPair) {
         for s in [pair.inbound, pair.outbound] {
             s.onError = { [weak pair] e in
                 AICallLog.write("warm interpreter error: \(e)")
                 Task { @MainActor in pair?.broken = true }
             }
         }
-        pair.inbound.tag = "in"
-        pair.outbound.tag = "out"
-        connect(pair.inbound, instructions: Self.inboundPrompt, interrupt: false, eagerness: "high")
-        connect(pair.outbound, instructions: Self.outboundPrompt(base: Self.interpreterBase, language: lang),
-                interrupt: false, eagerness: "high")
-        return pair
     }
 
-    /// Prewarms the interpreter ONLY when the user explicitly dialed with AI translate.
     func prewarmInterpreter(callID: String, number: String?, preferredLanguage: CallLanguage? = nil) {
         guard settings.isConfigured, mode == .off, prewarmed == nil, pendingGoal == nil,
               warmInterpreter?.callID != callID, !endedCalls.contains(callID) else { return }
         warmInterpreter?.close()
         let lang = preferredLanguage ?? CallLanguage.preferred(for: number)
         warmInterpreter = makeInterpreter(language: lang.id, callID: callID)
-        AICallLog.write("timing: prewarming interpreter (\(lang.id))")
+        AICallLog.write("timing: prewarming interpreter (\(lang.id), engine=\(desiredEngineKey()))")
     }
 
     private func dropWarmInterpreter() {
@@ -745,14 +972,14 @@ final class AICallAssistant: ObservableObject {
         headsetFlag.value = settings.headsetMode
         audio.setCallerMonitorVolume(Float(settings.callerMonitorVolume))
 
-        AICallLog.write("=== START TRANSLATE call=\(callID) lang=\(lang) style=\(settings.translateStyle) headset=\(settings.headsetMode) ===")
+        let wantEngine = desiredEngineKey()
+        AICallLog.write("=== START TRANSLATE call=\(callID) lang=\(lang) engine=\(wantEngine) voice=\(settings.voice) headset=\(settings.headsetMode) ===")
 
         let pair: InterpreterPair
-        if let warm = warmInterpreter, warm.callID == callID, !warm.broken,
-           warm.simultaneous == (settings.usesSimultaneous && !simultaneousUnavailable) {
+        if let warm = warmInterpreter, warm.callID == callID, !warm.broken, warm.engineKey == wantEngine {
             pair = warm
-            AICallLog.write("timing: using prewarmed interpreter")
-            if warm.language != lang { warm.retarget(lang) }
+            AICallLog.write("timing: using prewarmed interpreter (\(warm.engineKey))")
+            if warm.language != lang { warm.retarget(lang, ownerName: settings.ownerName) }
             warm.setHeadsetMode(settings.headsetMode)
         } else {
             warmInterpreter?.close()
@@ -761,10 +988,10 @@ final class AICallAssistant: ObservableObject {
         warmInterpreter = nil
         let inbound = pair.inbound
         let outbound = pair.outbound
-        let live = pair.simultaneous
-        isSimultaneousActive = live
+        let continuous = pair.usesContinuousStream
+        let engineKey = pair.engineKey
+        activeEngineBadge = pair.label
 
-        // Only hold back the mic when on speakers; headset mode runs true full-duplex.
         let gate = SpeakerGate()
         let headset = headsetFlag
 
@@ -772,7 +999,7 @@ final class AICallAssistant: ObservableObject {
         inbound.onSpeechStarted = { [weak self] in Task { @MainActor in self?.setPhase("客户正在说…") } }
         inbound.onHeardDelta = { [weak self] d in Task { @MainActor in self?.draft("in.heard", .them, d) } }
         inbound.onSaidDelta = { [weak self] d in Task { @MainActor in
-            self?.setPhase(live ? "同声传译中 · 正在听客户" : "正在翻成中文给你听")
+            self?.setPhase("正在翻成中文给你听…")
             self?.draft("in.said", .them, chinese: true, d)
         } }
         inbound.onHeard = { [weak self] t in Task { @MainActor in
@@ -781,7 +1008,7 @@ final class AICallAssistant: ObservableObject {
         } }
         inbound.onSaid = { [weak self] t in Task { @MainActor in
             self?.settle("in.said", .them, chinese: true, t)
-            self?.setPhase(live ? "同声传译中 · 直接对话" : "轮到你说")
+            self?.setPhase("\(pair.label) · 直接对话")
         } }
 
         let outDecimator = PhoneDecimator()
@@ -789,41 +1016,41 @@ final class AICallAssistant: ObservableObject {
             audio?.sendAssistantSpeech(outDecimator.process(pcm))
         }
         outbound.onSpeechStarted = { [weak self] in
-            Task { @MainActor in self?.setPhase(live ? "同声传译中 · 正在翻给客户" : "你在说…") }
+            Task { @MainActor in self?.setPhase("你在说…") }
         }
         outbound.onSpeechStopped = { [weak self] in
-            Task { @MainActor in if !live { self?.setPhase("正在翻给客户…") } }
+            Task { @MainActor in if !continuous { self?.setPhase("正在翻成\(lang == "English" ? "英语" : CallLanguage.find(lang).name)给客户…") } }
         }
-        // Merge user's Chinese ("out.heard") and AI's foreign translation ("out.said")
-        // into the same right-hand `.me` bubble so the chat log is clean and symmetric.
         outbound.onHeardDelta = { [weak self] d in Task { @MainActor in self?.draft("out.heard", .me, d) } }
         outbound.onSaidDelta = { [weak self] d in Task { @MainActor in
-            self?.setPhase(live ? "同声传译中 · 正在说给客户听" : "正在把你的话说给客户听")
+            self?.setPhase("正在用真人声说给客户听…")
             self?.draft("out.said", .me, outboundTranslation: true, d)
         } }
         outbound.onHeard = { [weak self] t in Task { @MainActor in self?.settle("out.heard", .me, t) } }
         outbound.onSaid = { [weak self] t in
             Task { @MainActor in
                 self?.settle("out.said", .me, outboundTranslation: true, t)
-                self?.setPhase(live ? "同声传译中 · 直接对话" : "等客户回话")
+                self?.setPhase("\(pair.label) · 直接对话")
             }
         }
         for s in [inbound, outbound] {
             s.onError = { [weak self] e in Task { @MainActor in
-                if live { self?.liveInterpreterFailed(e) } else { self?.fail(e) }
+                self?.handleEngineError(e, failedEngine: engineKey)
             } }
         }
 
-        // Caller (8 kHz cellular) -> inbound interpreter
+        // Caller (8 kHz cellular) -> inbound
         audio.onRemoteAudio = { [weak inbound] pcm in inbound?.appendAudio8k(pcm) }
-        // User's Mac mic (wideband 24 kHz!) -> outbound interpreter
+        // User's Mac mic (wideband 24 kHz!) -> outbound
         let micSpeechLogged = AtomicBool(false)
         audio.onLocalAudio = nil
         audio.onLocalAudio24k = { [weak outbound, weak audio] pcm24 in
             if !headset.value {
                 if audio?.isAssistantSounding == true { gate.hold() }
                 if gate.isSpeaking {
-                    if live { outbound?.appendAudio24k(Data(count: pcm24.count)) }
+                    if continuous || engineKey.contains("webrtc") {
+                        outbound?.appendAudio24k(Data(count: pcm24.count))
+                    }
                     return
                 }
             }
@@ -840,20 +1067,39 @@ final class AICallAssistant: ObservableObject {
             self?.add(.note, "对方说得太长，中文语音落后太多，跳过了一段；请看聊天记录")
         } }
 
-        interpreterBase = Self.interpreterBase
         sessions = [inbound, outbound]
         outboundSession = outbound
         directMicPassthrough = false
         audio.setDirectMicPassthrough(false)
         audio.setAIRouting(.translate)
         mode = .translate
-        usedModes.insert(live ? "AI 同传" : "AI 翻译")
+        usedModes.insert(pair.label)
         interpreterPair = pair
         updateTranslateStatus()
-        setPhase(live ? "同声传译中 · 直接对话" : "请说，或等对方说")
+        setPhase("\(pair.label) · 直接对话")
     }
 
-    /// Toggles headset full-duplex mode live during a call.
+    /// Graceful automatic downgrade: WebRTC UDP fails -> WebSocket; simultaneous fails -> Realtime.
+    private func handleEngineError(_ message: String, failedEngine: String) {
+        guard mode == .translate, let callID, let audio else { return }
+        AICallLog.write("engine \(failedEngine) failed: \(message)")
+        if failedEngine.hasSuffix("_webrtc") && !webrtcUnavailable {
+            webrtcUnavailable = true
+            stopSessions()
+            add(.note, "WebRTC UDP 通道连不上（\(message)），已自动切到 WebSocket 继续")
+            startTranslate(callID: callID, number: callNumber, audio: audio)
+            return
+        }
+        if failedEngine.hasPrefix("simultaneous") && !simultaneousUnavailable {
+            simultaneousUnavailable = true
+            stopSessions()
+            add(.note, "同传模型不可用（\(message)），已自动切到 ChatGPT 真人声模式")
+            startTranslate(callID: callID, number: callNumber, audio: audio)
+            return
+        }
+        fail(message)
+    }
+
     func setHeadsetMode(_ enabled: Bool) {
         settings.headsetMode = enabled
         headsetFlag.value = enabled
@@ -863,13 +1109,11 @@ final class AICallAssistant: ObservableObject {
         }
     }
 
-    /// Adjusts how loudly the caller's original voice plays underneath the Chinese translation.
     func setCallerMonitorVolume(_ value: Double) {
         settings.callerMonitorVolume = value
         audio?.setCallerMonitorVolume(Float(value))
     }
 
-    /// Routes your raw voice straight to the caller (e.g. to say "OK, thank you" directly).
     func setDirectMicPassthrough(_ enabled: Bool) {
         guard mode == .translate else { return }
         directMicPassthrough = enabled
@@ -877,23 +1121,13 @@ final class AICallAssistant: ObservableObject {
         if enabled {
             setPhase("原声直说中 · 你的声音直接发给对方")
         } else {
-            setPhase(isSimultaneousActive ? "同声传译中 · 直接对话" : "请说，或等对方说")
+            setPhase("\(activeEngineBadge) · 直接对话")
         }
     }
 
-    /// Drops backed-up outbound foreign speech if you want to cut off a long sentence.
     func clearOutboundQueue() {
         audio?.clearAssistantUplink()
         add(.note, "已跳过待播出的外语队列")
-    }
-
-    private func liveInterpreterFailed(_ message: String) {
-        guard mode == .translate, let callID, let audio else { return }
-        AICallLog.write("live interpreter failed, falling back: \(message)")
-        simultaneousUnavailable = true
-        stopSessions()
-        add(.note, "同声传译暂时用不了（\(message)），已自动切到逐句翻译")
-        startTranslate(callID: callID, number: callNumber, audio: audio)
     }
 
     private func setPhase(_ text: String) {
@@ -901,21 +1135,18 @@ final class AICallAssistant: ObservableObject {
         phase = text
     }
 
-    // MARK: Language selection & optional one-shot auto-detect
+    // MARK: Language selection
 
-    private var interpreterBase = ""
     private weak var outboundSession: (any VoiceAISession)?
     private var detecting = false
 
     private func updateTranslateStatus() {
-        let modeText = isSimultaneousActive ? "同声传译（边说边翻）" : "逐句翻译"
         let who = autoLanguage && !autoDetectedOnce
             ? "\(language.name)（开头自动识别）"
             : language.name
-        status = "\(modeText) · 你说中文 → 客户听\(who) · 客户说的话 → 你听中文"
+        status = "\(activeEngineBadge) · 你说中文 → 客户听\(who) · 客户说的话 → 你听中文"
     }
 
-    /// Switches the interpreter to another target language mid-call and remembers it for this number.
     func setTargetLanguage(_ lang: CallLanguage, auto: Bool = false) {
         if !auto {
             CallLanguageMemory.remember(lang, for: callNumber)
@@ -927,7 +1158,7 @@ final class AICallAssistant: ObservableObject {
         }
         language = lang
         if mode == .translate, outboundSession != nil, let pair = interpreterPair {
-            pair.retarget(lang.id)
+            pair.retarget(lang.id, ownerName: settings.ownerName)
             if auto {
                 autoDetectedOnce = true
                 add(.note, "识别到客户说\(lang.name)，已锁定输出为\(lang.name)（可手动改）")
@@ -939,7 +1170,6 @@ final class AICallAssistant: ObservableObject {
     }
 
     fileprivate func noticeLanguage(of text: String) {
-        // Lock once identified so accented English never jumps mid-call.
         guard autoLanguage, !autoDetectedOnce, mode == .translate, !detecting else { return }
         if let lang = CallLanguage.byScript(text) {
             if lang.id != "Mandarin Chinese" { setTargetLanguage(lang, auto: true) }
@@ -959,21 +1189,6 @@ final class AICallAssistant: ObservableObject {
                 setTargetLanguage(lang, auto: true)
             }
         }
-    }
-
-    static func outboundPrompt(base: String, language lang: String) -> String {
-        base + """
-
-        Your client speaks Chinese, often thinking aloud: pauses, "这个", "那个", "就是", "嗯", \
-        repeating themselves, changing their mind mid-sentence. Work out what they actually \
-        mean, then say it in clear, natural, fluent \(lang) the way a native speaker would \
-        put it — complete and polite, not word for word. Drop fillers, hesitations and \
-        repetitions; when they correct themselves, use only the corrected version. Keep every \
-        fact exact (names, numbers, dates, times, addresses, prices). Don't add information \
-        they didn't give, and don't answer for them. If what they said is too unclear to \
-        translate, say nothing rather than guess. Always speak \(lang), whatever language \
-        earlier turns were in.
-        """
     }
 
     // MARK: AI Agent (代打 / 接听)
@@ -1007,7 +1222,7 @@ final class AICallAssistant: ObservableObject {
         sessions = [s]
         audio.setAIRouting(.agent)
         mode = .agent
-        isSimultaneousActive = false
+        activeEngineBadge = screening ? "AI 接听" : "AI 代打"
         status = screening ? "AI 正在替你接听，问清对方是谁、什么事" : "AI 正在替你通话"
         if speakFirst {
             let kick = screening
@@ -1081,23 +1296,14 @@ final class AICallAssistant: ObservableObject {
         per turn, then stop and let them talk.
         - React before you answer, like people do: "oh, okay", "ah, got it", "mm, right", "oh nice". \
         In Chinese: "嗯", "哦这样啊", "好的好的", "对对". Use them naturally, not every time.
-        - A small filler or self-correction now and then is fine ("um", "so, uh", "I mean"); never \
-        overdo it.
-        - Never recap or repeat back everything they said. Never say "I've noted that", "Thank you \
-        for your help", "Is there anything else I can help you with", "Certainly", "Absolutely", \
-        or "Great question". Don't over-thank and don't over-apologize.
-        - No lists, no formal summaries, no reading out structure. Just talk.
-        - Match their energy and pace. If they're brief, be brief. If they joke, it's fine to smile \
-        in your voice.
-        - Warm, natural intonation; speak at a normal conversational speed, a little faster than a \
-        news reader.
-        - If you didn't catch something, just ask like a person: "sorry, what was that?"
-        - End calls the way people do: a quick "okay, thanks, bye!" — not a speech.
+        - Never recap or repeat back everything they said. Never use corporate customer-service phrases.
+        - End calls naturally: a quick "okay, thanks, bye!"
 
         Don't volunteer that you're an AI. If they ask directly, be honest: you're \(ownerText)'s \
         AI assistant, then carry on naturally.
         """
-        let s = Self.makeSession()
+        let useRTC = !settings.usesGemini && settings.useWebRTC && !webrtcUnavailable
+        let s: any VoiceAISession = useRTC ? WebRTCVoiceSession(mode: .realtime) : Self.makeSession()
         s.tag = "agent"
         let decimator = PhoneDecimator()
         s.onAudio = { [weak audio] pcm in
@@ -1116,7 +1322,22 @@ final class AICallAssistant: ObservableObject {
         s.onHeard = { [weak self] t in Task { @MainActor in self?.settle("ag.heard", .them, t, translate: true) } }
         s.onSaid = { [weak self] t in Task { @MainActor in self?.settle("ag.said", .ai, t, translate: true) } }
         s.onError = { [weak self] e in Task { @MainActor in self?.fail(e) } }
-        connect(s, instructions: instructions, interrupt: true)
+
+        if let rtc = s as? WebRTCVoiceSession {
+            let cfg = RealtimeVoiceSession.config(
+                model: settings.realtimeModel,
+                instructions: instructions,
+                voice: settings.voice,
+                interrupt: true,
+                transcribe: true,
+                noiseReduction: "far_field",
+                fastServerVAD: false,
+                forWebRTC: true
+            )
+            rtc.connect(base: settings.trimmedBase, key: settings.apiKey, session: cfg)
+        } else {
+            Self.connect(s, instructions: instructions, interrupt: true, noiseReduction: "far_field")
+        }
         return AgentSession(session: s, heard: heard, goal: goal, screening: screening, ownerText: ownerText)
     }
 
@@ -1133,6 +1354,8 @@ final class AICallAssistant: ObservableObject {
         if self.callID != callID {
             captions = []
             drafts = [:]
+            inboundAwaitingChinese = []
+            outboundAwaitingTranslation = []
             liveSummary = nil
             summary = nil
             summaryError = nil
@@ -1154,14 +1377,16 @@ final class AICallAssistant: ObservableObject {
         AICallSettings.shared.usesGemini ? GeminiLiveSession() : RealtimeVoiceSession()
     }
 
-    private func connect(_ s: any VoiceAISession, instructions: String, interrupt: Bool,
-                         eagerness: String = "high") {
-        AICallLog.write("timing: AI connecting (\(settings.provider))")
-        Self.connect(s, instructions: instructions, interrupt: interrupt, eagerness: eagerness)
-    }
-
-    static func connect(_ s: any VoiceAISession, instructions: String, interrupt: Bool,
-                        eagerness: String = "high", transcribe: Bool = true) {
+    static func connect(
+        _ s: any VoiceAISession,
+        instructions: String,
+        interrupt: Bool,
+        eagerness: String = "high",
+        transcribe: Bool = true,
+        sourceLanguage: String? = nil,
+        noiseReduction: String? = nil,
+        fastServerVAD: Bool = false
+    ) {
         let settings = AICallSettings.shared
         if let g = s as? GeminiLiveSession {
             g.connect(key: settings.geminiKey, model: settings.geminiModel, voice: settings.geminiVoice,
@@ -1176,7 +1401,11 @@ final class AICallAssistant: ObservableObject {
                     voice: settings.voice,
                     interrupt: interrupt,
                     transcribe: transcribe,
-                    eagerness: eagerness
+                    sourceLanguage: sourceLanguage,
+                    noiseReduction: noiseReduction,
+                    fastServerVAD: fastServerVAD,
+                    eagerness: eagerness,
+                    forWebRTC: false
                 )
             )
         }
@@ -1244,7 +1473,6 @@ final class AICallAssistant: ObservableObject {
         runFinalSummary(for: record, notify: notify)
     }
 
-    /// Manually triggers a live summary update while on the call.
     func refreshLiveSummaryNow() {
         guard let record = currentRecordSnapshot() else { return }
         triggerRollingSummary(for: record, force: true)
@@ -1318,7 +1546,6 @@ final class AICallAssistant: ObservableObject {
         }
     }
 
-    /// Formats a call record into a clean transcript for the summary model.
     static func transcriptText(for record: AICallRecord, maxLines: Int = 80) -> String {
         let relevant = record.lines.filter { $0.who != "提示" }.suffix(maxLines)
         return relevant.compactMap { l -> String? in
@@ -1340,7 +1567,6 @@ final class AICallAssistant: ObservableObject {
         }.joined(separator: "\n")
     }
 
-    /// Generates a structured Chinese summary for either a live call or a saved record.
     static func summarizeRecord(
         _ record: AICallRecord,
         previousSummary: StructuredCallSummary? = nil,
@@ -1359,7 +1585,7 @@ final class AICallAssistant: ObservableObject {
             : "这通电话【已经结束】，请整理成一份完整的中文谈话纪要，方便日后查阅和跟进。"
         let prompt = """
         你是一位极简高效的商务中文秘书。\(stageNote)
-        请根据下面的通话内容，输出一个严格的 JSON 对象（不要任何多余解释、不要 Markdown 以外的闲话），字段如下：
+        请根据下面的通话内容，输出一个严格的 JSON 对象（不要任何多余解释），字段如下：
         {
           "topic": "一句话主题（25字以内，说清在谈什么事）",
           "highlights": ["前面已经讲过的重要事实/背景/报价/需求（每条15-35字，精确保留所有数字、金额、时间、人名、地点）"],
@@ -1391,8 +1617,10 @@ final class AICallAssistant: ObservableObject {
         audio?.setDirectMicPassthrough(false)
         directMicPassthrough = false
         for key in Array(drafts.keys) { closeDraft(key) }
+        inboundAwaitingChinese.removeAll()
+        outboundAwaitingTranslation.removeAll()
         phase = ""
-        isSimultaneousActive = false
+        activeEngineBadge = ""
         audio?.setAIRouting(.off)
         if mode != .off { mode = .off }
         status = ""
@@ -1405,7 +1633,7 @@ final class AICallAssistant: ObservableObject {
         add(.note, "AI 已停止，电话交回给你：\(message)")
     }
 
-    // MARK: Captions (symmetric pairing for `.them` and `.me`)
+    // MARK: Captions (strict FIFO pairing — late translations NEVER jump to next turn!)
 
     private var drafts: [String: UUID] = [:]
 
@@ -1414,24 +1642,6 @@ final class AICallAssistant: ObservableObject {
         return captions.lastIndex { $0.id == id }
     }
 
-    /// Finds a recent bubble for the same speaker missing either its primary or paired field.
-    private func recent(
-        _ speaker: AICaption.Speaker,
-        missingChinese: Bool = false,
-        missingTranslation: Bool = false
-    ) -> Int? {
-        guard let i = captions.lastIndex(where: { $0.speaker == speaker }),
-              i >= captions.count - 2 else { return nil }
-        if missingChinese {
-            return (captions[i].chinese ?? "").isEmpty ? i : nil
-        }
-        if missingTranslation {
-            return (captions[i].translation ?? "").isEmpty ? i : nil
-        }
-        return captions[i].text.isEmpty ? i : nil
-    }
-
-    /// Joins streaming transcript deltas without gluing adjacent ASCII words ("confirm" + "the").
     private static func joinDelta(_ existing: String, _ delta: String) -> String {
         guard !existing.isEmpty, !delta.isEmpty,
               let last = existing.unicodeScalars.last,
@@ -1464,14 +1674,18 @@ final class AICallAssistant: ObservableObject {
             }
             return
         }
+
+        // Strict FIFO pairing: attach translation to the OLDEST awaiting bubble of this speaker.
         let target: Int
-        if chinese, let i = index(of: drafts["in.heard"]) ?? recent(speaker, missingChinese: true) {
+        if chinese, let id = inboundAwaitingChinese.first, let i = index(of: id) {
             target = i
             captions[i].chinese = Self.joinDelta(captions[i].chinese ?? "", delta)
-        } else if outboundTranslation, let i = index(of: drafts["out.heard"]) ?? recent(speaker, missingTranslation: true) {
+        } else if outboundTranslation, let id = outboundAwaitingTranslation.first, let i = index(of: id) {
             target = i
             captions[i].translation = Self.joinDelta(captions[i].translation ?? "", delta)
-        } else if !chinese && !outboundTranslation, let i = recent(speaker) {
+        } else if !chinese && !outboundTranslation,
+                  let i = captions.lastIndex(where: { $0.speaker == speaker && $0.text.isEmpty }),
+                  i >= captions.count - 2 {
             target = i
             captions[i].text = Self.joinDelta(captions[i].text, delta)
         } else {
@@ -1486,6 +1700,10 @@ final class AICallAssistant: ObservableObject {
             captions.append(item)
             if captions.count > 300 { captions.removeFirst(captions.count - 300) }
             target = captions.count - 1
+            if !chinese && !outboundTranslation {
+                if speaker == .them { inboundAwaitingChinese.append(item.id) }
+                if speaker == .me { outboundAwaitingTranslation.append(item.id) }
+            }
         }
         captions[target].live = true
         drafts[key] = captions[target].id
@@ -1499,11 +1717,24 @@ final class AICallAssistant: ObservableObject {
         _ text: String,
         translate: Bool = false
     ) {
-        if let i = index(of: drafts.removeValue(forKey: key)) {
+        let resolvedID: UUID?
+        if let draftID = drafts.removeValue(forKey: key) {
+            resolvedID = draftID
+        } else if chinese {
+            resolvedID = inboundAwaitingChinese.first
+        } else if outboundTranslation {
+            resolvedID = outboundAwaitingTranslation.first
+        } else {
+            resolvedID = nil
+        }
+
+        if let id = resolvedID, let i = index(of: id) {
             if chinese {
                 captions[i].chinese = text
+                inboundAwaitingChinese.removeAll { $0 == id }
             } else if outboundTranslation {
                 captions[i].translation = text
+                outboundAwaitingTranslation.removeAll { $0 == id }
             } else {
                 captions[i].text = text
             }
@@ -1512,14 +1743,31 @@ final class AICallAssistant: ObservableObject {
                 translateCaption(captions[i].id, text)
             }
         } else if chinese {
-            attachChinese(text, to: speaker)
+            let item = AICaption(speaker: speaker, text: "", chinese: text)
+            captions.append(item)
         } else if outboundTranslation {
-            attachTranslation(text, to: speaker)
+            let item = AICaption(speaker: speaker, text: "", translation: text)
+            captions.append(item)
         } else {
-            add(speaker, text, translate: translate)
+            // Source speech completed without prior deltas (e.g. Deepgram or fast Realtime)
+            if (speaker == .them || speaker == .me), mode == .translate,
+               let i = captions.lastIndex(where: { $0.speaker == speaker && $0.text.isEmpty }),
+               i >= captions.count - 2 {
+                captions[i].text = text
+            } else {
+                let item = AICaption(speaker: speaker, text: text)
+                captions.append(item)
+                if captions.count > 300 { captions.removeFirst(captions.count - 300) }
+                if speaker == .them && mode == .translate { inboundAwaitingChinese.append(item.id) }
+                if speaker == .me && mode == .translate { outboundAwaitingTranslation.append(item.id) }
+                if translate, !looksChinese(text) { translateCaption(item.id, text) }
+            }
         }
 
-        // Trigger rolling live summary when a meaningful side completes.
+        // Prevent stale unmatched IDs from accumulating indefinitely if a turn had no reply
+        if inboundAwaitingChinese.count > 6 { inboundAwaitingChinese.removeFirst() }
+        if outboundAwaitingTranslation.count > 6 { outboundAwaitingTranslation.removeFirst() }
+
         if speaker != .note, (chinese || key == "out.heard" || key == "ag.heard" || key == "ag.said") {
             maybeTriggerRollingSummary()
         }
@@ -1539,35 +1787,10 @@ final class AICallAssistant: ObservableObject {
     }
 
     private func add(_ speaker: AICaption.Speaker, _ text: String, translate: Bool = false) {
-        if (speaker == .them || speaker == .me), mode == .translate,
-           let i = captions.lastIndex(where: { $0.speaker == speaker }),
-           i >= captions.count - 2,
-           captions[i].text.isEmpty {
-            captions[i].text = text
-            return
-        }
         captions.append(AICaption(speaker: speaker, text: text))
         if captions.count > 300 { captions.removeFirst(captions.count - 300) }
         guard translate, !looksChinese(text) else { return }
         translateCaption(captions.last!.id, text)
-    }
-
-    private func attachChinese(_ zh: String, to speaker: AICaption.Speaker) {
-        if let i = captions.lastIndex(where: { $0.speaker == speaker && ($0.chinese ?? "").isEmpty }),
-           i >= captions.count - 3 {
-            captions[i].chinese = zh
-        } else {
-            captions.append(AICaption(speaker: speaker, text: "", chinese: zh))
-        }
-    }
-
-    private func attachTranslation(_ tr: String, to speaker: AICaption.Speaker) {
-        if let i = captions.lastIndex(where: { $0.speaker == speaker && ($0.translation ?? "").isEmpty }),
-           i >= captions.count - 3 {
-            captions[i].translation = tr
-        } else {
-            captions.append(AICaption(speaker: speaker, text: "", translation: tr))
-        }
     }
 
     private func looksChinese(_ s: String) -> Bool {
@@ -1575,7 +1798,7 @@ final class AICallAssistant: ObservableObject {
         return han * 3 >= s.count
     }
 
-    // MARK: Text model helper (shared for live summary, final summary, and history regen)
+    // MARK: Text model helper
 
     static func chat(_ prompt: String) async throws -> String {
         let settings = AICallSettings.shared
@@ -1628,11 +1851,11 @@ final class AICallAssistant: ObservableObject {
             }
             session.onAudio = { pcm in
                 lock.lock(); bytes += pcm.count; let enough = bytes >= 24_000; lock.unlock()
-                if enough { finish("连接正常，实时语音可用") }
+                if enough { finish("WebSocket 实时语音正常可用") }
             }
             session.onSaid = { _ in
                 lock.lock(); let got = bytes; lock.unlock()
-                finish(got > 0 ? "连接正常，实时语音可用" : "实时语音连上了，但没收到声音")
+                finish(got > 0 ? "WebSocket 实时语音正常可用" : "实时语音连上了，但没收到声音")
             }
             session.onError = { e in finish("Key 正常，但实时语音不行：\(e)") }
             connect(session, instructions: "Reply with one short word.", interrupt: true, transcribe: false)
@@ -1666,34 +1889,44 @@ final class AICallAssistant: ObservableObject {
             }
         }
         guard s.isConfigured else { return "还没填 API Key" }
+
+        if s.translateEngine == "cascade" {
+            let sttName = s.deepgramKey.isEmpty ? "OpenAI 锁定语种听写" : "Deepgram Nova-3"
+            let ttsName = s.cascadeTTSProvider == "cartesia" && !s.cartesiaKey.isEmpty ? "Cartesia Sonic"
+                : s.cascadeTTSProvider == "elevenlabs" && !s.elevenLabsKey.isEmpty ? "ElevenLabs Flash"
+                : "OpenAI gpt-4o-mini-tts"
+            let mtModel = s.cascadeMTModel.isEmpty ? "gpt-5.4-nano" : s.cascadeMTModel
+            do {
+                let t0 = Date()
+                _ = try await chat("Reply OK")
+                let ms = Int(Date().timeIntervalSince(t0) * 1000)
+                return "极速三段接力就绪（\(sttName) → \(mtModel) → \(ttsName)，延迟测试 \(ms) ms）"
+            } catch {
+                return "连不上翻译接口：\(error.localizedDescription)"
+            }
+        }
+
+        if s.useWebRTC {
+            let rtcResult = await WebRTCVoiceSession.testConnection(
+                base: s.trimmedBase, key: s.apiKey, model: s.realtimeModel, voice: s.voice
+            )
+            switch rtcResult {
+            case .ok(let ms):
+                return "WebRTC UDP 通道正常（连接 \(ms) ms），ChatGPT 真人声可用"
+            case .fail(let err):
+                let wsCheck = await realtimeVoiceCheck()
+                return "WebRTC 连不上（\(err)），已测 WebSocket 兜底：\(wsCheck)"
+            }
+        }
+
         if s.usesSimultaneous {
             let liveResult = await TranslateStreamSession.testConnection(base: s.trimmedBase, key: s.apiKey)
             switch liveResult {
-            case .ok(let ms):
-                return "同声传译通道正常（握手 \(ms) ms），可以直接使用"
-            case .fail(let err):
-                let fallback = await realtimeVoiceCheck()
-                return "同传通道不可用（\(err)）；备用逐句模式：\(fallback)"
+            case .ok(let ms): return "同传 WebSocket 正常（握手 \(ms) ms）"
+            case .fail(let err): return "同传不可用：\(err)"
             }
         }
-        guard let url = URL(string: s.trimmedBase + "/v1/models/\(s.realtimeModel)") else {
-            return "AI 地址无效"
-        }
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 15
-        request.setValue("Bearer \(s.apiKey)", forHTTPHeaderField: "Authorization")
-        do {
-            let (_, response) = try await URLSession.shared.data(for: request)
-            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-            switch code {
-            case 200: return await realtimeVoiceCheck()
-            case 401: return "API Key 不对"
-            case 404: return "这个 Key 用不了实时语音模型 \(s.realtimeModel)"
-            default: return "服务器返回 \(code)"
-            }
-        } catch {
-            return "连不上：\(error.localizedDescription)（在国内可能需要代理或中转地址）"
-        }
+        return await realtimeVoiceCheck()
     }
 }
 
@@ -1707,7 +1940,6 @@ final class SpeakerGate: @unchecked Sendable {
         until = max(until, Date()).addingTimeInterval(seconds)
     }
 
-    /// Marks "still sounding now" (0.3 s echo tail follows).
     func hold() {
         lock.lock(); defer { lock.unlock() }
         until = max(until, Date())
@@ -1756,8 +1988,7 @@ enum AICallLog {
     }
 }
 
-/// 24 kHz -> 8 kHz for the phone line with a proper low-pass first, so the AI's
-/// voice comes through clean instead of buzzy.
+/// 24 kHz -> 8 kHz for the phone line with a proper low-pass first.
 final class PhoneDecimator: @unchecked Sendable {
     private static let taps: [Float] = {
         let n = 31, fc: Float = 3_600 / 24_000
