@@ -2,6 +2,7 @@ import AppKit
 import CoreImage
 import SwiftUI
 import UniformTypeIdentifiers
+import WebKit
 
 /// An SMS a QR code asks the phone to send, such as Google's "scan this code
 /// to send a text" sign-in check: smsto:<number>:<text> or
@@ -39,6 +40,18 @@ struct QRSMS: Equatable {
         guard number.count >= 3 else { return nil }
     }
 
+    /// Google's QR code is not an SMS but a page for the phone to open
+    /// (accounts.google.com/devicephoneverification/...), which then asks
+    /// the phone to send the SMS.
+    static func verifyPage(_ text: String) -> URL? {
+        guard let url = URL(string: text.trimmingCharacters(in: .whitespacesAndNewlines)),
+              url.scheme?.lowercased() == "https",
+              let host = url.host?.lowercased(),
+              host == "google.com" || host.hasSuffix(".google.com")
+        else { return nil }
+        return url
+    }
+
     /// Finds an SMS QR code in an image; also returns the text of any other
     /// QR code found, to explain what it was.
     static func scan(_ image: NSImage) -> (sms: QRSMS?, other: String?) {
@@ -67,6 +80,8 @@ struct QRSMSSheet: View {
     @State private var capturing = false
     @State private var sending = false
     @State private var sent = false
+    /// Google's verification page, opened as a phone would.
+    @State private var verifyURL: URL?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -78,7 +93,20 @@ struct QRSMSSheet: View {
                 CardCapabilityBanner(capability: capability)
             }
 
-            dropZone
+            if let verifyURL, sms == nil {
+                Text(L10n.t("这是谷歌的手机验证网页，已按手机方式打开。网页上如果有「发送短信 / Send SMS」按钮就点一下，DJOneHub 会接住这条短信，再用模块里的卡发出。"))
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                PhoneWebView(url: verifyURL) { code in
+                    sms = code
+                    sent = false
+                    note = (L10n.t("谷歌网页给出了验证短信，确认后点「发送短信」"), true)
+                }
+                .frame(height: 520)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary))
+            } else {
+                dropZone
+            }
 
             if let note {
                 Text(note.0).font(.caption).foregroundStyle(note.1 ? Color.green : Color.orange)
@@ -115,7 +143,7 @@ struct QRSMSSheet: View {
             }
         }
         .padding(20)
-        .frame(width: 440)
+        .frame(width: verifyURL != nil && sms == nil ? 460 : 440)
         .onAppear { readPasteboard(quiet: true) }
     }
 
@@ -150,6 +178,8 @@ struct QRSMSSheet: View {
             sms = code
             sent = false
             note = (L10n.t("已从\(source)识别出短信二维码"), true)
+        } else if let other = found.other, let page = QRSMS.verifyPage(other) {
+            openVerifyPage(page)
         } else if let other = found.other {
             note = (L10n.t("找到了二维码，但它不是“发送短信”的二维码：") + String(other.prefix(80)), false)
         } else {
@@ -184,14 +214,27 @@ struct QRSMSSheet: View {
         use(image: NSImage(pasteboard: board), source: L10n.t("屏幕"))
     }
 
+    private func openVerifyPage(_ page: URL) {
+        sms = nil
+        sent = false
+        verifyURL = page
+        note = nil
+    }
+
     private func readPasteboard(quiet: Bool) {
         let board = NSPasteboard.general
         if let text = board.string(forType: .string), let code = QRSMS(text) {
             sms = code
             note = (L10n.t("已从剪贴板文字识别出短信二维码"), true)
-        } else if let image = NSImage(pasteboard: board), let code = QRSMS.scan(image).sms {
-            sms = code
-            note = (L10n.t("已从剪贴板截图识别出短信二维码"), true)
+        } else if !quiet, let text = board.string(forType: .string), let page = QRSMS.verifyPage(text) {
+            openVerifyPage(page)
+        } else if let image = NSImage(pasteboard: board), let found = Optional(QRSMS.scan(image)), found.sms != nil || (!quiet && found.other.flatMap(QRSMS.verifyPage) != nil) {
+            if let code = found.sms {
+                sms = code
+                note = (L10n.t("已从剪贴板截图识别出短信二维码"), true)
+            } else if let page = found.other.flatMap(QRSMS.verifyPage) {
+                openVerifyPage(page)
+            }
         } else if !quiet {
             note = (L10n.t("剪贴板里没有短信二维码。先按 ⌘⇧⌃4 框选二维码，再点「粘贴截图」。"), false)
         }
@@ -237,6 +280,54 @@ struct QRSMSSheet: View {
             Toast.shared.show(L10n.t("验证短信已发出，回网页点下一步"), .success)
         } catch {
             note = (L10n.t("发送失败：") + error.localizedDescription, false)
+        }
+    }
+}
+
+/// A web page shown as an iPhone would see it. When the page asks to send an
+/// SMS (an sms: link), the SMS is handed back instead of leaving the app.
+struct PhoneWebView: NSViewRepresentable {
+    let url: URL
+    let onSMS: (QRSMS) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(onSMS: onSMS) }
+
+    func makeNSView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .nonPersistent()
+        let view = WKWebView(frame: .zero, configuration: config)
+        view.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
+        view.navigationDelegate = context.coordinator
+        view.uiDelegate = context.coordinator
+        view.load(URLRequest(url: url))
+        return view
+    }
+
+    func updateNSView(_ view: WKWebView, context: Context) {}
+
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
+        let onSMS: (QRSMS) -> Void
+        init(onSMS: @escaping (QRSMS) -> Void) { self.onSMS = onSMS }
+
+        private func take(_ url: URL?) -> Bool {
+            guard let url, let scheme = url.scheme?.lowercased(),
+                  ["sms", "smsto", "mmsto"].contains(scheme) else { return false }
+            if let code = QRSMS(url.absoluteString) {
+                DispatchQueue.main.async { self.onSMS(code) }
+            }
+            return true
+        }
+
+        func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void) {
+            decisionHandler(take(action.request.url) ? .cancel : .allow)
+        }
+
+        // Links that open a new window (target=_blank, window.open).
+        func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+            if !take(action.request.url), let url = action.request.url {
+                webView.load(URLRequest(url: url))
+            }
+            return nil
         }
     }
 }
