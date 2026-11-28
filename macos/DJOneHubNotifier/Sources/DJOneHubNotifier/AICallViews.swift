@@ -325,6 +325,15 @@ struct AICallSettingsCard: View {
                     TextField("gpt-5.4-mini", text: $aiSettings.textModel)
                         .textFieldStyle(.roundedBorder)
                 }
+                row("翻译方式") {
+                    Picker("", selection: $aiSettings.translateStyle) {
+                        Text("同声传译（边说边翻）").tag("simultaneous")
+                        Text("逐句翻译（说完再翻，会整理语句）").tag("turn")
+                    }
+                    .labelsHidden()
+                    .frame(width: 260)
+                    Spacer()
+                }
                 row("AI 的声音") {
                     Picker("", selection: $aiSettings.voice) {
                         ForEach(voices, id: \.self) { Text($0).tag($0) }
@@ -339,7 +348,6 @@ struct AICallSettingsCard: View {
                     .textFieldStyle(.roundedBorder)
             }
             Toggle("来电响几声后让 AI 自动接听，问清对方是谁、什么事", isOn: $aiSettings.autoScreenIncoming)
-            Toggle("翻译时，你说话的空档给对方放很轻的提示音（让对方知道没断线）", isOn: $aiSettings.waitTone)
             HStack {
                 Button(testing ? "检测中…" : "检测连接") {
                     testing = true

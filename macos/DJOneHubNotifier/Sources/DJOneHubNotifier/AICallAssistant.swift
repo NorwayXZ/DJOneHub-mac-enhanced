@@ -16,7 +16,10 @@ final class AICallSettings: ObservableObject {
     @AppStorage("ai.voice") var voice = "marin"
     @AppStorage("ai.ownerName") var ownerName = ""
     @AppStorage("ai.autoScreen") var autoScreenIncoming = false
-    @AppStorage("ai.waitTone") var waitTone = true
+    /// "simultaneous": OpenAI's live interpreter speaks while you talk.
+    /// "turn": translates each sentence after you finish (can tidy up wording).
+    @AppStorage("ai.translateStyle") var translateStyle = "simultaneous"
+    var usesSimultaneous: Bool { !usesGemini && translateStyle == "simultaneous" }
     /// "openai" or "gemini": which live voice engine the call AI uses.
     @Published var provider = UserDefaults.standard.string(forKey: "ai.provider") ?? "openai" {
         didSet { UserDefaults.standard.set(provider, forKey: "ai.provider") }
@@ -148,6 +151,20 @@ struct CallLanguage: Identifiable, Hashable {
     ].map { CallLanguage(id: $0.0, name: $0.1) }
 
     static func find(_ id: String) -> CallLanguage { all.first { $0.id == id } ?? all[0] }
+
+    /// ISO 639-1 code for the live interpreter.
+    var code: String {
+        let codes = [
+            "English": "en", "Japanese": "ja", "Korean": "ko", "German": "de", "French": "fr",
+            "Spanish": "es", "Italian": "it", "Portuguese": "pt", "Russian": "ru", "Dutch": "nl",
+            "Polish": "pl", "Turkish": "tr", "Arabic": "ar", "Hebrew": "he", "Thai": "th",
+            "Vietnamese": "vi", "Indonesian": "id", "Malay": "ms", "Hindi": "hi", "Swedish": "sv",
+            "Norwegian": "no", "Danish": "da", "Finnish": "fi", "Greek": "el", "Czech": "cs",
+            "Hungarian": "hu", "Romanian": "ro", "Ukrainian": "uk", "Cantonese": "zh",
+            "Mandarin Chinese": "zh",
+        ]
+        return codes[id] ?? "en"
+    }
 
     /// Languages with their own writing system, recognised without a model.
     static func byScript(_ text: String) -> CallLanguage? {
@@ -539,27 +556,64 @@ final class AICallAssistant: ObservableObject {
         """
 
     /// Both interpreter connections, opened before you press "AI 翻译".
-    private final class InterpreterPair {
+    @MainActor private final class InterpreterPair {
         let inbound: any VoiceAISession
         let outbound: any VoiceAISession
         var language: String
         let callID: String
+        let simultaneous: Bool
         var broken = false
-        init(inbound: any VoiceAISession, outbound: any VoiceAISession, language: String, callID: String) {
+        init(inbound: any VoiceAISession, outbound: any VoiceAISession, language: String, callID: String,
+             simultaneous: Bool) {
             self.inbound = inbound; self.outbound = outbound; self.language = language; self.callID = callID
+            self.simultaneous = simultaneous
+        }
+        /// Points the you→them direction at another language.
+        func retarget(_ lang: String) {
+            language = lang
+            if let live = outbound as? TranslateStreamSession {
+                live.setLanguage(CallLanguage.find(lang).code)
+            } else {
+                outbound.updateInstructions(AICallAssistant.outboundPrompt(base: AICallAssistant.interpreterBase,
+                                                                          language: lang))
+            }
         }
         func close() { inbound.close(); outbound.close() }
     }
 
     private var warmInterpreter: InterpreterPair?
 
+    /// Set when the live interpreter failed (model or language not available):
+    /// later calls go straight to sentence-by-sentence translation.
+    private var simultaneousUnavailable = false
+
     private func makeInterpreter(language lang: String, callID: String) -> InterpreterPair {
+        let live = settings.usesSimultaneous && !simultaneousUnavailable
+        if live {
+            let inbound = TranslateStreamSession()
+            let outbound = TranslateStreamSession()
+            inbound.tag = "in"
+            outbound.tag = "out"
+            let pair = InterpreterPair(inbound: inbound, outbound: outbound, language: lang, callID: callID,
+                                       simultaneous: true)
+            for s in [pair.inbound, pair.outbound] {
+                s.onError = { [weak pair] e in
+                    AICallLog.write("warm interpreter error: \(e)")
+                    Task { @MainActor in pair?.broken = true }
+                }
+            }
+            AICallLog.write("timing: AI connecting (live interpreter)")
+            inbound.connect(base: settings.trimmedBase, key: settings.apiKey, language: "zh", transcribe: true)
+            outbound.connect(base: settings.trimmedBase, key: settings.apiKey,
+                             language: CallLanguage.find(lang).code, transcribe: true)
+            return pair
+        }
         let pair = InterpreterPair(inbound: Self.makeSession(), outbound: Self.makeSession(),
-                                   language: lang, callID: callID)
+                                   language: lang, callID: callID, simultaneous: false)
         for s in [pair.inbound, pair.outbound] {
             s.onError = { [weak pair] e in
                 AICallLog.write("warm interpreter error: \(e)")
-                pair?.broken = true
+                Task { @MainActor in pair?.broken = true }
             }
         }
         // "high": answer as soon as a sentence is complete. Patient end-of-turn
@@ -595,13 +649,11 @@ final class AICallAssistant: ObservableObject {
         if autoLanguage, language.id == "Mandarin Chinese" { language = CallLanguage.find("English") }
         let lang = language.id
         let pair: InterpreterPair
-        if let warm = warmInterpreter, warm.callID == callID, !warm.broken {
+        if let warm = warmInterpreter, warm.callID == callID, !warm.broken,
+           warm.simultaneous == (settings.usesSimultaneous && !simultaneousUnavailable) {
             pair = warm
             AICallLog.write("timing: using prewarmed interpreter")
-            if warm.language != lang {
-                warm.outbound.updateInstructions(Self.outboundPrompt(base: Self.interpreterBase, language: lang))
-                warm.language = lang
-            }
+            if warm.language != lang { warm.retarget(lang) }
         } else {
             warmInterpreter?.close()
             pair = makeInterpreter(language: lang, callID: callID)
@@ -609,7 +661,7 @@ final class AICallAssistant: ObservableObject {
         warmInterpreter = nil
         let inbound = pair.inbound
         let outbound = pair.outbound
-        let tone = settings.waitTone
+        let live = pair.simultaneous
         // While the Chinese translation plays on the speaker, the microphone
         // would hear it; hold the mic back so it isn't translated again.
         let gate = SpeakerGate()
@@ -630,20 +682,13 @@ final class AICallAssistant: ObservableObject {
         } }
         let outDecimator = PhoneDecimator()
         outbound.onAudio = { [weak audio] pcm in
-            audio?.setWaitingTone(false)
             audio?.sendAssistantSpeech(outDecimator.process(pcm))
         }
         outbound.onSpeechStarted = { [weak self] in
             Task { @MainActor in self?.setPhase("你在说…") }
         }
-        // The pulse only fills the gap between you finishing and the
-        // translation starting, and only if that gap is noticeable.
-        outbound.onSpeechStopped = { [weak self, weak audio] in
-            if tone { audio?.setWaitingTone(true) }
-            Task { @MainActor in
-                self?.setPhase("正在翻译给对方…")
-                self?.capWaitingTone()
-            }
+        outbound.onSpeechStopped = { [weak self] in
+            Task { @MainActor in self?.setPhase("正在翻译给对方…") }
         }
         outbound.onHeardDelta = { [weak self] d in Task { @MainActor in self?.draft("out.heard", .me, d) } }
         outbound.onSaidDelta = { [weak self] d in Task { @MainActor in
@@ -651,20 +696,26 @@ final class AICallAssistant: ObservableObject {
             self?.draft("out.said", .ai, d)
         } }
         outbound.onHeard = { [weak self] t in Task { @MainActor in self?.settle("out.heard", .me, t) } }
-        outbound.onSaid = { [weak self, weak audio] t in
-            audio?.setWaitingTone(false)
+        outbound.onSaid = { [weak self] t in
             Task { @MainActor in
                 self?.settle("out.said", .ai, t)
                 self?.setPhase("等对方回话")
             }
         }
         for s in [inbound, outbound] {
-            s.onError = { [weak self] e in Task { @MainActor in self?.fail(e) } }
+            s.onError = { [weak self] e in Task { @MainActor in
+                if live { self?.liveInterpreterFailed(e) } else { self?.fail(e) }
+            } }
         }
         audio.onRemoteAudio = { [weak inbound] pcm in inbound?.appendAudio8k(pcm) }
         audio.onLocalAudio = { [weak outbound, weak audio] pcm in
             if audio?.isAssistantSounding == true { gate.hold() }
-            if !gate.isSpeaking { outbound?.appendAudio8k(pcm) }
+            if !gate.isSpeaking {
+                outbound?.appendAudio8k(pcm)
+            } else if live {
+                // The live interpreter needs a steady stream: silence, not gaps.
+                outbound?.appendAudio8k(Data(count: pcm.count))
+            }
         }
         audio.onAssistantBacklogDropped = { [weak self] in Task { @MainActor in
             self?.add(.note, "对方说得太长，中文语音落后太多，跳过了一段；请看上面的字幕")
@@ -675,20 +726,22 @@ final class AICallAssistant: ObservableObject {
         audio.setAIRouting(.translate)
         mode = .translate
         usedModes.insert("AI 翻译")
+        interpreterPair = pair
         updateTranslateStatus()
-        setPhase("请说，或等对方说")
+        setPhase(live ? "同声传译中：直接说，边说边翻" : "请说，或等对方说")
     }
 
-    private var toneCap: Task<Void, Never>?
+    private var interpreterPair: InterpreterPair?
 
-    /// The pulse never runs on for long if no translation comes out.
-    private func capWaitingTone() {
-        toneCap?.cancel()
-        toneCap = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(6))
-            guard !Task.isCancelled else { return }
-            self?.audio?.setWaitingTone(false)
-        }
+    /// The live interpreter isn't available (model, language or network):
+    /// carry on with sentence-by-sentence translation instead of stopping.
+    private func liveInterpreterFailed(_ message: String) {
+        guard mode == .translate, let callID, let audio else { return }
+        AICallLog.write("live interpreter failed, falling back: \(message)")
+        simultaneousUnavailable = true
+        stopSessions()
+        add(.note, "同声传译用不了（\(message)），已改成逐句翻译")
+        startTranslate(callID: callID, number: callNumber, audio: audio)
     }
 
     private func setPhase(_ text: String) {
@@ -714,8 +767,8 @@ final class AICallAssistant: ObservableObject {
     func setTargetLanguage(_ lang: CallLanguage, auto: Bool = false) {
         if auto && lang == language { return }
         language = lang
-        if mode == .translate, let out = outboundSession {
-            out.updateInstructions(Self.outboundPrompt(base: interpreterBase, language: lang.id))
+        if mode == .translate, outboundSession != nil, let pair = interpreterPair {
+            pair.retarget(lang.id)
             if auto { add(.note, "识别到对方说\(lang.name)，你说的中文会翻成\(lang.name)") }
             updateTranslateStatus()
         }
@@ -1020,7 +1073,6 @@ final class AICallAssistant: ObservableObject {
     private func stopSessions() {
         sessions.forEach { $0.close() }
         sessions = []
-        toneCap?.cancel()
         audio?.onRemoteAudio = nil
         audio?.onLocalAudio = nil
         audio?.onAssistantBacklogDropped = nil
