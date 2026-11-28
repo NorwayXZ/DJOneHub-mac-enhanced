@@ -564,7 +564,7 @@ final class AICallAssistant: ObservableObject {
     /// Opens the interpreter as soon as a call starts, so "AI 翻译" works at once.
     func prewarmInterpreter(callID: String, number: String?) {
         guard settings.isConfigured, mode == .off, prewarmed == nil, pendingGoal == nil,
-              warmInterpreter?.callID != callID else { return }
+              warmInterpreter?.callID != callID, !endedCalls.contains(callID) else { return }
         warmInterpreter?.close()
         var lang = CallLanguage.guess(for: number)
         if lang.id == "Mandarin Chinese" { lang = CallLanguage.find("English") }
@@ -707,10 +707,14 @@ final class AICallAssistant: ObservableObject {
 
     fileprivate func noticeLanguage(of text: String) {
         guard autoLanguage, mode == .translate, !detecting else { return }
+        // Chinese on their side is nearly always your own voice coming back
+        // down the line (or a Chinese speaker who doesn't need translating):
+        // never switch the interpreter to Chinese-to-Chinese.
         if let lang = CallLanguage.byScript(text) {
-            setTargetLanguage(lang, auto: true)
+            if lang.id != "Mandarin Chinese" { setTargetLanguage(lang, auto: true) }
             return
         }
+        if looksChinese(text) { return }
         // Latin-script languages need a quick look from the text model.
         let words = text.split(separator: " ").count
         guard words >= 2 || text.count >= 8 else { return }
@@ -720,7 +724,8 @@ final class AICallAssistant: ObservableObject {
             let names = CallLanguage.all.map(\.id).joined(separator: ", ")
             guard let answer = try? await chat("Which language is this phone-call sentence in? Answer with exactly one name from this list and nothing else: \(names).\n\n\(text)") else { return }
             let name = answer.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
-            if let lang = CallLanguage.all.first(where: { $0.id.caseInsensitiveCompare(name) == .orderedSame }) {
+            if let lang = CallLanguage.all.first(where: { $0.id.caseInsensitiveCompare(name) == .orderedSame }),
+               !lang.id.contains("Chinese") {
                 setTargetLanguage(lang, auto: true)
             }
         }
@@ -957,6 +962,8 @@ final class AICallAssistant: ObservableObject {
 
     /// The call ended.
     func callEnded() {
+        if let warm = warmInterpreter { endedCalls.insert(warm.callID) }
+        if let callID { endedCalls.insert(callID) }
         dropPrewarmed()
         dropWarmInterpreter()
         stopSessions()
@@ -972,6 +979,8 @@ final class AICallAssistant: ObservableObject {
     private var callStartedAt: Date?
     private var callNumber: String?
     private var summarizedCalls: Set<String> = []
+    /// Hung up calls: the backend may still list one for a moment.
+    private var endedCalls: Set<String> = []
 
     /// Keeps the bilingual captions (and later the summary) after the call.
     private func saveRecord(summarizing: Bool) {
