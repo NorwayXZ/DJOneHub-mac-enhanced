@@ -776,6 +776,7 @@ private struct MessagesView: View {
     @State private var ownNumber = ""
     @State private var autoCleanupME = true
     @State private var cardCapability: CardCapability?
+    @State private var showingQRSMS = false
 
     private var conversations: [Conversation] {
         var latest: [String: (content: String, date: Date)] = [:]
@@ -837,6 +838,18 @@ private struct MessagesView: View {
                         .font(.caption)
                         .foregroundStyle(.red)
                         .lineLimit(1)
+                }
+                Button {
+                    showingQRSMS = true
+                } label: {
+                    Image(systemName: "qrcode.viewfinder")
+                        .font(.body.weight(.semibold))
+                }
+                .buttonStyle(.plain)
+                .help(L10n.t("扫码发短信（如谷歌登录验证）"))
+                .sheet(isPresented: $showingQRSMS) {
+                    QRSMSSheet(ownNumber: ownNumber, capability: cardCapability)
+                        .environmentObject(calls)
                 }
                 Button {
                     composerRecipient = ""
