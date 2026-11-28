@@ -299,6 +299,21 @@ enum PCM {
         }
         return out.withUnsafeBytes { Data($0) }
     }
+
+    /// Normalized RMS energy (0.0 – 1.0) of little-endian PCM16 audio.
+    static func rms16(_ data: Data) -> Double {
+        let n = data.count / 2
+        guard n > 0 else { return 0 }
+        var sum = 0.0
+        data.withUnsafeBytes { raw in
+            let s = raw.bindMemory(to: Int16.self)
+            for i in 0 ..< n {
+                let v = Double(Int16(littleEndian: s[i])) / 32_768.0
+                sum += v * v
+            }
+        }
+        return sqrt(sum / Double(n))
+    }
 }
 
 /// Thread-safe boolean flag shared between UI (@MainActor) and audio capture queue.
@@ -802,6 +817,7 @@ final class AICallAssistant: ObservableObject {
         // Caller (8 kHz cellular) -> inbound interpreter
         audio.onRemoteAudio = { [weak inbound] pcm in inbound?.appendAudio8k(pcm) }
         // User's Mac mic (wideband 24 kHz!) -> outbound interpreter
+        let micSpeechLogged = AtomicBool(false)
         audio.onLocalAudio = nil
         audio.onLocalAudio24k = { [weak outbound, weak audio] pcm24 in
             if !headset.value {
@@ -809,6 +825,13 @@ final class AICallAssistant: ObservableObject {
                 if gate.isSpeaking {
                     if live { outbound?.appendAudio24k(Data(count: pcm24.count)) }
                     return
+                }
+            }
+            if !micSpeechLogged.value {
+                let r = PCM.rms16(pcm24)
+                if r >= 0.015 {
+                    micSpeechLogged.value = true
+                    AICallLog.write(String(format: "out mic: first voice forwarded rms=%.4f", r))
                 }
             }
             outbound?.appendAudio24k(pcm24)
@@ -1408,6 +1431,21 @@ final class AICallAssistant: ObservableObject {
         return captions[i].text.isEmpty ? i : nil
     }
 
+    /// Joins streaming transcript deltas without gluing adjacent ASCII words ("confirm" + "the").
+    private static func joinDelta(_ existing: String, _ delta: String) -> String {
+        guard !existing.isEmpty, !delta.isEmpty,
+              let last = existing.unicodeScalars.last,
+              let first = delta.unicodeScalars.first else {
+            return existing + delta
+        }
+        let isASCIITail = last.isASCII && (CharacterSet.alphanumerics.contains(last) || ".!?,;:".unicodeScalars.contains(last))
+        let isASCIIHead = first.isASCII && CharacterSet.alphanumerics.contains(first)
+        if isASCIITail && isASCIIHead && !(last == "." && CharacterSet.decimalDigits.contains(first)) {
+            return existing + " " + delta
+        }
+        return existing + delta
+    }
+
     private func draft(
         _ key: String,
         _ speaker: AICaption.Speaker,
@@ -1418,24 +1456,24 @@ final class AICallAssistant: ObservableObject {
         guard mode != .off else { return }
         if let i = index(of: drafts[key]) {
             if chinese {
-                captions[i].chinese = (captions[i].chinese ?? "") + delta
+                captions[i].chinese = Self.joinDelta(captions[i].chinese ?? "", delta)
             } else if outboundTranslation {
-                captions[i].translation = (captions[i].translation ?? "") + delta
+                captions[i].translation = Self.joinDelta(captions[i].translation ?? "", delta)
             } else {
-                captions[i].text += delta
+                captions[i].text = Self.joinDelta(captions[i].text, delta)
             }
             return
         }
         let target: Int
         if chinese, let i = index(of: drafts["in.heard"]) ?? recent(speaker, missingChinese: true) {
             target = i
-            captions[i].chinese = (captions[i].chinese ?? "") + delta
+            captions[i].chinese = Self.joinDelta(captions[i].chinese ?? "", delta)
         } else if outboundTranslation, let i = index(of: drafts["out.heard"]) ?? recent(speaker, missingTranslation: true) {
             target = i
-            captions[i].translation = (captions[i].translation ?? "") + delta
+            captions[i].translation = Self.joinDelta(captions[i].translation ?? "", delta)
         } else if !chinese && !outboundTranslation, let i = recent(speaker) {
             target = i
-            captions[i].text += delta
+            captions[i].text = Self.joinDelta(captions[i].text, delta)
         } else {
             let item: AICaption
             if chinese {

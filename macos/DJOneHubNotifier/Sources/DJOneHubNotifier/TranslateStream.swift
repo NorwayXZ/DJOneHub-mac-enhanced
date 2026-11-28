@@ -35,6 +35,12 @@ final class TranslateStreamSession: NSObject, VoiceAISession, @unchecked Sendabl
     private var saidGen = 0
     private var connectedAt = Date()
     private var firstAudioLogged = false
+    private var firstSpeechAudioLogged = false
+    // `gpt-realtime-translate` emits 400 ms silent PCM packets continuously
+    // even when nobody is speaking. Drop idle silence so it neither locks the
+    // speaker echo-gate nor builds artificial latency in the phone uplink queue.
+    private var speechHangoverChunks = 0
+    private static let speechRMSThreshold = 0.004
     private static let captionPause: TimeInterval = 1.2
     /// 60 ms at 24 kHz mono PCM16 (lower latency than 100 ms, still compact).
     private static let chunkBytes24k = 2_880
@@ -272,14 +278,29 @@ final class TranslateStreamSession: NSObject, VoiceAISession, @unchecked Sendabl
             }
         case "session.output_audio.delta":
             guard let b64 = event["delta"] as? String, var pcm = Data(base64Encoded: b64) else { return }
+            if !leftover.isEmpty { pcm = leftover + pcm; leftover.removeAll() }
+            if pcm.count % 2 == 1 { leftover = pcm.suffix(1); pcm.removeLast() }
             if !firstAudioLogged {
                 firstAudioLogged = true
                 let ms = Int(Date().timeIntervalSince(connectedAt) * 1000)
-                AICallLog.write("\(tag) translate: first audio at +\(ms) ms")
+                AICallLog.write("\(tag) translate: stream alive at +\(ms) ms")
             }
-            if !leftover.isEmpty { pcm = leftover + pcm; leftover.removeAll() }
-            if pcm.count % 2 == 1 { leftover = pcm.suffix(1); pcm.removeLast() }
-            onAudio?(pcm)
+            let rms = PCM.rms16(pcm)
+            if rms >= Self.speechRMSThreshold {
+                speechHangoverChunks = 1
+                if !firstSpeechAudioLogged {
+                    firstSpeechAudioLogged = true
+                    let ms = Int(Date().timeIntervalSince(connectedAt) * 1000)
+                    AICallLog.write(String(format: "%@ translate: first SPEECH audio at +%d ms rms=%.4f", tag, ms, rms))
+                }
+                onAudio?(pcm)
+            } else if speechHangoverChunks > 0 {
+                // Keep one brief trailing tail (150 ms) after real speech so
+                // phrase endings sound natural without queuing idle silence.
+                speechHangoverChunks -= 1
+                let tailBytes = min(pcm.count, 7_200)
+                if tailBytes >= 2 { onAudio?(pcm.prefix(tailBytes - (tailBytes % 2))) }
+            }
         case "session.input_transcript.delta":
             guard let d = event["delta"] as? String, !d.isEmpty else { return }
             if heardText.isEmpty { onSpeechStarted?() }

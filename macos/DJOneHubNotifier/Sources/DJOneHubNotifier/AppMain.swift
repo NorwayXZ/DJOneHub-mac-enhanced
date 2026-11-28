@@ -83,6 +83,10 @@ enum SelfTest {
         var hp = WidebandHighPassFilter()
         let filtered = hp.process([0.5, 0.5, -0.25, 0.25], sampleRate: 48_000)
         precondition(filtered.count == 4 && filtered.allSatisfy(\.isFinite))
+        precondition(PCM.rms16(Data(count: 400)) == 0)
+        let loudSamples: [Int16] = [10_000, -10_000, 10_000, -10_000]
+        let loudRMS = PCM.rms16(loudSamples.withUnsafeBytes { Data($0) })
+        precondition(loudRMS > 0.25)
         print("DJOneHubNotifier self-test passed")
     }
 }

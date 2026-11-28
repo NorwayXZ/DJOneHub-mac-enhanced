@@ -54,8 +54,11 @@ final class VoiceAudioService {
     // AI speech queued on the Mac speaker (24 kHz frames), used to keep the
     // translation from falling further and further behind.
     private var assistantTimePitch: AVAudioUnitTimePitch?
-    private var assistantQueuedFrames = 0 {
-        didSet { stateLock.withLock { assistantSounding = assistantQueuedFrames > 0 } }
+    private var assistantQueuedFrames = 0
+    /// Audible (non-silent) AI speech frames currently queued on the Mac speaker.
+    /// Keeps digital-silence packets from falsely locking the speaker echo-gate.
+    private var assistantAudibleFrames = 0 {
+        didSet { stateLock.withLock { assistantSounding = assistantAudibleFrames > 0 } }
     }
     private var assistantSounding = false
     /// AI speech is still playing on the Mac speaker (thread-safe).
@@ -516,18 +519,29 @@ final class VoiceAudioService {
                   let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)),
                   let out = buffer.floatChannelData?[0] else { return }
             buffer.frameLength = AVAudioFrameCount(frames)
+            var peak: Float = 0
             pcm.withUnsafeBytes { raw in
                 let samples = raw.bindMemory(to: Int16.self)
-                for i in 0 ..< frames { out[i] = Float(Int16(littleEndian: samples[i])) / 32_768 }
+                for i in 0 ..< frames {
+                    let v = Float(Int16(littleEndian: samples[i])) / 32_768
+                    out[i] = v
+                    let a = abs(v)
+                    if a > peak { peak = a }
+                }
             }
+            let audible = peak >= 0.012
             let translating = self.stateLock.withLock { self.aiRouting } == .translate
             if translating { self.paceAssistant(adding: frames, sampleRate: sampleRate) }
             let generation = self.assistantGeneration
             self.assistantQueuedFrames += frames
+            if audible { self.assistantAudibleFrames += frames }
             node.scheduleBuffer(buffer) { [weak self] in
                 self?.playbackQueue.async {
                     guard let self, self.assistantGeneration == generation else { return }
                     self.assistantQueuedFrames = max(0, self.assistantQueuedFrames - frames)
+                    if audible {
+                        self.assistantAudibleFrames = max(0, self.assistantAudibleFrames - frames)
+                    }
                     if self.assistantQueuedFrames < Int(sampleRate) { self.assistantTimePitch?.rate = 1 }
                 }
             }
@@ -552,6 +566,7 @@ final class VoiceAudioService {
     private func resetAssistantPlayer() {
         assistantGeneration &+= 1
         assistantQueuedFrames = 0
+        assistantAudibleFrames = 0
         assistantTimePitch?.rate = 1
         assistantPlayer?.stop()
         assistantPlayer?.play()
@@ -667,6 +682,7 @@ final class VoiceAudioService {
             self.assistantPlayer = assistant
             self.assistantTimePitch = timePitch
             self.assistantQueuedFrames = 0
+            self.assistantAudibleFrames = 0
             return voiceProcessingEnabled
         }
     }
@@ -684,6 +700,7 @@ final class VoiceAudioService {
             self.assistantTimePitch = nil
             self.assistantGeneration &+= 1
             self.assistantQueuedFrames = 0
+            self.assistantAudibleFrames = 0
             self.engine = nil
             scheduledPlaybackFrames = 0
         }
