@@ -204,6 +204,13 @@ final class RealtimeVoiceSession: NSObject, @unchecked Sendable {
     private var updateSent = false
     private var ready = false
     private var queuedResponse: [String: Any]?
+    private var answerAfterCurrent = false
+    /// Errors about a single turn that must not end the whole session.
+    private static let harmlessErrors: Set<String> = [
+        "response_cancel_not_active",
+        "input_audio_buffer_commit_empty",
+        "conversation_already_has_active_response",
+    ]
 
     func connect(base: String, model: String, key: String, session: [String: Any]) {
         let wsBase = base.replacingOccurrences(of: "https://", with: "wss://")
@@ -326,11 +333,30 @@ final class RealtimeVoiceSession: NSObject, @unchecked Sendable {
             }
         case "input_audio_buffer.speech_started":
             onSpeechStarted?()
+        case "response.done":
+            // A turn finished while the previous translation was still being
+            // spoken: answer it now instead of dropping it.
+            queue.async { [weak self] in
+                guard let self, self.answerAfterCurrent, !self.closed else { return }
+                self.answerAfterCurrent = false
+                self.send(["type": "response.create", "response": [:] as [String: Any]])
+            }
         case "error":
             let err = event["error"] as? [String: Any]
             let msg = (err?["message"] as? String) ?? "未知错误"
-            // Cancelling a response that already finished is harmless.
-            if (err?["code"] as? String) != "response_cancel_not_active" {
+            let code = (err?["code"] as? String) ?? ""
+            let message = msg.lowercased()
+            if code == "conversation_already_has_active_response" || message.contains("active response in progress") {
+                // The speaker started a new sentence before the last one was
+                // translated: queue it, it's not a failure.
+                queue.async { [weak self] in self?.answerAfterCurrent = true }
+            } else if Self.harmlessErrors.contains(code) {
+                break
+            } else if queue.sync(execute: { ready }) {
+                // Once the call is running, one bad turn shouldn't hang up on
+                // the AI; it is logged and the conversation carries on.
+                AICallLog.write("non-fatal error \(code): \(msg)")
+            } else {
                 onError?("AI 出错：\(msg)")
             }
         default:
