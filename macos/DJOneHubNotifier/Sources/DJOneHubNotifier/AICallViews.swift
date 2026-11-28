@@ -114,6 +114,9 @@ struct AICallPanel: View {
                     .multilineTextAlignment(.center)
             }
             if ai.isOn {
+                if ai.mode == .translate {
+                    languagePicker
+                }
                 Text(ai.status)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -129,14 +132,7 @@ struct AICallPanel: View {
                 .controlSize(.large)
             } else if connected {
                 HStack(spacing: 10) {
-                    Picker("", selection: Binding(
-                        get: { ai.language.id },
-                        set: { ai.language = CallLanguage.find($0) }
-                    )) {
-                        ForEach(CallLanguage.all) { Text("对方说\($0.name)").tag($0.id) }
-                    }
-                    .labelsHidden()
-                    .frame(width: 130)
+                    languagePicker
                     Button {
                         calls.startAITranslate()
                     } label: {
@@ -157,6 +153,27 @@ struct AICallPanel: View {
             }
         }
         .sheet(isPresented: $askingGoal) { AIGoalSheet() }
+    }
+
+    /// "自动识别" (default) or a fixed language for the other person.
+    private var languagePicker: some View {
+        Picker("", selection: Binding(
+            get: { ai.autoLanguage ? "auto" : ai.language.id },
+            set: { value in
+                if value == "auto" {
+                    ai.autoLanguage = true
+                } else {
+                    ai.autoLanguage = false
+                    ai.setTargetLanguage(CallLanguage.find(value))
+                }
+            }
+        )) {
+            Text(ai.autoLanguage ? "自动识别（\(ai.language.name)）" : "自动识别").tag("auto")
+            Divider()
+            ForEach(CallLanguage.all) { Text("对方说\($0.name)").tag($0.id) }
+        }
+        .labelsHidden()
+        .frame(width: 170)
     }
 
     private var captionList: some View {

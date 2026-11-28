@@ -118,6 +118,34 @@ struct CallLanguage: Identifiable, Hashable {
 
     static func find(_ id: String) -> CallLanguage { all.first { $0.id == id } ?? all[0] }
 
+    /// Languages with their own writing system, recognised without a model.
+    static func byScript(_ text: String) -> CallLanguage? {
+        var counts: [String: Int] = [:]
+        for u in text.unicodeScalars {
+            let lang: String?
+            switch u.value {
+            case 0x3040 ... 0x30FF: lang = "Japanese"
+            case 0xAC00 ... 0xD7AF, 0x1100 ... 0x11FF: lang = "Korean"
+            case 0x0E00 ... 0x0E7F: lang = "Thai"
+            case 0x0600 ... 0x06FF: lang = "Arabic"
+            case 0x0590 ... 0x05FF: lang = "Hebrew"
+            case 0x0370 ... 0x03FF: lang = "Greek"
+            case 0x0900 ... 0x097F: lang = "Hindi"
+            case 0x0400 ... 0x04FF: lang = "Cyrillic"
+            case 0x4E00 ... 0x9FFF: lang = "Han"
+            default: lang = nil
+            }
+            if let lang { counts[lang, default: 0] += 1 }
+        }
+        guard let top = counts.max(by: { $0.value < $1.value }), top.value >= 2 else { return nil }
+        switch top.key {
+        case "Han": return counts["Japanese"] != nil ? find("Japanese") : find("Mandarin Chinese")
+        case "Cyrillic":
+            return text.contains(where: { "іїєґІЇЄҐ".contains($0) }) ? find("Ukrainian") : find("Russian")
+        default: return find(top.key)
+        }
+    }
+
     private static let byCountry: [String: String] = [
         "US": "English", "CA": "English", "GB": "English", "IE": "English", "AU": "English", "NZ": "English",
         "SG": "English", "PH": "English", "IN": "English", "PK": "English", "NG": "English", "KE": "English",
@@ -250,6 +278,19 @@ final class RealtimeVoiceSession: NSObject, @unchecked Sendable {
             let chunk = PCM.up3(self.pending)
             self.pending.removeAll(keepingCapacity: true)
             self.send(["type": "input_audio_buffer.append", "audio": chunk.base64EncodedString()])
+        }
+    }
+
+    /// Replaces the session's instructions mid-call (e.g. a new target language).
+    func updateInstructions(_ text: String) {
+        queue.async { [weak self] in
+            guard let self, !self.closed else { return }
+            self.baseInstructions = text
+            self.sessionConfig["instructions"] = text
+            if self.updateSent {
+                self.send(["type": "session.update",
+                           "session": ["type": "realtime", "instructions": text] as [String: Any]])
+            }
         }
     }
 
@@ -437,6 +478,9 @@ final class AICallAssistant: ObservableObject {
 
     func startTranslate(callID: String, number: String?, audio: VoiceAudioService) {
         guard prepare(callID: callID, number: number, audio: audio) else { return }
+        // Until they speak, a Chinese-looking number most likely means a
+        // foreign caller on a roaming/virtual number: start from English.
+        if autoLanguage, language.id == "Mandarin Chinese" { language = CallLanguage.find("English") }
         let lang = language.id
         let inbound = RealtimeVoiceSession()
         let outbound = RealtimeVoiceSession()
@@ -453,7 +497,10 @@ final class AICallAssistant: ObservableObject {
             gate.extend(by: Double(pcm.count / 2) / 24_000)
             audio?.playAssistant(pcm)
         }
-        inbound.onHeard = { [weak self] t in Task { @MainActor in self?.add(.them, t) } }
+        inbound.onHeard = { [weak self] t in Task { @MainActor in
+            self?.add(.them, t)
+            self?.noticeLanguage(of: t)
+        } }
         inbound.onSaid = { [weak self] t in Task { @MainActor in self?.attachChinese(t, to: .them) } }
         let outDecimator = PhoneDecimator()
         outbound.onAudio = { [weak audio] pcm in audio?.sendAssistantSpeech(outDecimator.process(pcm)) }
@@ -472,21 +519,75 @@ final class AICallAssistant: ObservableObject {
             for your client. Convey the meaning faithfully and completely, in the way a Chinese \
             speaker would actually say it; skip their filler words and false starts.
             """, interrupt: false, eagerness: "medium")
-        connect(outbound, instructions: base + """
-
-            Your client speaks Chinese, often thinking aloud: pauses, "这个", "那个", "就是", "嗯", \
-            repeating themselves, changing their mind mid-sentence. Work out what they actually \
-            mean, then say it in clear, natural, fluent \(lang) the way a native speaker would \
-            put it — complete and polite, not word for word. Drop fillers, hesitations and \
-            repetitions; when they correct themselves, use only the corrected version. Keep every \
-            fact exact (names, numbers, dates, times, addresses, prices). Don't add information \
-            they didn't give, and don't answer for them. If what they said is too unclear to \
-            translate, say nothing rather than guess.
-            """, interrupt: false, eagerness: "low")
+        interpreterBase = base
+        connect(outbound, instructions: Self.outboundPrompt(base: base, language: lang),
+                interrupt: false, eagerness: "low")
         sessions = [inbound, outbound]
+        outboundSession = outbound
         audio.setAIRouting(.translate)
         mode = .translate
-        status = "AI 翻译中：你说中文，对方听到\(language.name)；对方说的话会翻成中文给你听"
+        updateTranslateStatus()
+    }
+
+    // MARK: language detection
+
+    /// "自动识别": the other person's language is worked out from what they
+    /// say, and your Chinese is translated into it.
+    @Published var autoLanguage = true
+    private var interpreterBase = ""
+    private weak var outboundSession: RealtimeVoiceSession?
+    private var detecting = false
+
+    private func updateTranslateStatus() {
+        let who = autoLanguage ? "对方的语言（现在：\(language.name)，自动识别）" : language.name
+        status = "AI 翻译中：你说中文，对方听到\(who)；对方说的话会翻成中文给你听"
+    }
+
+    /// Switches the interpreter to another target language mid-call.
+    func setTargetLanguage(_ lang: CallLanguage, auto: Bool = false) {
+        if auto && lang == language { return }
+        language = lang
+        if mode == .translate, let out = outboundSession {
+            out.updateInstructions(Self.outboundPrompt(base: interpreterBase, language: lang.id))
+            if auto { add(.note, "识别到对方说\(lang.name)，你说的中文会翻成\(lang.name)") }
+            updateTranslateStatus()
+        }
+    }
+
+    fileprivate func noticeLanguage(of text: String) {
+        guard autoLanguage, mode == .translate, !detecting else { return }
+        if let lang = CallLanguage.byScript(text) {
+            setTargetLanguage(lang, auto: true)
+            return
+        }
+        // Latin-script languages need a quick look from the text model.
+        let words = text.split(separator: " ").count
+        guard words >= 2 || text.count >= 8 else { return }
+        detecting = true
+        Task {
+            defer { detecting = false }
+            let names = CallLanguage.all.map(\.id).joined(separator: ", ")
+            guard let answer = try? await chat("Which language is this phone-call sentence in? Answer with exactly one name from this list and nothing else: \(names).\n\n\(text)") else { return }
+            let name = answer.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+            if let lang = CallLanguage.all.first(where: { $0.id.caseInsensitiveCompare(name) == .orderedSame }) {
+                setTargetLanguage(lang, auto: true)
+            }
+        }
+    }
+
+    static func outboundPrompt(base: String, language lang: String) -> String {
+        base + """
+
+        Your client speaks Chinese, often thinking aloud: pauses, "这个", "那个", "就是", "嗯", \
+        repeating themselves, changing their mind mid-sentence. Work out what they actually \
+        mean, then say it in clear, natural, fluent \(lang) the way a native speaker would \
+        put it — complete and polite, not word for word. Drop fillers, hesitations and \
+        repetitions; when they correct themselves, use only the corrected version. Keep every \
+        fact exact (names, numbers, dates, times, addresses, prices). Don't add information \
+        they didn't give, and don't answer for them. If what they said is too unclear to \
+        translate, say nothing rather than guess. Always speak \(lang), whatever language \
+        earlier turns were in.
+        """
     }
 
     /// The AI speaks for you. `screening` is the incoming-call receptionist.
@@ -643,6 +744,7 @@ final class AICallAssistant: ObservableObject {
         if self.callID != callID {
             captions = []
             summary = nil
+            autoLanguage = true
         }
         self.callID = callID
         self.audio = audio
