@@ -10,9 +10,12 @@ import WebKit
 struct QRSMS: Equatable {
     var number: String
     var body: String
+    /// The link as the QR code or page gave it, shown so it can be checked.
+    var raw: String
 
     init?(_ text: String) {
         let raw = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.raw = raw
         let lower = raw.lowercased()
         if lower.hasPrefix("smsto:") || lower.hasPrefix("mmsto:") {
             let rest = String(raw.dropFirst(6))
@@ -20,12 +23,15 @@ struct QRSMS: Equatable {
             number = parts[0]
             body = parts.count > 1 ? parts[1] : ""
         } else if lower.hasPrefix("sms:") {
-            let rest = String(raw.dropFirst(4))
-            let parts = rest.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
-            number = parts[0]
+            // sms:<number>?body=..., but iPhone pages also write
+            // sms:<number>&body=... or sms:<number>;?body=...
+            var rest = String(raw.dropFirst(4))
+            while rest.hasPrefix("/") { rest.removeFirst() }
+            let cut = rest.firstIndex(where: { $0 == "?" || $0 == "&" || $0 == ";" }) ?? rest.endIndex
+            number = String(rest[..<cut])
             body = ""
-            if parts.count > 1 {
-                for item in parts[1].split(separator: "&") {
+            if cut < rest.endIndex {
+                for item in rest[rest.index(after: cut)...].split(whereSeparator: { $0 == "&" || $0 == "?" || $0 == ";" }) {
                     let pair = item.split(separator: "=", maxSplits: 1).map(String.init)
                     if pair.count == 2, pair[0].lowercased() == "body" {
                         body = pair[1].replacingOccurrences(of: "+", with: " ")
@@ -116,8 +122,16 @@ struct QRSMSSheet: View {
             if let sms {
                 VStack(alignment: .leading, spacing: 6) {
                     LabeledContent(L10n.t("发给")) { Text(sms.number).font(.body.monospacedDigit()).textSelection(.enabled) }
-                    LabeledContent(L10n.t("内容")) { Text(sms.body.isEmpty ? L10n.t("（空）") : sms.body).textSelection(.enabled) }
+                    LabeledContent(L10n.t("内容")) {
+                        TextField(L10n.t("短信内容"), text: Binding(get: { self.sms?.body ?? "" }, set: { self.sms?.body = $0 }), axis: .vertical)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    if sms.body.isEmpty {
+                        Text(L10n.t("网页没给短信内容。看一下浏览器里的谷歌页面是否写着要发送的文字，填进上面再发。"))
+                            .font(.caption2).foregroundStyle(.orange)
+                    }
                     LabeledContent(L10n.t("用这张卡发")) { Text(ownNumber.isEmpty ? L10n.t("左上角选中的模块") : ownNumber).font(.body.monospacedDigit()) }
+                    Text(L10n.t("原始链接：") + sms.raw).font(.caption2).foregroundStyle(.secondary).textSelection(.enabled).lineLimit(3)
                     if sms.number.hasPrefix("+") || sms.number.hasPrefix("00") {
                         Text(L10n.t("这是国际短信，运营商可能按国际短信收费（通常几毛钱到一两块）。"))
                             .font(.caption2).foregroundStyle(.secondary)

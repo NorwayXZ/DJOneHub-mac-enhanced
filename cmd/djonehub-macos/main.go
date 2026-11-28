@@ -52,7 +52,7 @@ func webAppHandler() http.Handler {
 	})
 }
 
-const appVersion = "1.3.0-proxy-preview.88"
+const appVersion = "1.3.0-proxy-preview.89"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
