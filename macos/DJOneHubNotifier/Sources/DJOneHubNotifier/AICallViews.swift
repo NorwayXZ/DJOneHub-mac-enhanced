@@ -254,35 +254,69 @@ struct AICallSettingsCard: View {
     @State private var testing = false
 
     private let voices = ["marin", "cedar", "alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse"]
+    private let geminiVoices = ["Kore", "Aoede", "Leda", "Zephyr", "Puck", "Charon", "Fenrir", "Orus"]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("打电话时让 AI 当翻译，或者直接替你说话；来电也能让 AI 先接、问清是谁。只在声音通道正常的模块上能用。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            row("API Key") {
-                SecureField("sk-…", text: $aiSettings.apiKey)
-                    .textFieldStyle(.roundedBorder)
-            }
-            row("服务地址") {
-                TextField("https://api.openai.com", text: $aiSettings.baseURL)
-                    .textFieldStyle(.roundedBorder)
-            }
-            row("实时语音模型") {
-                TextField("gpt-realtime-2.1", text: $aiSettings.realtimeModel)
-                    .textFieldStyle(.roundedBorder)
-            }
-            row("文字模型") {
-                TextField("gpt-5.4-mini", text: $aiSettings.textModel)
-                    .textFieldStyle(.roundedBorder)
-            }
-            row("AI 的声音") {
-                Picker("", selection: $aiSettings.voice) {
-                    ForEach(voices, id: \.self) { Text($0).tag($0) }
+            row("AI 引擎") {
+                Picker("", selection: $aiSettings.provider) {
+                    Text("OpenAI").tag("openai")
+                    Text("Gemini").tag("gemini")
                 }
+                .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(width: 140)
+                .frame(width: 200)
                 Spacer()
+            }
+            if aiSettings.usesGemini {
+                row("Gemini Key") {
+                    SecureField("AIza…", text: $aiSettings.geminiKey)
+                        .textFieldStyle(.roundedBorder)
+                }
+                row("实时语音模型") {
+                    TextField("gemini-3.8-live", text: $aiSettings.geminiModel)
+                        .textFieldStyle(.roundedBorder)
+                }
+                row("文字模型") {
+                    TextField("gemini-flash-latest", text: $aiSettings.geminiTextModel)
+                        .textFieldStyle(.roundedBorder)
+                }
+                row("AI 的声音") {
+                    Picker("", selection: $aiSettings.geminiVoice) {
+                        ForEach(geminiVoices, id: \.self) { Text($0).tag($0) }
+                    }
+                    .labelsHidden()
+                    .frame(width: 140)
+                    Spacer()
+                }
+            } else {
+                row("API Key") {
+                    SecureField("sk-…", text: $aiSettings.apiKey)
+                        .textFieldStyle(.roundedBorder)
+                }
+                row("服务地址") {
+                    TextField("https://api.openai.com", text: $aiSettings.baseURL)
+                        .textFieldStyle(.roundedBorder)
+                }
+                row("实时语音模型") {
+                    TextField("gpt-realtime-2.1", text: $aiSettings.realtimeModel)
+                        .textFieldStyle(.roundedBorder)
+                }
+                row("文字模型") {
+                    TextField("gpt-5.4-mini", text: $aiSettings.textModel)
+                        .textFieldStyle(.roundedBorder)
+                }
+                row("AI 的声音") {
+                    Picker("", selection: $aiSettings.voice) {
+                        ForEach(voices, id: \.self) { Text($0).tag($0) }
+                    }
+                    .labelsHidden()
+                    .frame(width: 140)
+                    Spacer()
+                }
             }
             row("你的称呼") {
                 TextField("AI 替你说话时怎么称呼你，例如 Wei", text: $aiSettings.ownerName)

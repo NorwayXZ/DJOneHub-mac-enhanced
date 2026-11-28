@@ -16,10 +16,23 @@ final class AICallSettings: ObservableObject {
     @AppStorage("ai.voice") var voice = "marin"
     @AppStorage("ai.ownerName") var ownerName = ""
     @AppStorage("ai.autoScreen") var autoScreenIncoming = false
+    /// "openai" or "gemini": which live voice engine the call AI uses.
+    @Published var provider = UserDefaults.standard.string(forKey: "ai.provider") ?? "openai" {
+        didSet { UserDefaults.standard.set(provider, forKey: "ai.provider") }
+    }
+    @Published var geminiKey: String { didSet { KeyFile.write(geminiKey, name: "ai-gemini.key") } }
+    @AppStorage("ai.geminiModel") var geminiModel = "gemini-3.8-live"
+    @AppStorage("ai.geminiTextModel") var geminiTextModel = "gemini-flash-latest"
+    @AppStorage("ai.geminiVoice") var geminiVoice = "Kore"
 
-    var isConfigured: Bool { !apiKey.trimmingCharacters(in: .whitespaces).isEmpty }
+    var usesGemini: Bool { provider == "gemini" }
+    var isConfigured: Bool {
+        let key = usesGemini ? geminiKey : apiKey
+        return !key.trimmingCharacters(in: .whitespaces).isEmpty
+    }
 
     private init() {
+        geminiKey = KeyFile.read("ai-gemini.key") ?? ""
         // A private file, not the keychain: keychain items made by an app are
         // tied to its signature, so every update popped an "allow" dialog.
         if let saved = KeyFile.read() {
@@ -45,9 +58,26 @@ final class AICallSettings: ObservableObject {
 
 /// The AI key in Application Support, readable only by this user (0600).
 enum KeyFile {
-    private static var url: URL {
+    private static func url(_ name: String) -> URL {
         FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/DJOneHub/ai-call.key")
+            .appendingPathComponent("Library/Application Support/DJOneHub/\(name)")
+    }
+    private static var url: URL { url("ai-call.key") }
+
+    static func read(_ name: String) -> String? {
+        guard let text = try? String(contentsOf: url(name), encoding: .utf8) else { return nil }
+        let key = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return key.isEmpty ? nil : key
+    }
+
+    static func write(_ key: String, name: String) {
+        let path = url(name)
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { try? FileManager.default.removeItem(at: path); return }
+        try? FileManager.default.createDirectory(at: path.deletingLastPathComponent(), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: path.path, contents: Data(trimmed.utf8),
+                                       attributes: [.posixPermissions: 0o600])
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
     }
 
     static func read() -> String? {
@@ -466,7 +496,7 @@ final class AICallAssistant: ObservableObject {
     var pendingGoal: String?
     var pendingLanguage: CallLanguage?
 
-    private var sessions: [RealtimeVoiceSession] = []
+    private var sessions: [any VoiceAISession] = []
     private weak var audio: VoiceAudioService?
     private var callID: String?
     private var goal = ""
@@ -482,8 +512,8 @@ final class AICallAssistant: ObservableObject {
         // foreign caller on a roaming/virtual number: start from English.
         if autoLanguage, language.id == "Mandarin Chinese" { language = CallLanguage.find("English") }
         let lang = language.id
-        let inbound = RealtimeVoiceSession()
-        let outbound = RealtimeVoiceSession()
+        let inbound = Self.makeSession()
+        let outbound = Self.makeSession()
         let base = """
         You are a skilled live phone interpreter between your client and the other person. \
         You never take part in the conversation yourself: never answer questions, never add \
@@ -535,7 +565,7 @@ final class AICallAssistant: ObservableObject {
     /// say, and your Chinese is translated into it.
     @Published var autoLanguage = true
     private var interpreterBase = ""
-    private weak var outboundSession: RealtimeVoiceSession?
+    private weak var outboundSession: (any VoiceAISession)?
     private var detecting = false
 
     private func updateTranslateStatus() {
@@ -652,7 +682,7 @@ final class AICallAssistant: ObservableObject {
     var hasPrewarmed: Bool { prewarmed != nil }
 
     private struct AgentSession {
-        let session: RealtimeVoiceSession
+        let session: any VoiceAISession
         let heard: SpeakerGate
         let goal: String
         let screening: Bool
@@ -711,7 +741,7 @@ final class AICallAssistant: ObservableObject {
         Don't volunteer that you're an AI. If they ask directly, be honest: you're \(ownerText)'s \
         AI assistant, then carry on naturally.
         """
-        let s = RealtimeVoiceSession()
+        let s = Self.makeSession()
         let decimator = PhoneDecimator()
         s.onAudio = { [weak audio] pcm in
             audio?.sendAssistantSpeech(decimator.process(pcm))
@@ -752,21 +782,38 @@ final class AICallAssistant: ObservableObject {
         return true
     }
 
-    private func connect(_ s: RealtimeVoiceSession, instructions: String, interrupt: Bool,
-                         eagerness: String = "high") {
-        AICallLog.write("timing: AI connecting")
-        s.connect(
-            base: settings.trimmedBase,
-            model: settings.realtimeModel,
-            key: settings.apiKey,
-            session: RealtimeVoiceSession.config(
-                instructions: instructions,
-                voice: settings.voice,
-                interrupt: interrupt,
-                eagerness: eagerness
-            )
-        )
+    static func makeSession() -> any VoiceAISession {
+        AICallSettings.shared.usesGemini ? GeminiLiveSession() : RealtimeVoiceSession()
     }
+
+    private func connect(_ s: any VoiceAISession, instructions: String, interrupt: Bool,
+                         eagerness: String = "high") {
+        AICallLog.write("timing: AI connecting (\(settings.provider))")
+        Self.connect(s, instructions: instructions, interrupt: interrupt, eagerness: eagerness)
+    }
+
+    static func connect(_ s: any VoiceAISession, instructions: String, interrupt: Bool,
+                        eagerness: String = "high", transcribe: Bool = true) {
+        let settings = AICallSettings.shared
+        if let g = s as? GeminiLiveSession {
+            g.connect(key: settings.geminiKey, model: settings.geminiModel, voice: settings.geminiVoice,
+                      instructions: instructions, interrupt: interrupt, eagerness: eagerness)
+        } else if let r = s as? RealtimeVoiceSession {
+            r.connect(
+                base: settings.trimmedBase,
+                model: settings.realtimeModel,
+                key: settings.apiKey,
+                session: RealtimeVoiceSession.config(
+                    instructions: instructions,
+                    voice: settings.voice,
+                    interrupt: interrupt,
+                    transcribe: transcribe,
+                    eagerness: eagerness
+                )
+            )
+        }
+    }
+
 
     // MARK: stop
 
@@ -868,6 +915,10 @@ final class AICallAssistant: ObservableObject {
     // MARK: text model
 
     private func chat(_ prompt: String) async throws -> String {
+        if settings.usesGemini {
+            return try await GeminiLiveSession.generate(key: settings.geminiKey,
+                                                        model: settings.geminiTextModel, prompt: prompt)
+        }
         guard let url = URL(string: settings.trimmedBase + "/v1/chat/completions") else {
             throw URLError(.badURL)
         }
@@ -895,7 +946,8 @@ final class AICallAssistant: ObservableObject {
     /// whole speech path (not just the key) works before a real call.
     static func realtimeVoiceCheck() async -> String {
         let s = AICallSettings.shared
-        let session = RealtimeVoiceSession()
+        let session = makeSession()
+        let modelName = s.usesGemini ? s.geminiModel : s.realtimeModel
         return await withCheckedContinuation { (cont: CheckedContinuation<String, Never>) in
             let lock = NSLock()
             var done = false
@@ -916,20 +968,10 @@ final class AICallAssistant: ObservableObject {
                 finish(got > 0 ? "连接正常，实时语音也能说话，可以用" : "实时语音连上了，但没收到声音")
             }
             session.onError = { e in finish("Key 正常，但实时语音不行：\(e)") }
-            session.connect(
-                base: s.trimmedBase,
-                model: s.realtimeModel,
-                key: s.apiKey,
-                session: RealtimeVoiceSession.config(
-                    instructions: "Reply with one short word.",
-                    voice: s.voice,
-                    interrupt: true,
-                    transcribe: false
-                )
-            )
+            connect(session, instructions: "Reply with one short word.", interrupt: true, transcribe: false)
             session.requestResponse("Say: hello.")
             DispatchQueue.global().asyncAfter(deadline: .now() + 20) {
-                finish("实时语音 20 秒没回应（网络慢或模型 \(s.realtimeModel) 不可用）")
+                finish("实时语音 20 秒没回应（网络慢或模型 \(modelName) 不可用）")
             }
         }
     }
@@ -937,6 +979,26 @@ final class AICallAssistant: ObservableObject {
     /// Checks the key and address with a tiny request.
     static func testConnection() async -> String {
         let s = AICallSettings.shared
+        if s.usesGemini {
+            guard s.isConfigured,
+                  let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(s.geminiModel)") else {
+                return "还没填 Gemini API Key"
+            }
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 15
+            request.setValue(s.geminiKey, forHTTPHeaderField: "x-goog-api-key")
+            do {
+                let (_, response) = try await URLSession.shared.data(for: request)
+                switch (response as? HTTPURLResponse)?.statusCode ?? 0 {
+                case 200: return await realtimeVoiceCheck()
+                case 400, 401, 403: return "Gemini API Key 不对或没开通"
+                case 404: return "找不到模型 \(s.geminiModel)"
+                case let code: return "Gemini 返回 \(code)"
+                }
+            } catch {
+                return "连不上 Gemini：\(error.localizedDescription)（在国内需要代理）"
+            }
+        }
         guard s.isConfigured, let url = URL(string: s.trimmedBase + "/v1/models/\(s.realtimeModel)") else {
             return "还没填 API Key"
         }

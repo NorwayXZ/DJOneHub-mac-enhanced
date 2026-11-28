@@ -927,18 +927,19 @@ final class VoiceAudioService {
         let ai = stateLock.withLock { aiRouting } != .off
         return uploadLock.withLock {
             if ai {
-                // Release AI speech at real-time 8 kHz pace; the loop runs
-                // every few ms, so hand over only the frames due since last time.
+                // Keep the device ~200 ms ahead: it pulls audio in large
+                // IOProc chunks (often 512 frames = 64 ms), and a nearly empty
+                // ring leaves silent gaps inside every word, heard on the far
+                // end as hiss/crackle. `assistantPaceAt` is the moment up to
+                // which speech has been handed over (the ring holds 2048 frames).
                 let now = DispatchTime.now().uptimeNanoseconds
-                if assistantPaceAt == 0 || now - assistantPaceAt > 200_000_000 {
-                    assistantPaceAt = now &- 20_000_000
-                }
-                let due = Int(Double(now - assistantPaceAt) * 8_000 / 1_000_000_000)
+                let lead: UInt64 = 200_000_000
+                if assistantPaceAt < now { assistantPaceAt = now }
+                let target = now + lead
+                let due = assistantPaceAt < target
+                    ? Int(Double(target - assistantPaceAt) * 8_000 / 1_000_000_000) : 0
                 let frameCount = min(samples.count, assistantUplink.count / 2, due)
-                guard frameCount > 0 else {
-                    if assistantUplink.isEmpty { assistantPaceAt = now }
-                    return 0
-                }
+                guard frameCount > 0 else { return 0 }
                 assistantPaceAt &+= UInt64(Double(frameCount) * 1_000_000_000 / 8_000)
                 assistantUplink.withUnsafeBytes { raw in
                     let b = raw.bindMemory(to: UInt8.self)
