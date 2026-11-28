@@ -120,7 +120,7 @@ func (a *app) nextCallPoll(normal time.Duration) time.Duration {
 }
 
 func (a *app) pollCallOnce() error {
-	if a.demo {
+	if a.demo || a.esimWriting.Load() {
 		return nil
 	}
 	if a.modem == nil && a.currentUSBDevice() == nil {

@@ -52,7 +52,7 @@ func webAppHandler() http.Handler {
 	})
 }
 
-const appVersion = "1.3.0-proxy-preview.90"
+const appVersion = "1.3.0-proxy-preview.91"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
@@ -117,6 +117,13 @@ type app struct {
 
 	smsPollInterval  time.Duration
 	smsAutoCleanupME bool
+	// smsStore remembers each SIM/module store's last listing, reused while
+	// its message count is unchanged: the store is never emptied in
+	// multi-module mode, and listing it every 8 s re-sends every PDU.
+	smsStore map[string]smsStoreListing
+	// esimWriting pauses SMS and call polling while a profile is written,
+	// so the long APDU exchange has the AT channel to itself.
+	esimWriting atomic.Bool
 	smsLastPoll      time.Time
 	smsLastPollError string
 
@@ -877,7 +884,7 @@ func (a *app) startSMSPoller(ctx context.Context) {
 }
 
 func (a *app) pollSMSOnce() error {
-	if a.demo || a.modem != nil {
+	if a.demo || a.modem != nil || a.esimWriting.Load() {
 		return nil
 	}
 	a.smsOperationMu.Lock()
@@ -1709,10 +1716,38 @@ func (a *app) readUSBATSMS() ([]receivedSMS, error) {
 	return messages, nil
 }
 
+type smsStoreListing struct {
+	used     int
+	listedAt time.Time
+	messages []receivedSMS
+}
+
+// smsStoreRelist: a store whose count did not change is still listed again
+// this often, in case a message was deleted and another arrived in between.
+const smsStoreRelist = 10 * time.Minute
+
 func (a *app) readUSBATSMSFromMemory(memory string) ([]receivedSMS, error) {
-	if _, err := a.usbAT.Command(fmt.Sprintf(`AT+CPMS="%s","%s","%s"`, memory, memory, memory), 5*time.Second); err != nil {
+	cpms, err := a.usbAT.Command(fmt.Sprintf(`AT+CPMS="%s","%s","%s"`, memory, memory, memory), 5*time.Second)
+	if err != nil {
 		return nil, fmt.Errorf("select storage: %w", err)
 	}
+	used := parseUSBATCPMSUsed(cpms)
+	if last, ok := a.smsStore[memory]; ok && strings.Contains(cpms, "+CPMS:") && last.used == used && time.Since(last.listedAt) < smsStoreRelist {
+		return last.messages, nil
+	}
+	messages, err := a.listUSBATSMS()
+	if err != nil {
+		return nil, err
+	}
+	if a.smsStore == nil {
+		a.smsStore = map[string]smsStoreListing{}
+	}
+	a.smsStore[memory] = smsStoreListing{used: used, listedAt: time.Now(), messages: messages}
+	return messages, nil
+}
+
+// listUSBATSMS lists and decodes every message in the selected store.
+func (a *app) listUSBATSMS() ([]receivedSMS, error) {
 	resp, err := a.usbAT.Command("AT+CMGL=4", 15*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("list SMS: %w", err)
@@ -1757,6 +1792,7 @@ func (a *app) clearUSBATSMSMemory(memory string) (before, after int, err error) 
 		return 0, 0, fmt.Errorf("select storage: %w", err)
 	}
 	before = parseUSBATCPMSUsed(resp)
+	delete(a.smsStore, memory)
 	if _, err := a.usbAT.Command("AT+CMGD=1,4", 20*time.Second); err != nil {
 		return before, 0, fmt.Errorf("delete messages: %w", err)
 	}
@@ -3862,6 +3898,11 @@ func (a *app) downloadESIMProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "eSIM manager is unavailable")
 		return
 	}
+	a.esimWriting.Store(true)
+	defer a.esimWriting.Store(false)
+	// Let a poll already on the AT channel finish before the download starts.
+	a.smsOperationMu.Lock()
+	a.smsOperationMu.Unlock()
 	var body struct {
 		SMDP             string `json:"smdp"`
 		MatchingID       string `json:"matching_id"`
