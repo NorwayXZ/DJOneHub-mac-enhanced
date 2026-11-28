@@ -16,6 +16,7 @@ final class AICallSettings: ObservableObject {
     @AppStorage("ai.voice") var voice = "marin"
     @AppStorage("ai.ownerName") var ownerName = ""
     @AppStorage("ai.autoScreen") var autoScreenIncoming = false
+    @AppStorage("ai.waitTone") var waitTone = true
     /// "openai" or "gemini": which live voice engine the call AI uses.
     @Published var provider = UserDefaults.standard.string(forKey: "ai.provider") ?? "openai" {
         didSet { UserDefaults.standard.set(provider, forKey: "ai.provider") }
@@ -248,6 +249,8 @@ final class RealtimeVoiceSession: NSObject, @unchecked Sendable {
     var onHeard: ((String) -> Void)?            // transcript of what came in
     var onSaid: ((String) -> Void)?             // transcript of what the AI said
     var onSpeechStarted: (() -> Void)?
+    var onHeardDelta: ((String) -> Void)?
+    var onSaidDelta: ((String) -> Void)?
     var onError: ((String) -> Void)?
 
     private var task: URLSessionWebSocketTask?
@@ -374,8 +377,12 @@ final class RealtimeVoiceSession: NSObject, @unchecked Sendable {
         guard let data = text.data(using: .utf8),
               let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = event["type"] as? String else { return }
-        AICallLog.write(type == "error" ? "error \(text.prefix(300))" : type)
+        if !type.hasSuffix(".delta") { AICallLog.write(type == "error" ? "error \(text.prefix(300))" : type) }
         switch type {
+        case "response.output_audio_transcript.delta", "response.audio_transcript.delta":
+            if let d = event["delta"] as? String, !d.isEmpty { onSaidDelta?(d) }
+        case "conversation.item.input_audio_transcription.delta":
+            if let d = event["delta"] as? String, !d.isEmpty { onHeardDelta?(d) }
         case "session.created":
             queue.async { [weak self] in
                 guard let self, !self.updateSent else { return }
@@ -479,6 +486,8 @@ struct AICaption: Identifiable, Equatable {
     let speaker: Speaker
     var text: String
     var chinese: String?
+    /// Still being spoken: the words appear as they are recognised.
+    var live = false
 }
 
 @MainActor
@@ -489,6 +498,8 @@ final class AICallAssistant: ObservableObject {
     @Published private(set) var captions: [AICaption] = []
     @Published var language: CallLanguage = CallLanguage.find("English")
     @Published private(set) var status = ""
+    /// Whose turn it is in translate mode ("对方正在说…", "请说" …).
+    @Published private(set) var phase = ""
     @Published private(set) var summary: String?
     @Published private(set) var lastError: String?
 
@@ -506,57 +517,167 @@ final class AICallAssistant: ObservableObject {
 
     // MARK: start
 
+    static let interpreterBase = """
+    You are a skilled live phone interpreter between your client and the other person. \
+    You never take part in the conversation yourself: never answer questions, never add \
+    comments, greetings or "they said". You speak only the translation, in first person, \
+    sounding like a real person on the phone — natural, warm, not robotic.
+    """
+
+    static let inboundPrompt = interpreterBase + """
+
+        Translate what the other person says into natural spoken Simplified Chinese (Mandarin) \
+        for your client. Convey the meaning faithfully and completely, in the way a Chinese \
+        speaker would actually say it; skip their filler words and false starts.
+        """
+
+    /// Both interpreter connections, opened before you press "AI 翻译".
+    private final class InterpreterPair {
+        let inbound: any VoiceAISession
+        let outbound: any VoiceAISession
+        var language: String
+        let callID: String
+        var broken = false
+        init(inbound: any VoiceAISession, outbound: any VoiceAISession, language: String, callID: String) {
+            self.inbound = inbound; self.outbound = outbound; self.language = language; self.callID = callID
+        }
+        func close() { inbound.close(); outbound.close() }
+    }
+
+    private var warmInterpreter: InterpreterPair?
+
+    private func makeInterpreter(language lang: String, callID: String) -> InterpreterPair {
+        let pair = InterpreterPair(inbound: Self.makeSession(), outbound: Self.makeSession(),
+                                   language: lang, callID: callID)
+        for s in [pair.inbound, pair.outbound] {
+            s.onError = { [weak pair] e in
+                AICallLog.write("warm interpreter error: \(e)")
+                pair?.broken = true
+            }
+        }
+        connect(pair.inbound, instructions: Self.inboundPrompt, interrupt: false, eagerness: "medium")
+        connect(pair.outbound, instructions: Self.outboundPrompt(base: Self.interpreterBase, language: lang),
+                interrupt: false, eagerness: "low")
+        return pair
+    }
+
+    /// Opens the interpreter as soon as a call starts, so "AI 翻译" works at once.
+    func prewarmInterpreter(callID: String, number: String?) {
+        guard settings.isConfigured, mode == .off, prewarmed == nil, pendingGoal == nil,
+              warmInterpreter?.callID != callID else { return }
+        warmInterpreter?.close()
+        var lang = CallLanguage.guess(for: number)
+        if lang.id == "Mandarin Chinese" { lang = CallLanguage.find("English") }
+        warmInterpreter = makeInterpreter(language: lang.id, callID: callID)
+        AICallLog.write("timing: prewarming interpreter")
+    }
+
+    private func dropWarmInterpreter() {
+        warmInterpreter?.close()
+        warmInterpreter = nil
+    }
+
     func startTranslate(callID: String, number: String?, audio: VoiceAudioService) {
         guard prepare(callID: callID, number: number, audio: audio) else { return }
         // Until they speak, a Chinese-looking number most likely means a
         // foreign caller on a roaming/virtual number: start from English.
         if autoLanguage, language.id == "Mandarin Chinese" { language = CallLanguage.find("English") }
         let lang = language.id
-        let inbound = Self.makeSession()
-        let outbound = Self.makeSession()
-        let base = """
-        You are a skilled live phone interpreter between your client and the other person. \
-        You never take part in the conversation yourself: never answer questions, never add \
-        comments, greetings or "they said". You speak only the translation, in first person, \
-        sounding like a real person on the phone — natural, warm, not robotic.
-        """
+        let pair: InterpreterPair
+        if let warm = warmInterpreter, warm.callID == callID, !warm.broken {
+            pair = warm
+            AICallLog.write("timing: using prewarmed interpreter")
+            if warm.language != lang {
+                warm.outbound.updateInstructions(Self.outboundPrompt(base: Self.interpreterBase, language: lang))
+                warm.language = lang
+            }
+        } else {
+            warmInterpreter?.close()
+            pair = makeInterpreter(language: lang, callID: callID)
+        }
+        warmInterpreter = nil
+        let inbound = pair.inbound
+        let outbound = pair.outbound
+        let tone = settings.waitTone
         // While the Chinese translation plays on the speaker, the microphone
         // would hear it; hold the mic back so it isn't translated again.
         let gate = SpeakerGate()
-        inbound.onAudio = { [weak audio] pcm in
-            gate.extend(by: Double(pcm.count / 2) / 24_000)
-            audio?.playAssistant(pcm)
-        }
+        inbound.onAudio = { [weak audio] pcm in audio?.playAssistant(pcm) }
+        inbound.onSpeechStarted = { [weak self] in Task { @MainActor in self?.setPhase("对方正在说…") } }
+        inbound.onHeardDelta = { [weak self] d in Task { @MainActor in self?.draft("in.heard", .them, d) } }
+        inbound.onSaidDelta = { [weak self] d in Task { @MainActor in
+            self?.setPhase("正在把对方的话翻成中文给你听")
+            self?.draft("in.said", .them, chinese: true, d)
+        } }
         inbound.onHeard = { [weak self] t in Task { @MainActor in
-            self?.add(.them, t)
+            self?.settle("in.heard", .them, t)
             self?.noticeLanguage(of: t)
         } }
-        inbound.onSaid = { [weak self] t in Task { @MainActor in self?.attachChinese(t, to: .them) } }
+        inbound.onSaid = { [weak self] t in Task { @MainActor in
+            self?.settle("in.said", .them, chinese: true, t)
+            self?.setPhase("轮到你说")
+        } }
         let outDecimator = PhoneDecimator()
-        outbound.onAudio = { [weak audio] pcm in audio?.sendAssistantSpeech(outDecimator.process(pcm)) }
-        outbound.onHeard = { [weak self] t in Task { @MainActor in self?.add(.me, t) } }
-        outbound.onSaid = { [weak self] t in Task { @MainActor in self?.add(.ai, t) } }
+        outbound.onAudio = { [weak audio] pcm in
+            audio?.setWaitingTone(false)
+            audio?.sendAssistantSpeech(outDecimator.process(pcm))
+        }
+        outbound.onSpeechStarted = { [weak self, weak audio] in
+            if tone { audio?.setWaitingTone(true) }
+            Task { @MainActor in
+                self?.setPhase("你在说…（对方听到轻提示音，知道你在说）")
+                self?.capWaitingTone()
+            }
+        }
+        outbound.onHeardDelta = { [weak self] d in Task { @MainActor in self?.draft("out.heard", .me, d) } }
+        outbound.onSaidDelta = { [weak self] d in Task { @MainActor in
+            self?.setPhase("正在把你的话说给对方听")
+            self?.draft("out.said", .ai, d)
+        } }
+        outbound.onHeard = { [weak self] t in Task { @MainActor in self?.settle("out.heard", .me, t) } }
+        outbound.onSaid = { [weak self, weak audio] t in
+            audio?.setWaitingTone(false)
+            Task { @MainActor in
+                self?.settle("out.said", .ai, t)
+                self?.setPhase("等对方回话")
+            }
+        }
         for s in [inbound, outbound] {
             s.onError = { [weak self] e in Task { @MainActor in self?.fail(e) } }
         }
         audio.onRemoteAudio = { [weak inbound] pcm in inbound?.appendAudio8k(pcm) }
-        audio.onLocalAudio = { [weak outbound] pcm in
+        audio.onLocalAudio = { [weak outbound, weak audio] pcm in
+            if audio?.isAssistantSounding == true { gate.hold() }
             if !gate.isSpeaking { outbound?.appendAudio8k(pcm) }
         }
-        connect(inbound, instructions: base + """
-
-            Translate what the other person says into natural spoken Simplified Chinese (Mandarin) \
-            for your client. Convey the meaning faithfully and completely, in the way a Chinese \
-            speaker would actually say it; skip their filler words and false starts.
-            """, interrupt: false, eagerness: "medium")
-        interpreterBase = base
-        connect(outbound, instructions: Self.outboundPrompt(base: base, language: lang),
-                interrupt: false, eagerness: "low")
+        audio.onAssistantBacklogDropped = { [weak self] in Task { @MainActor in
+            self?.add(.note, "对方说得太长，中文语音落后太多，跳过了一段；请看上面的字幕")
+        } }
+        interpreterBase = Self.interpreterBase
         sessions = [inbound, outbound]
         outboundSession = outbound
         audio.setAIRouting(.translate)
         mode = .translate
+        usedModes.insert("AI 翻译")
         updateTranslateStatus()
+        setPhase("请说，或等对方说")
+    }
+
+    private var toneCap: Task<Void, Never>?
+
+    /// The pulse never runs on for long if no translation comes out.
+    private func capWaitingTone() {
+        toneCap?.cancel()
+        toneCap = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(12))
+            guard !Task.isCancelled else { return }
+            self?.audio?.setWaitingTone(false)
+        }
+    }
+
+    private func setPhase(_ text: String) {
+        guard mode == .translate, phase != text else { return }
+        phase = text
     }
 
     // MARK: language detection
@@ -632,6 +753,8 @@ final class AICallAssistant: ObservableObject {
     ) {
         guard prepare(callID: callID, number: number, audio: audio) else { return }
         self.goal = goal
+        dropWarmInterpreter()
+        usedModes.insert(screening ? "AI 接听" : "AI 代打")
         let agent: AgentSession
         if let warm = prewarmed, warm.goal == goal, warm.screening == screening {
             agent = warm
@@ -748,14 +871,17 @@ final class AICallAssistant: ObservableObject {
             audio?.playAssistant(pcm)
         }
         let heard = SpeakerGate()
-        s.onSpeechStarted = { [weak audio] in
+        s.onSpeechStarted = { [weak audio, weak self] in
+            Task { @MainActor in self?.closeDraft("ag.said") }
             heard.extend(by: 60)
             // They started talking: stop the AI mid-sentence, like a person would.
             audio?.clearAssistantUplink()
             audio?.stopAssistantPlayback()
         }
-        s.onHeard = { [weak self] t in Task { @MainActor in self?.add(.them, t, translate: true) } }
-        s.onSaid = { [weak self] t in Task { @MainActor in self?.add(.ai, t, translate: true) } }
+        s.onHeardDelta = { [weak self] d in Task { @MainActor in self?.draft("ag.heard", .them, d) } }
+        s.onSaidDelta = { [weak self] d in Task { @MainActor in self?.draft("ag.said", .ai, d) } }
+        s.onHeard = { [weak self] t in Task { @MainActor in self?.settle("ag.heard", .them, t, translate: true) } }
+        s.onSaid = { [weak self] t in Task { @MainActor in self?.settle("ag.said", .ai, t, translate: true) } }
         s.onError = { [weak self] e in Task { @MainActor in self?.fail(e) } }
         connect(s, instructions: instructions, interrupt: true)
         return AgentSession(session: s, heard: heard, goal: goal, screening: screening, ownerText: ownerText)
@@ -773,9 +899,13 @@ final class AICallAssistant: ObservableObject {
         stopSessions()
         if self.callID != callID {
             captions = []
+            drafts = [:]
             summary = nil
             autoLanguage = true
+            usedModes = []
+            callStartedAt = Date()
         }
+        callNumber = number
         self.callID = callID
         self.audio = audio
         lastError = nil
@@ -822,24 +952,54 @@ final class AICallAssistant: ObservableObject {
         let wasAgent = mode == .agent
         stopSessions()
         add(.note, "你接过了电话")
-        if wasAgent { summarize() }
+        saveRecord(summarizing: wasAgent)
     }
 
     /// The call ended.
     func callEnded() {
         dropPrewarmed()
-        let wasAgent = mode == .agent
+        dropWarmInterpreter()
         stopSessions()
-        if wasAgent, captions.contains(where: { $0.speaker == .them }) { summarize() }
+        saveRecord(summarizing: true)
+        callID = nil
         pendingGoal = nil
         pendingLanguage = nil
+    }
+
+    // MARK: records
+
+    private var usedModes: Set<String> = []
+    private var callStartedAt: Date?
+    private var callNumber: String?
+    private var summarizedCalls: Set<String> = []
+
+    /// Keeps the bilingual captions (and later the summary) after the call.
+    private func saveRecord(summarizing: Bool) {
+        guard let callID, captions.contains(where: { $0.speaker != .note }) else { return }
+        let record = AICallRecord(
+            id: callID,
+            date: callStartedAt ?? Date(),
+            number: callNumber,
+            modes: usedModes.sorted(),
+            lines: captions.map { .init(who: $0.speaker.label, text: $0.text, chinese: $0.chinese) },
+            summary: summary
+        )
+        AICallHistory.save(record)
+        guard summarizing, summary == nil, !summarizedCalls.contains(callID),
+              captions.contains(where: { $0.speaker == .them }) else { return }
+        summarizedCalls.insert(callID)
+        summarize(record)
     }
 
     private func stopSessions() {
         sessions.forEach { $0.close() }
         sessions = []
+        toneCap?.cancel()
         audio?.onRemoteAudio = nil
         audio?.onLocalAudio = nil
+        audio?.onAssistantBacklogDropped = nil
+        for key in Array(drafts.keys) { closeDraft(key) }
+        phase = ""
         audio?.setAIRouting(.off)
         if mode != .off { mode = .off }
         status = ""
@@ -854,6 +1014,72 @@ final class AICallAssistant: ObservableObject {
 
     // MARK: captions
 
+    /// Captions still being written, by stream ("in.heard", "out.said" …).
+    private var drafts: [String: UUID] = [:]
+
+    private func index(of id: UUID?) -> Int? {
+        guard let id else { return nil }
+        return captions.lastIndex { $0.id == id }
+    }
+
+    /// The last caption of this speaker if it is one of the newest two and
+    /// still misses this part (the translation can come before the transcript).
+    private func recent(_ speaker: AICaption.Speaker, missing chinese: Bool) -> Int? {
+        guard let i = captions.lastIndex(where: { $0.speaker == speaker }), i >= captions.count - 2 else { return nil }
+        let empty = chinese ? (captions[i].chinese ?? "").isEmpty : captions[i].text.isEmpty
+        return empty ? i : nil
+    }
+
+    /// Shows words as they are recognised instead of after the sentence.
+    private func draft(_ key: String, _ speaker: AICaption.Speaker, chinese: Bool = false, _ delta: String) {
+        guard mode != .off else { return }
+        if let i = index(of: drafts[key]) {
+            if chinese { captions[i].chinese = (captions[i].chinese ?? "") + delta } else { captions[i].text += delta }
+            return
+        }
+        let target: Int
+        if chinese, let i = index(of: drafts["in.heard"]) ?? recent(speaker, missing: true) {
+            target = i
+            captions[i].chinese = (captions[i].chinese ?? "") + delta
+        } else if !chinese, let i = recent(speaker, missing: false) {
+            target = i
+            captions[i].text += delta
+        } else {
+            captions.append(chinese ? AICaption(speaker: speaker, text: "", chinese: delta)
+                                    : AICaption(speaker: speaker, text: delta))
+            if captions.count > 200 { captions.removeFirst(captions.count - 200) }
+            target = captions.count - 1
+        }
+        captions[target].live = true
+        drafts[key] = captions[target].id
+    }
+
+    /// The final text replaces the draft.
+    private func settle(_ key: String, _ speaker: AICaption.Speaker, chinese: Bool = false,
+                        _ text: String, translate: Bool = false) {
+        guard let i = index(of: drafts.removeValue(forKey: key)) else {
+            if chinese { attachChinese(text, to: speaker) } else { add(speaker, text, translate: translate) }
+            return
+        }
+        if chinese { captions[i].chinese = text } else { captions[i].text = text }
+        captions[i].live = drafts.values.contains(captions[i].id)
+        if translate, !chinese, !looksChinese(text) { translateCaption(captions[i].id, text) }
+    }
+
+    /// Ends a draft as it stands (e.g. the AI was cut off).
+    private func closeDraft(_ key: String) {
+        guard let i = index(of: drafts.removeValue(forKey: key)) else { return }
+        captions[i].live = drafts.values.contains(captions[i].id)
+    }
+
+    private func translateCaption(_ id: UUID, _ text: String) {
+        Task {
+            if let zh = try? await chat("把下面这句电话里的话翻译成简体中文，只输出译文：\n\(text)") {
+                if let i = captions.firstIndex(where: { $0.id == id }) { captions[i].chinese = zh }
+            }
+        }
+    }
+
     private func add(_ speaker: AICaption.Speaker, _ text: String, translate: Bool = false) {
         // The translation can arrive before the transcript of what was said.
         if speaker == .them, mode == .translate,
@@ -865,12 +1091,7 @@ final class AICallAssistant: ObservableObject {
         captions.append(AICaption(speaker: speaker, text: text))
         if captions.count > 200 { captions.removeFirst(captions.count - 200) }
         guard translate, !looksChinese(text) else { return }
-        let id = captions.last!.id
-        Task {
-            if let zh = try? await chat("把下面这句电话里的话翻译成简体中文，只输出译文：\n\(text)") {
-                if let i = captions.firstIndex(where: { $0.id == id }) { captions[i].chinese = zh }
-            }
-        }
+        translateCaption(captions.last!.id, text)
     }
 
     private func attachChinese(_ zh: String, to speaker: AICaption.Speaker) {
@@ -886,29 +1107,31 @@ final class AICallAssistant: ObservableObject {
         return han * 3 >= s.count
     }
 
-    private func summarize() {
-        let transcript = captions.compactMap { c -> String? in
-            switch c.speaker {
-            case .them: return "对方：\(c.text)"
-            case .ai: return "AI：\(c.text)"
-            case .me: return "我：\(c.text)"
-            case .note: return nil
+    private func summarize(_ record: AICallRecord) {
+        let interpreted = record.modes == ["AI 翻译"]
+        let transcript = record.lines.compactMap { l -> String? in
+            switch l.who {
+            case "对方":
+                if let zh = l.chinese, !zh.isEmpty, zh != l.text { return "对方：\(l.text)（中文：\(zh)）" }
+                return "对方：\(l.text)"
+            case "AI": return interpreted ? nil : "AI：\(l.text)"
+            case "我": return "我：\(l.text)"
+            default: return nil
             }
         }.joined(separator: "\n")
         guard !transcript.isEmpty else { return }
-        let goalLine = goal.isEmpty ? "" : "我交代的事：\(goal)\n"
+        let goalLine = goal.isEmpty || interpreted ? "" : "我交代的事：\(goal)\n"
+        let what = interpreted ? "我和对方通过 AI 翻译打的一通电话" : "AI 替我打/接的一通电话"
+        let id = record.id
         Task {
-            do {
-                let text = try await chat("""
-                下面是 AI 替我打/接的一通电话。\(goalLine)用简体中文简短总结：对方是谁、说了什么、结果如何、我接下来要做什么。用 3–5 条短句。
+            guard let text = try? await chat("""
+            下面是\(what)。\(goalLine)用简体中文简短总结：对方是谁、说了什么、结果如何、我接下来要做什么。用 3–5 条短句。
 
-                \(transcript)
-                """)
-                summary = text
-                SystemNotifications.shared?.post(title: "AI 通话总结", body: text)
-            } catch {
-                summary = nil
-            }
+            \(transcript)
+            """) else { return }
+            AICallHistory.update(id) { $0.summary = text }
+            if callID == id || callID == nil { summary = text }
+            SystemNotifications.shared?.post(title: "AI 通话总结", body: text)
         }
     }
 
@@ -1028,6 +1251,12 @@ final class SpeakerGate: @unchecked Sendable {
     func extend(by seconds: Double) {
         lock.lock(); defer { lock.unlock() }
         until = max(until, Date()).addingTimeInterval(seconds)
+    }
+
+    /// Marks "still sounding now" (the 0.4 s echo tail follows).
+    func hold() {
+        lock.lock(); defer { lock.unlock() }
+        until = max(until, Date())
     }
 
     var isSpeaking: Bool {

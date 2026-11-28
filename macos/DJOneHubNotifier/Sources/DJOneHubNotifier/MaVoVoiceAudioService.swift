@@ -46,6 +46,22 @@ final class VoiceAudioService {
     private var assistantUplink = Data()
     private let assistantUplinkLimit = 8_000 * 2 * 120
     private var assistantPaceAt: UInt64 = 0
+    // Soft "please hold" pulse sent to the other party while a translation
+    // is being prepared, so the silence doesn't sound like a dropped line.
+    private var waitingTone = false
+    private var tonePhase = 0
+    // AI speech queued on the Mac speaker (24 kHz frames), used to keep the
+    // translation from falling further and further behind.
+    private var assistantTimePitch: AVAudioUnitTimePitch?
+    private var assistantQueuedFrames = 0 {
+        didSet { stateLock.withLock { assistantSounding = assistantQueuedFrames > 0 } }
+    }
+    private var assistantSounding = false
+    /// AI speech is still playing on the Mac speaker (thread-safe).
+    var isAssistantSounding: Bool { stateLock.withLock { assistantSounding } }
+    private var assistantGeneration = 0
+    /// Called (on the playback queue) when a long backlog of translation was skipped.
+    var onAssistantBacklogDropped: (() -> Void)?
     private var running = false
     private var mediaEnabled = false
     private var pcmFlowReady = true
@@ -435,8 +451,28 @@ final class VoiceAudioService {
         playbackQueue.async { [weak self] in
             guard let self else { return }
             self.player?.volume = routing == .translate ? 0.18 : 1
-            if routing == .off { self.assistantPlayer?.stop(); self.assistantPlayer?.play() }
+            if routing == .off { self.resetAssistantPlayer() }
         }
+        if routing == .off { setWaitingTone(false) }
+    }
+
+    /// Plays a quiet pulse to the other party until real speech is queued.
+    func setWaitingTone(_ on: Bool) {
+        uploadLock.withLock {
+            if on && !waitingTone { tonePhase = 0 }
+            waitingTone = on
+        }
+    }
+
+    /// Fills `count` frames of the waiting pulse: a soft 120 ms tone every 1.4 s.
+    private func toneFrame() -> Int16 {
+        let period = 11_200, length = 960
+        let i = tonePhase % period
+        tonePhase &+= 1
+        guard i < length else { return 0 }
+        let t = Double(i) / 8_000
+        let envelope = 0.5 - 0.5 * cos(2 * Double.pi * Double(i) / Double(length))
+        return Int16(1_100 * envelope * sin(2 * Double.pi * 620 * t))
     }
 
     /// Queues 8 kHz PCM16 speech to be sent to the other party.
@@ -469,16 +505,46 @@ final class VoiceAudioService {
                 let samples = raw.bindMemory(to: Int16.self)
                 for i in 0 ..< frames { out[i] = Float(Int16(littleEndian: samples[i])) / 32_768 }
             }
-            node.scheduleBuffer(buffer, completionHandler: nil)
+            let translating = self.stateLock.withLock { self.aiRouting } == .translate
+            if translating { self.paceAssistant(adding: frames, sampleRate: sampleRate) }
+            let generation = self.assistantGeneration
+            self.assistantQueuedFrames += frames
+            node.scheduleBuffer(buffer) { [weak self] in
+                self?.playbackQueue.async {
+                    guard let self, self.assistantGeneration == generation else { return }
+                    self.assistantQueuedFrames = max(0, self.assistantQueuedFrames - frames)
+                    if self.assistantQueuedFrames < Int(sampleRate) { self.assistantTimePitch?.rate = 1 }
+                }
+            }
         }
+    }
+
+    /// Long speeches would otherwise make the Chinese fall further and further
+    /// behind: speed it up a little when it lags, and skip it (captions stay)
+    /// when it is hopelessly late. Runs on the playback queue.
+    private func paceAssistant(adding frames: Int, sampleRate: Double) {
+        let lag = Double(assistantQueuedFrames + frames) / sampleRate
+        if lag > 12 {
+            resetAssistantPlayer()
+            onAssistantBacklogDropped?()
+            return
+        }
+        let rate: Float = lag > 6 ? 1.5 : lag > 3 ? 1.25 : (assistantTimePitch?.rate ?? 1)
+        if assistantTimePitch?.rate != rate { assistantTimePitch?.rate = rate }
+    }
+
+    /// Runs on the playback queue.
+    private func resetAssistantPlayer() {
+        assistantGeneration &+= 1
+        assistantQueuedFrames = 0
+        assistantTimePitch?.rate = 1
+        assistantPlayer?.stop()
+        assistantPlayer?.play()
     }
 
     /// Stops AI speech already queued on the speaker.
     func stopAssistantPlayback() {
-        playbackQueue.async { [weak self] in
-            self?.assistantPlayer?.stop()
-            self?.assistantPlayer?.play()
-        }
+        playbackQueue.async { [weak self] in self?.resetAssistantPlayer() }
     }
 
     var isRecording: Bool { recorder.isRecording }
@@ -544,12 +610,12 @@ final class VoiceAudioService {
             engine.attach(player)
             engine.connect(player, to: engine.mainMixerNode, format: playbackFormat)
             let assistant = AVAudioPlayerNode()
+            let timePitch = AVAudioUnitTimePitch()
             engine.attach(assistant)
-            engine.connect(
-                assistant,
-                to: engine.mainMixerNode,
-                format: AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1)!
-            )
+            engine.attach(timePitch)
+            let aiFormat = AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1)!
+            engine.connect(assistant, to: timePitch, format: aiFormat)
+            engine.connect(timePitch, to: engine.mainMixerNode, format: aiFormat)
 
             let input = engine.inputNode
             let voiceProcessingEnabled: Bool
@@ -583,6 +649,8 @@ final class VoiceAudioService {
             self.engine = engine
             self.player = player
             self.assistantPlayer = assistant
+            self.assistantTimePitch = timePitch
+            self.assistantQueuedFrames = 0
             return voiceProcessingEnabled
         }
     }
@@ -597,6 +665,9 @@ final class VoiceAudioService {
             }
             self.player = nil
             self.assistantPlayer = nil
+            self.assistantTimePitch = nil
+            self.assistantGeneration &+= 1
+            self.assistantQueuedFrames = 0
             self.engine = nil
             scheduledPlaybackFrames = 0
         }
@@ -907,6 +978,11 @@ final class VoiceAudioService {
                 let n = min(transmitChunkBytes, assistantUplink.count)
                 var chunk = Data(assistantUplink.prefix(n))
                 assistantUplink.removeFirst(n)
+                if n == 0, waitingTone {
+                    var tone = [Int16](repeating: 0, count: transmitChunkBytes / 2)
+                    for i in tone.indices { tone[i] = toneFrame() }
+                    return tone.withUnsafeBytes { Data($0) }
+                }
                 chunk.append(Data(repeating: 0, count: transmitChunkBytes - n))
                 return chunk
             }
@@ -938,6 +1014,13 @@ final class VoiceAudioService {
                 let target = now + lead
                 let due = assistantPaceAt < target
                     ? Int(Double(target - assistantPaceAt) * 8_000 / 1_000_000_000) : 0
+                if assistantUplink.isEmpty, waitingTone {
+                    let n = min(samples.count, due)
+                    guard n > 0 else { return 0 }
+                    for f in 0 ..< n { samples[f] = toneFrame() }
+                    assistantPaceAt &+= UInt64(Double(n) * 1_000_000_000 / 8_000)
+                    return n
+                }
                 let frameCount = min(samples.count, assistantUplink.count / 2, due)
                 guard frameCount > 0 else { return 0 }
                 assistantPaceAt &+= UInt64(Double(frameCount) * 1_000_000_000 / 8_000)

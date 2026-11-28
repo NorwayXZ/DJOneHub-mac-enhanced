@@ -7,6 +7,9 @@ protocol VoiceAISession: AnyObject {
     var onHeard: ((String) -> Void)? { get set }        // what came in
     var onSaid: ((String) -> Void)? { get set }         // what the AI said
     var onSpeechStarted: (() -> Void)? { get set }
+    /// Word-by-word pieces while someone is still talking (for live captions).
+    var onHeardDelta: ((String) -> Void)? { get set }
+    var onSaidDelta: ((String) -> Void)? { get set }
     var onError: ((String) -> Void)? { get set }
     func appendAudio8k(_ pcm: Data)
     func requestResponse(_ extra: String?)
@@ -23,6 +26,8 @@ final class GeminiLiveSession: NSObject, VoiceAISession, @unchecked Sendable {
     var onHeard: ((String) -> Void)?
     var onSaid: ((String) -> Void)?
     var onSpeechStarted: (() -> Void)?
+    var onHeardDelta: ((String) -> Void)?
+    var onSaidDelta: ((String) -> Void)?
     var onError: ((String) -> Void)?
 
     private var task: URLSessionWebSocketTask?
@@ -31,6 +36,7 @@ final class GeminiLiveSession: NSObject, VoiceAISession, @unchecked Sendable {
     private var closed = false
     private var ready = false
     private var queuedTurn: [String: Any]?
+    private var queuedNotes: [[String: Any]] = []
     private var heardText = ""
     private var saidText = ""
     private var heardThisTurn = false
@@ -112,12 +118,13 @@ final class GeminiLiveSession: NSObject, VoiceAISession, @unchecked Sendable {
     /// Gemini Live can't change its system instruction mid-session, so the
     /// change is added to the conversation as a note without asking for a reply.
     func updateInstructions(_ text: String) {
+        let note: [String: Any] = ["clientContent": [
+            "turns": [["role": "user", "parts": [["text": "(Updated instructions from the app — follow these from now on, don't reply to this note)\n" + text]]]],
+            "turnComplete": false,
+        ] as [String: Any]]
         queue.async { [weak self] in
-            guard let self, !self.closed, self.ready else { return }
-            self.send(["clientContent": [
-                "turns": [["role": "user", "parts": [["text": "(Updated instructions from the app — follow these from now on, don't reply to this note)\n" + text]]]],
-                "turnComplete": false,
-            ] as [String: Any]])
+            guard let self, !self.closed else { return }
+            if self.ready { self.send(note) } else { self.queuedNotes.append(note) }
         }
     }
 
@@ -135,6 +142,8 @@ final class GeminiLiveSession: NSObject, VoiceAISession, @unchecked Sendable {
     private func becomeReady() {
         guard !ready else { return }
         ready = true
+        queuedNotes.forEach(send)
+        queuedNotes = []
         if let t = queuedTurn { queuedTurn = nil; send(t) }
     }
 
@@ -186,6 +195,7 @@ final class GeminiLiveSession: NSObject, VoiceAISession, @unchecked Sendable {
                 onSpeechStarted?()
             }
             heardText += input
+            onHeardDelta?(input)
         }
         if content["interrupted"] as? Bool == true {
             AICallLog.write("gemini: interrupted")
@@ -206,6 +216,7 @@ final class GeminiLiveSession: NSObject, VoiceAISession, @unchecked Sendable {
         }
         if let output = (content["outputTranscription"] as? [String: Any])?["text"] as? String {
             saidText += output
+            if !output.isEmpty { onSaidDelta?(output) }
         }
         if content["generationComplete"] as? Bool == true || content["turnComplete"] as? Bool == true {
             flushHeard()

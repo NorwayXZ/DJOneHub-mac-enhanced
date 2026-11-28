@@ -117,6 +117,11 @@ final class CallCenter: ObservableObject {
             } else {
                 activeSeenAt = nil
             }
+            // Any other call: have the interpreter connected before "AI 翻译".
+            if let active = status.active, ai.pendingGoal == nil, !aiScreenPending,
+               ["dialing", "alerting", "incoming", "waiting", "active"].contains(active.state) {
+                ai.prewarmInterpreter(callID: active.id, number: active.number)
+            }
             // Outgoing AI call still ringing: get the AI connected now.
             if let active = status.active, active.direction != "incoming",
                active.state == "dialing" || active.state == "alerting",

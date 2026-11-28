@@ -117,6 +117,14 @@ struct AICallPanel: View {
                 if ai.mode == .translate {
                     languagePicker
                 }
+                if !ai.phase.isEmpty {
+                    Label(ai.phase, systemImage: "waveform")
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 5)
+                        .background(Capsule().fill(Color.accentColor.opacity(0.12)))
+                }
                 Text(ai.status)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -202,6 +210,12 @@ struct AICallPanel: View {
             .onChange(of: ai.captions.count) { _ in
                 if let last = ai.captions.last { withAnimation { proxy.scrollTo(last.id, anchor: .bottom) } }
             }
+            .onChange(of: ai.captions.last?.text.count ?? 0) { _ in
+                if let last = ai.captions.last { proxy.scrollTo(last.id, anchor: .bottom) }
+            }
+            .onChange(of: ai.captions.last?.chinese?.count ?? 0) { _ in
+                if let last = ai.captions.last { proxy.scrollTo(last.id, anchor: .bottom) }
+            }
         }
     }
 }
@@ -237,9 +251,10 @@ private struct CaptionRow: View {
                             Text(caption.text).font(.caption).foregroundStyle(.secondary)
                         }
                     } else {
-                        Text(caption.text).font(.callout)
+                        Text(caption.text.isEmpty ? "…" : caption.text).font(.callout)
                     }
                 }
+                .opacity(caption.live ? 0.7 : 1)
                 .textSelection(.enabled)
             }
         }
@@ -252,6 +267,7 @@ struct AICallSettingsCard: View {
     @EnvironmentObject private var aiSettings: AICallSettings
     @State private var testResult: String?
     @State private var testing = false
+    @State private var showingHistory = false
 
     private let voices = ["marin", "cedar", "alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse"]
     private let geminiVoices = ["Kore", "Aoede", "Leda", "Zephyr", "Puck", "Charon", "Fenrir", "Orus"]
@@ -323,6 +339,7 @@ struct AICallSettingsCard: View {
                     .textFieldStyle(.roundedBorder)
             }
             Toggle("来电响几声后让 AI 自动接听，问清对方是谁、什么事", isOn: $aiSettings.autoScreenIncoming)
+            Toggle("翻译时，你说话的空档给对方放很轻的提示音（让对方知道没断线）", isOn: $aiSettings.waitTone)
             HStack {
                 Button(testing ? "检测中…" : "检测连接") {
                     testing = true
@@ -336,7 +353,9 @@ struct AICallSettingsCard: View {
                     Text(testResult).font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
+                Button("AI 通话记录…") { showingHistory = true }
             }
+            .sheet(isPresented: $showingHistory) { AICallHistorySheet() }
             Text("翻译模式建议戴耳机，免得 Mac 外放的中文被麦克风收进去。")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
