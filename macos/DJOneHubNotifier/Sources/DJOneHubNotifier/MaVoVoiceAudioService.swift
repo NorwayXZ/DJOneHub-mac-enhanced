@@ -459,7 +459,8 @@ final class VoiceAudioService {
     /// Plays a quiet pulse to the other party until real speech is queued.
     func setWaitingTone(_ on: Bool) {
         uploadLock.withLock {
-            if on && !waitingTone { tonePhase = 0 }
+            // First pulse after ~0.7 s: short gaps stay silent.
+            if on && !waitingTone { tonePhase = 11_200 - 5_600 }
             waitingTone = on
         }
     }

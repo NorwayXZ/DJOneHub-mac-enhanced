@@ -7,6 +7,10 @@ protocol VoiceAISession: AnyObject {
     var onHeard: ((String) -> Void)? { get set }        // what came in
     var onSaid: ((String) -> Void)? { get set }         // what the AI said
     var onSpeechStarted: (() -> Void)? { get set }
+    /// They stopped talking and the AI is about to answer (not every engine reports it).
+    var onSpeechStopped: (() -> Void)? { get set }
+    /// Name used in the timing log ("in", "out", "agent").
+    var tag: String { get set }
     /// Word-by-word pieces while someone is still talking (for live captions).
     var onHeardDelta: ((String) -> Void)? { get set }
     var onSaidDelta: ((String) -> Void)? { get set }
@@ -26,6 +30,8 @@ final class GeminiLiveSession: NSObject, VoiceAISession, @unchecked Sendable {
     var onHeard: ((String) -> Void)?
     var onSaid: ((String) -> Void)?
     var onSpeechStarted: (() -> Void)?
+    var onSpeechStopped: (() -> Void)?
+    var tag = ""
     var onHeardDelta: ((String) -> Void)?
     var onSaidDelta: ((String) -> Void)?
     var onError: ((String) -> Void)?

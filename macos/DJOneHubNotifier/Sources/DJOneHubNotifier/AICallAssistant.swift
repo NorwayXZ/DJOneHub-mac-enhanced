@@ -249,9 +249,12 @@ final class RealtimeVoiceSession: NSObject, @unchecked Sendable {
     var onHeard: ((String) -> Void)?            // transcript of what came in
     var onSaid: ((String) -> Void)?             // transcript of what the AI said
     var onSpeechStarted: (() -> Void)?
+    var onSpeechStopped: (() -> Void)?
+    var tag = ""
     var onHeardDelta: ((String) -> Void)?
     var onSaidDelta: ((String) -> Void)?
     var onError: ((String) -> Void)?
+    private var awaitingFirstAudio = false
 
     private var task: URLSessionWebSocketTask?
     private let queue = DispatchQueue(label: "djonehub.ai.realtime")
@@ -377,7 +380,7 @@ final class RealtimeVoiceSession: NSObject, @unchecked Sendable {
         guard let data = text.data(using: .utf8),
               let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = event["type"] as? String else { return }
-        if !type.hasSuffix(".delta") { AICallLog.write(type == "error" ? "error \(text.prefix(300))" : type) }
+        if !type.hasSuffix(".delta") { AICallLog.write("\(tag) " + (type == "error" ? "error \(text.prefix(300))" : type)) }
         switch type {
         case "response.output_audio_transcript.delta", "response.audio_transcript.delta":
             if let d = event["delta"] as? String, !d.isEmpty { onSaidDelta?(d) }
@@ -396,6 +399,7 @@ final class RealtimeVoiceSession: NSObject, @unchecked Sendable {
                 if let r = self.queuedResponse { self.queuedResponse = nil; self.send(r) }
             }
         case "response.output_audio.delta", "response.audio.delta":
+            if awaitingFirstAudio { awaitingFirstAudio = false; AICallLog.write("\(tag) first audio") }
             if let b64 = event["delta"] as? String, var pcm = Data(base64Encoded: b64) {
                 if !leftover.isEmpty { pcm = leftover + pcm; leftover.removeAll() }
                 if pcm.count % 2 == 1 { leftover = pcm.suffix(1); pcm.removeLast() }
@@ -411,6 +415,9 @@ final class RealtimeVoiceSession: NSObject, @unchecked Sendable {
             }
         case "input_audio_buffer.speech_started":
             onSpeechStarted?()
+        case "input_audio_buffer.speech_stopped":
+            awaitingFirstAudio = true
+            onSpeechStopped?()
         case "response.done":
             // A turn finished while the previous translation was still being
             // spoken: answer it now instead of dropping it.
@@ -555,9 +562,13 @@ final class AICallAssistant: ObservableObject {
                 pair?.broken = true
             }
         }
-        connect(pair.inbound, instructions: Self.inboundPrompt, interrupt: false, eagerness: "medium")
+        // "high": answer as soon as a sentence is complete. Patient end-of-turn
+        // detection held every translation back 3–5 s on a real call.
+        pair.inbound.tag = "in"
+        pair.outbound.tag = "out"
+        connect(pair.inbound, instructions: Self.inboundPrompt, interrupt: false, eagerness: "high")
         connect(pair.outbound, instructions: Self.outboundPrompt(base: Self.interpreterBase, language: lang),
-                interrupt: false, eagerness: "low")
+                interrupt: false, eagerness: "high")
         return pair
     }
 
@@ -622,10 +633,15 @@ final class AICallAssistant: ObservableObject {
             audio?.setWaitingTone(false)
             audio?.sendAssistantSpeech(outDecimator.process(pcm))
         }
-        outbound.onSpeechStarted = { [weak self, weak audio] in
+        outbound.onSpeechStarted = { [weak self] in
+            Task { @MainActor in self?.setPhase("你在说…") }
+        }
+        // The pulse only fills the gap between you finishing and the
+        // translation starting, and only if that gap is noticeable.
+        outbound.onSpeechStopped = { [weak self, weak audio] in
             if tone { audio?.setWaitingTone(true) }
             Task { @MainActor in
-                self?.setPhase("你在说…（对方听到轻提示音，知道你在说）")
+                self?.setPhase("正在翻译给对方…")
                 self?.capWaitingTone()
             }
         }
@@ -669,7 +685,7 @@ final class AICallAssistant: ObservableObject {
     private func capWaitingTone() {
         toneCap?.cancel()
         toneCap = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(12))
+            try? await Task.sleep(for: .seconds(6))
             guard !Task.isCancelled else { return }
             self?.audio?.setWaitingTone(false)
         }
@@ -870,6 +886,7 @@ final class AICallAssistant: ObservableObject {
         AI assistant, then carry on naturally.
         """
         let s = Self.makeSession()
+        s.tag = "agent"
         let decimator = PhoneDecimator()
         s.onAudio = { [weak audio] pcm in
             audio?.sendAssistantSpeech(decimator.process(pcm))
@@ -1286,7 +1303,9 @@ enum AICallLog {
 
     static func write(_ line: String) {
         guard !line.hasSuffix(".delta") else { return }
-        let stamp = ISO8601DateFormatter().string(from: Date())
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let stamp = f.string(from: Date())
         queue.async {
             let data = Data("\(stamp) \(line)\n".utf8)
             if let h = try? FileHandle(forWritingTo: url) {
