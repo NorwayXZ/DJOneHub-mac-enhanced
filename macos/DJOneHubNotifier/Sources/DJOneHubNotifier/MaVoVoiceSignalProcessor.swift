@@ -43,3 +43,35 @@ struct VoiceCaptureConditioner {
         lowPassStage2 = 0
     }
 }
+
+/// Lightweight 80 Hz high-pass filter for the wideband 24 kHz AI path:
+/// removes DC offset and desk rumble without cutting speech clarity above 3.4 kHz.
+struct WidebandHighPassFilter {
+    private(set) var sampleRate = 0.0
+    private var previousInput: Float = 0
+    private var highPassOutput: Float = 0
+
+    mutating func process(_ samples: [Float], sampleRate: Double) -> [Float] {
+        guard sampleRate > 0, !samples.isEmpty else { return [] }
+        if self.sampleRate != sampleRate {
+            reset(sampleRate: sampleRate)
+        }
+        let timeStep = 1.0 / sampleRate
+        let highPassRC = 1.0 / (2.0 * Double.pi * 80.0)
+        let alpha = Float(highPassRC / (highPassRC + timeStep))
+        var output = [Float]()
+        output.reserveCapacity(samples.count)
+        for sample in samples {
+            highPassOutput = alpha * (highPassOutput + sample - previousInput)
+            previousInput = sample
+            output.append(max(-1, min(1, highPassOutput)))
+        }
+        return output
+    }
+
+    mutating func reset(sampleRate: Double = 0) {
+        self.sampleRate = sampleRate
+        previousInput = 0
+        highPassOutput = 0
+    }
+}

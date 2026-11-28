@@ -16,9 +16,16 @@ protocol VoiceAISession: AnyObject {
     var onSaidDelta: ((String) -> Void)? { get set }
     var onError: ((String) -> Void)? { get set }
     func appendAudio8k(_ pcm: Data)
+    func appendAudio24k(_ pcm: Data)
     func requestResponse(_ extra: String?)
     func updateInstructions(_ text: String)
     func close()
+}
+
+extension VoiceAISession {
+    func appendAudio24k(_ pcm: Data) {
+        appendAudio8k(PCM.down3(pcm))
+    }
 }
 
 extension RealtimeVoiceSession: VoiceAISession {}
@@ -39,6 +46,7 @@ final class GeminiLiveSession: NSObject, VoiceAISession, @unchecked Sendable {
     private var task: URLSessionWebSocketTask?
     private let queue = DispatchQueue(label: "djonehub.ai.gemini")
     private var pending = Data()
+    private var pending24k = Data()
     private var closed = false
     private var ready = false
     private var queuedTurn: [String: Any]?
@@ -99,9 +107,24 @@ final class GeminiLiveSession: NSObject, VoiceAISession, @unchecked Sendable {
         queue.async { [weak self] in
             guard let self, !self.closed, self.ready else { return }
             self.pending.append(pcm)
-            guard self.pending.count >= 1_600 else { return }
+            guard self.pending.count >= 960 else { return }
             let chunk = Self.up2(self.pending)
             self.pending.removeAll(keepingCapacity: true)
+            self.send(["realtimeInput": ["audio": [
+                "data": chunk.base64EncodedString(),
+                "mimeType": "audio/pcm;rate=16000",
+            ]]])
+        }
+    }
+
+    /// 24 kHz wideband mic audio -> 16 kHz directly (3:2), preserving clarity above 4 kHz.
+    func appendAudio24k(_ pcm: Data) {
+        queue.async { [weak self] in
+            guard let self, !self.closed, self.ready else { return }
+            self.pending24k.append(pcm)
+            guard self.pending24k.count >= 2_880 else { return }
+            let chunk = Self.down24to16(self.pending24k)
+            self.pending24k.removeAll(keepingCapacity: true)
             self.send(["realtimeInput": ["audio": [
                 "data": chunk.base64EncodedString(),
                 "mimeType": "audio/pcm;rate=16000",
@@ -255,6 +278,26 @@ final class GeminiLiveSession: NSObject, VoiceAISession, @unchecked Sendable {
                 let b = i + 1 < n ? Int(Int16(littleEndian: s[i + 1])) : a
                 out[i * 2] = Int16(a)
                 out[i * 2 + 1] = Int16((a + b) / 2)
+            }
+        }
+        return out.withUnsafeBytes { Data($0) }
+    }
+
+    /// 24 kHz -> 16 kHz (3 samples -> 2 samples, linear).
+    static func down24to16(_ data: Data) -> Data {
+        let n = data.count / 2
+        let groups = n / 3
+        guard groups > 0 else { return Data() }
+        var out = [Int16](repeating: 0, count: groups * 2)
+        data.withUnsafeBytes { raw in
+            let s = raw.bindMemory(to: Int16.self)
+            for g in 0 ..< groups {
+                let i = g * 3
+                let s0 = Int(Int16(littleEndian: s[i]))
+                let s1 = Int(Int16(littleEndian: s[i + 1]))
+                let s2 = Int(Int16(littleEndian: s[i + 2]))
+                out[g * 2] = Int16(s0)
+                out[g * 2 + 1] = Int16((s1 + s2) / 2)
             }
         }
         return out.withUnsafeBytes { Data($0) }

@@ -117,17 +117,29 @@ final class CallCenter: ObservableObject {
             } else {
                 activeSeenAt = nil
             }
-            // Any other call: have the interpreter connected before "AI 翻译".
-            if let active = status.active, ai.pendingGoal == nil, !aiScreenPending,
-               ["dialing", "alerting", "incoming", "waiting", "active"].contains(active.state) {
-                ai.prewarmInterpreter(callID: active.id, number: active.number)
+            // Prewarm interpreter ONLY when dialing with AI translate requested,
+            // so normal personal calls never hold idle WebSocket sessions.
+            if let active = status.active, ai.pendingTranslate, ai.pendingGoal == nil, !aiScreenPending,
+               ["dialing", "alerting", "active"].contains(active.state) {
+                ai.prewarmInterpreter(
+                    callID: active.id,
+                    number: active.number,
+                    preferredLanguage: ai.pendingLanguage ?? CallLanguage.preferred(for: active.number)
+                )
+            }
+            // Load the customer's previous call brief as soon as a call appears.
+            if let active = status.active, active.id != previousID {
+                ai.loadPreviousCall(for: active.number, excludingID: active.id)
+                if ai.pendingLanguage == nil {
+                    ai.language = CallLanguage.preferred(for: active.number)
+                }
             }
             // Outgoing AI call still ringing: get the AI connected now.
             if let active = status.active, active.direction != "incoming",
                active.state == "dialing" || active.state == "alerting",
                let goal = ai.pendingGoal, !ai.hasPrewarmed {
                 ai.prewarmAgent(goal: goal,
-                                language: ai.pendingLanguage ?? CallLanguage.guess(for: active.number),
+                                language: ai.pendingLanguage ?? CallLanguage.preferred(for: active.number),
                                 audio: maVoAudio)
             }
         } catch {
@@ -293,8 +305,19 @@ final class CallCenter: ObservableObject {
 
     // MARK: - Call AI
 
+    /// Dial and automatically launch simultaneous translation as soon as they pick up.
+    func dialWithTranslate(_ number: String, language: CallLanguage) {
+        ai.pendingGoal = nil
+        ai.pendingTranslate = true
+        ai.pendingLanguage = language
+        ai.language = language
+        CallLanguageMemory.remember(language, for: number)
+        dial(number)
+    }
+
     /// Dial and let the AI talk once the other side picks up.
     func dialWithAI(_ number: String, goal: String, language: CallLanguage) {
+        ai.pendingTranslate = false
         ai.pendingGoal = goal
         ai.pendingLanguage = language
         dial(number)
@@ -327,16 +350,21 @@ final class CallCenter: ObservableObject {
         let late = activeSeenAt.map { Date().timeIntervalSince($0) > 2 } ?? false
         if aiScreenPending {
             aiScreenPending = false
-            ai.language = CallLanguage.guess(for: call.number)
+            ai.language = CallLanguage.preferred(for: call.number)
             ai.startAgent(callID: call.id, number: call.number, goal: "", screening: true,
                           audio: maVoAudio, speakFirst: true)
         } else if let goal = ai.pendingGoal, call.direction != "incoming" {
-            ai.language = ai.pendingLanguage ?? CallLanguage.guess(for: call.number)
+            ai.language = ai.pendingLanguage ?? CallLanguage.preferred(for: call.number)
             ai.pendingGoal = nil
             ai.startAgent(callID: call.id, number: call.number, goal: goal, screening: false,
                           audio: maVoAudio, speakFirst: true, lateStart: late)
+        } else if ai.pendingTranslate, call.direction != "incoming" {
+            ai.language = ai.pendingLanguage ?? CallLanguage.preferred(for: call.number)
+            ai.pendingTranslate = false
+            ai.pendingLanguage = nil
+            ai.startTranslate(callID: call.id, number: call.number, audio: maVoAudio)
         } else {
-            ai.language = CallLanguage.guess(for: call.number)
+            ai.language = CallLanguage.preferred(for: call.number)
         }
     }
 

@@ -67,6 +67,22 @@ enum SelfTest {
         precondition(fleetCenter.unavailable && summaryRunning && fleetCenter.runningCount == 1)
         fleetCenter.select("a")
         precondition(fleetCenter.status?.publicIP == "192.0.2.10")
+        // Verify structured business call summary parser & wideband filter
+        let parsedJSON = StructuredCallSummary.parse(from: """
+        ```json
+        {"topic":"报价确认","highlights":["500件单价$12"],"agreed":["下周三发货"],"open_questions":["运费谁出"],"next_steps":["发合同"]}
+        ```
+        """)
+        precondition(parsedJSON?.topic == "报价确认")
+        precondition(parsedJSON?.highlights == ["500件单价$12"])
+        precondition(parsedJSON?.agreed == ["下周三发货"])
+        precondition(parsedJSON?.openQuestions == ["运费谁出"])
+        precondition(parsedJSON?.nextSteps == ["发合同"])
+        let parsedFallback = StructuredCallSummary.parse(from: "- 确认样品\n- 下周一寄出")
+        precondition(parsedFallback?.topic == "确认样品" && parsedFallback?.highlights == ["下周一寄出"])
+        var hp = WidebandHighPassFilter()
+        let filtered = hp.process([0.5, 0.5, -0.25, 0.25], sampleRate: 48_000)
+        precondition(filtered.count == 4 && filtered.allSatisfy(\.isFinite))
         print("DJOneHubNotifier self-test passed")
     }
 }

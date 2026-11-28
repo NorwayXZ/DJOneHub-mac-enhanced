@@ -170,14 +170,24 @@ struct PhoneCard: ViewModifier {
 struct DialPadView: View {
     @EnvironmentObject private var calls: CallCenter
     @EnvironmentObject private var contacts: ContactStore
+    @EnvironmentObject private var aiSettings: AICallSettings
     @AppStorage("dialCountry") private var dialCountry = "CN"
+    @AppStorage("dialWithTranslate") private var dialWithTranslate = false
+    @AppStorage("dialTranslateLanguage") private var dialTranslateLangID = "English"
     @State private var pickingCountry = false
     @State private var aiDialing = false
+    @State private var userPickedLangForInput = false
 
     /// The number the module will dial, with the chosen country's code.
     private var dialTarget: String { DialCountry.international(calls.numberInput, country: dialCountry) }
 
-    private func dialNow() { calls.dial(dialTarget) }
+    private func dialNow() {
+        if dialWithTranslate && aiSettings.isConfigured {
+            calls.dialWithTranslate(dialTarget, language: CallLanguage.find(dialTranslateLangID))
+        } else {
+            calls.dial(dialTarget)
+        }
+    }
 
     /// 完整/后缀匹配到的联系人（显示头像与姓名）
     private var matchedContact: ContactStore.Contact? {
@@ -276,6 +286,49 @@ struct DialPadView: View {
                 .foregroundStyle(.secondary)
                 .frame(height: 16)
                 .padding(.top, -10)
+
+            // One-click "dial with simultaneous interpretation" bar
+            HStack(spacing: 8) {
+                Button {
+                    dialWithTranslate.toggle()
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: dialWithTranslate ? "checkmark.circle.fill" : "waveform.and.mic")
+                            .foregroundStyle(dialWithTranslate ? PhoneStyle.green : .secondary)
+                        Text(dialWithTranslate ? "接通自动开同传" : "带 AI 同传拨打")
+                            .font(.caption.weight(.medium))
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(
+                        Capsule().fill(dialWithTranslate ? PhoneStyle.green.opacity(0.14) : Color.secondary.opacity(0.1))
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(!aiSettings.isConfigured)
+                .help(aiSettings.isConfigured ? "开启后拨号即预热，对方一接听立刻进入同声传译" : "先到 设置 › AI 通话助手 填 API Key")
+
+                if dialWithTranslate && aiSettings.isConfigured {
+                    Picker("", selection: Binding(
+                        get: { dialTranslateLangID },
+                        set: {
+                            dialTranslateLangID = $0
+                            userPickedLangForInput = true
+                        }
+                    )) {
+                        ForEach(CallLanguage.all) { Text("客户说\($0.name)").tag($0.id) }
+                    }
+                    .labelsHidden()
+                    .frame(width: 136)
+                }
+            }
+            .onChange(of: dialTarget) { newTarget in
+                guard !userPickedLangForInput, !newTarget.isEmpty else { return }
+                dialTranslateLangID = CallLanguage.preferred(for: newTarget).id
+            }
+            .onChange(of: calls.numberInput) { newValue in
+                if newValue.isEmpty { userPickedLangForInput = false }
+            }
 
             VStack(spacing: 12) {
                 ForEach(Self.rows, id: \.self) { row in
@@ -432,8 +485,17 @@ private struct DialKey: View {
 // MARK: - 最近通话
 
 struct RecentsView: View {
+    private enum Section: String, CaseIterable, Identifiable {
+        case calls = "全部通话"
+        case aiNotes = "AI 谈话纪要"
+        var id: String { rawValue }
+    }
+
     @EnvironmentObject private var calls: CallCenter
+    @State private var section: Section = .calls
     @State private var recordings: [RecordingFile] = []
+    @State private var aiRecords: [AICallRecord] = []
+    @State private var selectedAIRecordID: String?
     @State private var expanded: Set<String> = []
     @State private var playingID: String?
     @State private var sound: NSSound?
@@ -445,6 +507,21 @@ struct RecentsView: View {
         return recordings
             .filter { $0.date.timeIntervalSince1970 >= start && $0.date.timeIntervalSince1970 <= end }
             .sorted { $0.date < $1.date }
+    }
+
+    private func aiRecord(for call: CallRecord) -> AICallRecord? {
+        if let exact = aiRecords.first(where: { $0.id == call.id }) { return exact }
+        let start = call.startedAt.addingTimeInterval(-90).timeIntervalSince1970
+        let end = (call.endedAt ?? call.startedAt.addingTimeInterval(600))
+            .addingTimeInterval(90).timeIntervalSince1970
+        return aiRecords.first { r in
+            let t = r.date.timeIntervalSince1970
+            return t >= start && t <= end
+        }
+    }
+
+    private func refreshAIRecords() {
+        aiRecords = AICallHistory.load()
     }
 
     private func refreshRecordings() {
@@ -486,7 +563,26 @@ struct RecentsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if calls.history.isEmpty {
+            // Top segmented switcher: All Calls vs AI Business Call Logs & Summaries
+            HStack(spacing: 12) {
+                Picker("", selection: $section) {
+                    Text(L10n.t("全部通话")).tag(Section.calls)
+                    Text(aiRecords.isEmpty ? "AI 谈话纪要" : "AI 谈话纪要 (\(aiRecords.count))")
+                        .tag(Section.aiNotes)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 260)
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            Divider()
+
+            if section == .aiNotes {
+                AICallHistoryView(initialSelectedID: selectedAIRecordID)
+                    .id(selectedAIRecordID ?? "all")
+            } else if calls.history.isEmpty {
                 Spacer()
                 VStack(spacing: 8) {
                     Image(systemName: "phone.arrow.up.right")
@@ -501,11 +597,13 @@ struct RecentsView: View {
                 ScrollView {
                     LazyVStack(spacing: 8) {
                         ForEach(calls.history) { call in
+                            let matchedAI = aiRecord(for: call)
                             VStack(spacing: 8) {
                                 RecentsRow(
                                     call: call,
                                     expanded: expanded.contains(call.id),
                                     recordingCount: recordings(for: call).count,
+                                    hasAISummary: matchedAI != nil,
                                     onToggle: {
                                         if expanded.contains(call.id) {
                                             expanded.remove(call.id)
@@ -521,6 +619,30 @@ struct RecentsView: View {
                                 )
                                 .modifier(PhoneCard())
                                 if expanded.contains(call.id) {
+                                    if let matchedAI {
+                                        VStack(alignment: .leading, spacing: 8) {
+                                            StructuredSummaryCard(
+                                                summary: matchedAI.structuredSummary,
+                                                fallbackText: matchedAI.summary,
+                                                title: "AI 谈话概要",
+                                                compact: true
+                                            )
+                                            HStack {
+                                                Spacer()
+                                                Button {
+                                                    selectedAIRecordID = matchedAI.id
+                                                    section = .aiNotes
+                                                } label: {
+                                                    Label("查看完整双语聊天记录", systemImage: "text.bubble")
+                                                        .font(.caption)
+                                                }
+                                                .buttonStyle(.bordered)
+                                                .controlSize(.small)
+                                            }
+                                        }
+                                        .modifier(PhoneCard())
+                                        .transition(.opacity)
+                                    }
                                     RecentsRecordingsSection(
                                         recordings: recordings(for: call),
                                         playingID: playingID,
@@ -534,13 +656,20 @@ struct RecentsView: View {
                     }
                     .padding(12)
                 }
-                .onAppear(perform: refreshRecordings)
-                .onChange(of: calls.history) { _ in
-                    refreshRecordings()
-                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear {
+            refreshRecordings()
+            refreshAIRecords()
+        }
+        .onChange(of: calls.history) { _ in
+            refreshRecordings()
+            refreshAIRecords()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: AICallHistory.changed)) { _ in
+            refreshAIRecords()
+        }
     }
 }
 
@@ -549,6 +678,7 @@ private struct RecentsRow: View {
     let call: CallRecord
     var expanded = false
     var recordingCount = 0
+    var hasAISummary = false
     let onToggle: () -> Void
     let onDial: () -> Void
 
@@ -601,6 +731,11 @@ private struct RecentsRow: View {
                             Text(timeText)
                                 .font(.footnote.monospaced())
                                 .foregroundStyle(.secondary)
+                        }
+                        if hasAISummary {
+                            Label("AI 纪要", systemImage: "doc.text.magnifyingglass")
+                                .font(.caption2.weight(.medium))
+                                .foregroundStyle(Color.accentColor)
                         }
                         if recordingCount > 0 {
                             Label(L10n.f("%@ 段录音", String(recordingCount)), systemImage: "waveform")
@@ -2834,48 +2969,87 @@ struct CallActiveView: View {
         return String(format: "%02d:%02d", minutes, secs)
     }
 
+    private var showAIWorkspace: Bool {
+        ai.isOn || !ai.captions.isEmpty || ai.liveSummary != nil || ai.summary != nil
+    }
+
     var body: some View {
-        VStack(spacing: 18) {
-            Spacer()
-            ZStack {
-                Circle()
-                    .fill(Color.primary.opacity(0.08))
-                    .frame(width: 96, height: 96)
-                Image(systemName: "person.fill")
-                    .font(.system(size: 40))
-                    .foregroundStyle(.primary.opacity(0.85))
-            }
-            Text(contacts.displayName(for: call.number))
-                .font(.system(size: 30, weight: .semibold))
-                .lineLimit(1)
-                .minimumScaleFactor(0.6)
-                .foregroundStyle(.primary)
-            Text(statusText + (call.moduleName.map { " · " + $0 } ?? ""))
-                .font(.system(size: 14))
-                .foregroundStyle(.secondary)
-            if let warning = call.audioWarning, !warning.isEmpty {
-                Label(L10n.t(warning), systemImage: "speaker.slash.fill")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.orange)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 30)
-            }
-            if inCall || !ai.captions.isEmpty {
-                AICallPanel(connected: call.state == "active")
-                    .padding(.top, 4)
-            }
-            if inCall {
-                // Its own clock: the call screen redraws more often than once
-                // a second, which kept restarting a timer kept in the body.
-                TimelineView(.periodic(from: .now, by: 1)) { context in
-                    Text(durationText(at: context.date))
-                        .font(.system(size: 42, weight: .light, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundStyle(.primary)
-                        .padding(.top, 6)
+        VStack(spacing: showAIWorkspace ? 12 : 18) {
+            if showAIWorkspace {
+                // Compact top header leaves full room for live bilingual chat + rolling summary
+                HStack(spacing: 12) {
+                    ZStack {
+                        Circle()
+                            .fill(Color.primary.opacity(0.08))
+                            .frame(width: 42, height: 42)
+                        Image(systemName: "person.fill")
+                            .font(.system(size: 18))
+                            .foregroundStyle(.primary.opacity(0.85))
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(contacts.displayName(for: call.number))
+                            .font(.title3.weight(.semibold))
+                            .lineLimit(1)
+                        Text(statusText + (call.moduleName.map { " · " + $0 } ?? ""))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if let warning = call.audioWarning, !warning.isEmpty {
+                        Label(L10n.t(warning), systemImage: "speaker.slash.fill")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.orange)
+                    }
+                    if inCall {
+                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                            Text(durationText(at: context.date))
+                                .font(.title2.weight(.light).monospacedDigit())
+                                .foregroundStyle(.primary)
+                        }
+                    }
                 }
+                .padding(.horizontal, 4)
+
+                AICallWorkspaceView(connected: call.state == "active")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                Spacer()
+                ZStack {
+                    Circle()
+                        .fill(Color.primary.opacity(0.08))
+                        .frame(width: 96, height: 96)
+                    Image(systemName: "person.fill")
+                        .font(.system(size: 40))
+                        .foregroundStyle(.primary.opacity(0.85))
+                }
+                Text(contacts.displayName(for: call.number))
+                    .font(.system(size: 30, weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+                    .foregroundStyle(.primary)
+                Text(statusText + (call.moduleName.map { " · " + $0 } ?? ""))
+                    .font(.system(size: 14))
+                    .foregroundStyle(.secondary)
+                if let warning = call.audioWarning, !warning.isEmpty {
+                    Label(L10n.t(warning), systemImage: "speaker.slash.fill")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.orange)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 30)
+                }
+                if inCall {
+                    AICallPanel(connected: call.state == "active")
+                        .padding(.top, 4)
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        Text(durationText(at: context.date))
+                            .font(.system(size: 42, weight: .light, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundStyle(.primary)
+                            .padding(.top, 6)
+                    }
+                }
+                Spacer()
             }
-            Spacer()
 
             if !ringing && showKeypad {
                 dtmfKeypad
@@ -2897,7 +3071,7 @@ struct CallActiveView: View {
                     }
                 }
             } else {
-                HStack(spacing: 12) {
+                HStack(spacing: 14) {
                     CallRoundButton(
                         icon: calls.isMuted ? "mic.slash.fill" : "mic.fill",
                         tint: calls.isMuted ? PhoneStyle.green : Color.primary,
@@ -2918,12 +3092,21 @@ struct CallActiveView: View {
                     CallRoundButton(icon: "number", tint: showKeypad ? PhoneStyle.green : Color.primary, label: L10n.t("键盘")) {
                         showKeypad.toggle()
                     }
+                    if ai.isOn {
+                        CallRoundButton(
+                            icon: "person.wave.2.fill",
+                            tint: PhoneStyle.green,
+                            label: "我来接",
+                            filled: true
+                        ) {
+                            calls.aiTakeOver()
+                        }
+                    }
                 }
             }
         }
-        .padding(26)
+        .padding(showAIWorkspace ? 16 : 26)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // 通话界面跟随系统外观（浅色/深色），不再硬编码深色
         .background(PhoneStyle.appBackground)
     }
 

@@ -23,6 +23,8 @@ final class VoiceAudioService {
     var onRemoteAudio: ((Data) -> Void)?
     /// Microphone audio, 8 kHz PCM16 mono, delivered only while AI routing is on.
     var onLocalAudio: ((Data) -> Void)?
+    /// Wideband microphone audio, 24 kHz PCM16 mono, bypassing the 8 kHz telephone squeeze.
+    var onLocalAudio24k: ((Data) -> Void)?
 
     private struct DeferredUACCleanup {
         let pointer: OpaquePointer
@@ -43,13 +45,12 @@ final class VoiceAudioService {
     private var assistantPlayer: AVAudioPlayerNode?
     private var aiRouting: AIRouting = .off
     // Speech the AI sends into the call, paced out at 8 kHz by the IO loops.
+    // Cap backlog at 16 s so long monologues cannot fall a minute behind.
     private var assistantUplink = Data()
-    private let assistantUplinkLimit = 8_000 * 2 * 120
+    private let assistantUplinkLimit = 8_000 * 2 * 16
     private var assistantPaceAt: UInt64 = 0
-    // Soft "please hold" pulse sent to the other party while a translation
-    // is being prepared, so the silence doesn't sound like a dropped line.
-    private var waitingTone = false
-    private var tonePhase = 0
+    private var callerMonitorVolume: Float = 0.18
+    private var directMicPassthrough = false
     // AI speech queued on the Mac speaker (24 kHz frames), used to keep the
     // translation from falling further and further behind.
     private var assistantTimePitch: AVAudioUnitTimePitch?
@@ -59,6 +60,10 @@ final class VoiceAudioService {
     private var assistantSounding = false
     /// AI speech is still playing on the Mac speaker (thread-safe).
     var isAssistantSounding: Bool { stateLock.withLock { assistantSounding } }
+    /// Seconds of translated speech still queued to be sent to the remote party.
+    var assistantUplinkBacklogSeconds: Double {
+        uploadLock.withLock { Double(assistantUplink.count) / 16_000.0 }
+    }
     private var assistantGeneration = 0
     /// Called (on the playback queue) when a long backlog of translation was skipped.
     var onAssistantBacklogDropped: (() -> Void)?
@@ -73,6 +78,10 @@ final class VoiceAudioService {
     private var capturePosition = 0.0
     private var captureSampleRate = 0.0
     private var captureConditioner = VoiceCaptureConditioner()
+    private var captureSamples24k: [Float] = []
+    private var capturePosition24k = 0.0
+    private var captureSampleRate24k = 0.0
+    private var captureHighPass24k = WidebandHighPassFilter()
     private let recorder = MaVoCallRecorder()
     // Accessed only on ioQueue. A CoreAudio stop failure must retain the C
     // callback context until a later retry confirms IOProc quiescence.
@@ -445,35 +454,40 @@ final class VoiceAudioService {
     }
 
     func setAIRouting(_ routing: AIRouting) {
-        stateLock.withLock { aiRouting = routing }
+        let vol = stateLock.withLock { () -> Float in
+            aiRouting = routing
+            if routing != .translate { directMicPassthrough = false }
+            return callerMonitorVolume
+        }
         clearUploadBytes()
         clearAssistantUplink()
         playbackQueue.async { [weak self] in
             guard let self else { return }
-            self.player?.volume = routing == .translate ? 0.18 : 1
+            self.player?.volume = routing == .translate ? vol : 1
             if routing == .off { self.resetAssistantPlayer() }
         }
-        if routing == .off { setWaitingTone(false) }
     }
 
-    /// Plays a quiet pulse to the other party until real speech is queued.
-    func setWaitingTone(_ on: Bool) {
-        uploadLock.withLock {
-            // First pulse after ~0.7 s: short gaps stay silent.
-            if on && !waitingTone { tonePhase = 11_200 - 5_600 }
-            waitingTone = on
+    /// Adjusts how loudly you hear the remote caller's original voice underneath
+    /// the Chinese translation (0.0 = muted, 0.18 = subtle, 0.4 = clear).
+    func setCallerMonitorVolume(_ volume: Float) {
+        let clamped = max(0, min(1, volume))
+        let translating = stateLock.withLock { () -> Bool in
+            callerMonitorVolume = clamped
+            return aiRouting == .translate
+        }
+        guard translating else { return }
+        playbackQueue.async { [weak self] in
+            self?.player?.volume = clamped
         }
     }
 
-    /// Fills `count` frames of the waiting pulse: a soft 120 ms tone every 1.4 s.
-    private func toneFrame() -> Int16 {
-        let period = 11_200, length = 960
-        let i = tonePhase % period
-        tonePhase &+= 1
-        guard i < length else { return 0 }
-        let t = Double(i) / 8_000
-        let envelope = 0.5 - 0.5 * cos(2 * Double.pi * Double(i) / Double(length))
-        return Int16(1_100 * envelope * sin(2 * Double.pi * 620 * t))
+    /// Temporarily routes your raw microphone straight to the phone line while
+    /// in translate mode (e.g. to say a short "OK, thank you" or spell a name).
+    func setDirectMicPassthrough(_ enabled: Bool) {
+        stateLock.withLock { directMicPassthrough = enabled }
+        clearUploadBytes()
+        if enabled { clearAssistantUplink() }
     }
 
     /// Queues 8 kHz PCM16 speech to be sent to the other party.
@@ -646,7 +660,8 @@ final class VoiceAudioService {
             try engine.start()
             player.play()
             assistant.play()
-            player.volume = stateLock.withLock { aiRouting } == .translate ? 0.18 : 1
+            let monitorVol = stateLock.withLock { aiRouting == .translate ? callerMonitorVolume : Float(1) }
+            player.volume = monitorVol
             self.engine = engine
             self.player = player
             self.assistantPlayer = assistant
@@ -696,9 +711,40 @@ final class VoiceAudioService {
 
     private func resampleAndQueue(_ samples: [Float], sampleRate: Double, session: UInt64) {
         let state = stateLock.withLock {
-            (sessionGeneration == session, running, mediaEnabled, muted, aiRouting)
+            (sessionGeneration == session, running, mediaEnabled, muted, aiRouting, directMicPassthrough)
         }
         guard state.0, state.1, state.2 else { return }
+
+        // Wideband 24 kHz path for AI translation (skips 8 kHz phone compression).
+        if state.4 == .translate, !state.5, let widebandCallback = onLocalAudio24k {
+            if captureSampleRate24k != sampleRate {
+                captureSamples24k.removeAll(keepingCapacity: true)
+                capturePosition24k = 0
+                captureSampleRate24k = sampleRate
+            }
+            let filtered = captureHighPass24k.process(samples, sampleRate: sampleRate)
+            captureSamples24k.append(contentsOf: filtered)
+            let step24 = sampleRate / 24_000.0
+            var pcm24 = Data()
+            pcm24.reserveCapacity(Int(Double(samples.count) / step24) * 2 + 4)
+            while capturePosition24k + 1 < Double(captureSamples24k.count) {
+                let lower = Int(capturePosition24k)
+                let fraction = Float(capturePosition24k - Double(lower))
+                let value = captureSamples24k[lower] * (1 - fraction) + captureSamples24k[lower + 1] * fraction
+                let scaled: Int16 = state.3 ? 0 : Int16(max(-1, min(1, value)) * Float(Int16.max))
+                var littleEndian = scaled.littleEndian
+                withUnsafeBytes(of: &littleEndian) { pcm24.append(contentsOf: $0) }
+                capturePosition24k += step24
+            }
+            let consumed24 = max(0, min(Int(capturePosition24k), captureSamples24k.count - 1))
+            if consumed24 > 0 {
+                captureSamples24k.removeFirst(consumed24)
+                capturePosition24k -= Double(consumed24)
+            }
+            if !pcm24.isEmpty { widebandCallback(pcm24) }
+            if onLocalAudio == nil { return }
+        }
+
         if captureSampleRate != sampleRate {
             captureSamples.removeAll(keepingCapacity: true)
             capturePosition = 0
@@ -732,7 +778,12 @@ final class VoiceAudioService {
         }
         switch state.4 {
         case .off: appendUploadBytes(pcm)
-        case .translate: if !state.3 { onLocalAudio?(pcm) }
+        case .translate:
+            if state.5 {
+                appendUploadBytes(pcm)
+            } else if !state.3 {
+                onLocalAudio?(pcm)
+            }
         case .agent: break
         }
     }
@@ -973,17 +1024,12 @@ final class VoiceAudioService {
     }
 
     private func takeUploadChunkOrSilence() -> Data {
-        let ai = stateLock.withLock { aiRouting } != .off
+        let useAI = stateLock.withLock { aiRouting != .off && !(aiRouting == .translate && directMicPassthrough) }
         return uploadLock.withLock {
-            if ai {
+            if useAI {
                 let n = min(transmitChunkBytes, assistantUplink.count)
                 var chunk = Data(assistantUplink.prefix(n))
                 assistantUplink.removeFirst(n)
-                if n == 0, waitingTone {
-                    var tone = [Int16](repeating: 0, count: transmitChunkBytes / 2)
-                    for i in tone.indices { tone[i] = toneFrame() }
-                    return tone.withUnsafeBytes { Data($0) }
-                }
                 chunk.append(Data(repeating: 0, count: transmitChunkBytes - n))
                 return chunk
             }
@@ -1001,9 +1047,9 @@ final class VoiceAudioService {
 
     private func takeUploadSamples(into samples: inout [Int16]) -> Int {
         guard !samples.isEmpty else { return 0 }
-        let ai = stateLock.withLock { aiRouting } != .off
+        let useAI = stateLock.withLock { aiRouting != .off && !(aiRouting == .translate && directMicPassthrough) }
         return uploadLock.withLock {
-            if ai {
+            if useAI {
                 // Keep the device ~200 ms ahead: it pulls audio in large
                 // IOProc chunks (often 512 frames = 64 ms), and a nearly empty
                 // ring leaves silent gaps inside every word, heard on the far
@@ -1015,13 +1061,6 @@ final class VoiceAudioService {
                 let target = now + lead
                 let due = assistantPaceAt < target
                     ? Int(Double(target - assistantPaceAt) * 8_000 / 1_000_000_000) : 0
-                if assistantUplink.isEmpty, waitingTone {
-                    let n = min(samples.count, due)
-                    guard n > 0 else { return 0 }
-                    for f in 0 ..< n { samples[f] = toneFrame() }
-                    assistantPaceAt &+= UInt64(Double(n) * 1_000_000_000 / 8_000)
-                    return n
-                }
                 let frameCount = min(samples.count, assistantUplink.count / 2, due)
                 guard frameCount > 0 else { return 0 }
                 assistantPaceAt &+= UInt64(Double(frameCount) * 1_000_000_000 / 8_000)
@@ -1074,6 +1113,10 @@ final class VoiceAudioService {
             self?.capturePosition = 0
             self?.captureSampleRate = 0
             self?.captureConditioner.reset()
+            self?.captureSamples24k.removeAll(keepingCapacity: true)
+            self?.capturePosition24k = 0
+            self?.captureSampleRate24k = 0
+            self?.captureHighPass24k.reset()
         }
     }
 
@@ -1087,6 +1130,10 @@ final class VoiceAudioService {
             capturePosition = 0
             captureSampleRate = 0
             captureConditioner.reset()
+            captureSamples24k.removeAll(keepingCapacity: true)
+            capturePosition24k = 0
+            captureSampleRate24k = 0
+            captureHighPass24k.reset()
         }
     }
 

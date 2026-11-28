@@ -1,8 +1,8 @@
 import Foundation
 
-/// OpenAI's simultaneous interpreter (gpt-realtime-translate): audio streams
-/// in continuously and the translation is spoken while the person is still
-/// talking — no waiting for them to finish a sentence.
+/// OpenAI's simultaneous interpreter (`gpt-realtime-translate`): audio streams
+/// in continuously at 24 kHz PCM16 and translated speech + transcript deltas
+/// arrive while the speaker is still talking.
 final class TranslateStreamSession: NSObject, VoiceAISession, @unchecked Sendable {
     var onAudio: ((Data) -> Void)?
     var onHeard: ((String) -> Void)?
@@ -13,68 +13,125 @@ final class TranslateStreamSession: NSObject, VoiceAISession, @unchecked Sendabl
     var onHeardDelta: ((String) -> Void)?
     var onSaidDelta: ((String) -> Void)?
     var onError: ((String) -> Void)?
+    /// Fires when `session.updated` confirms target language and noise reduction.
+    var onReady: (() -> Void)?
 
     private var task: URLSessionWebSocketTask?
     private let queue = DispatchQueue(label: "djonehub.ai.translate")
-    private var pending = Data()
+    private var pending8k = Data()
+    private var pending24k = Data()
     private var closed = false
+    private var updateSent = false
     private var ready = false
     private var leftover = Data()
     private var language = "en"
-    // The interpreter never says "sentence done"; a short pause closes a caption.
+    private var noiseReduction: String? = "far_field"
+    private var transcribe = true
+    // The interpreter streams continuously without turn boundaries; a brief
+    // pause closes the current caption bubble cleanly.
     private var heardText = ""
     private var saidText = ""
     private var heardGen = 0
     private var saidGen = 0
+    private var connectedAt = Date()
     private var firstAudioLogged = false
-    private static let captionPause: TimeInterval = 1.3
+    private static let captionPause: TimeInterval = 1.2
+    /// 60 ms at 24 kHz mono PCM16 (lower latency than 100 ms, still compact).
+    private static let chunkBytes24k = 2_880
+    /// 60 ms at 8 kHz mono PCM16.
+    private static let chunkBytes8k = 960
 
-    func connect(base: String, key: String, language: String, transcribe: Bool) {
+    func connect(
+        base: String,
+        key: String,
+        language: String,
+        transcribe: Bool,
+        noiseReduction: String? = "far_field"
+    ) {
         let wsBase = base.replacingOccurrences(of: "https://", with: "wss://")
             .replacingOccurrences(of: "http://", with: "ws://")
         guard let url = URL(string: "\(wsBase)/v1/realtime/translations?model=gpt-realtime-translate") else {
             onError?("AI 地址无效")
             return
         }
-        self.language = language
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-        let task = URLSession.shared.webSocketTask(with: request)
-        self.task = task
-        task.resume()
-        var input: [String: Any] = [:]
-        if transcribe { input["transcription"] = ["model": "gpt-realtime-whisper"] }
-        send(["type": "session.update", "session": [
-            "audio": ["input": input, "output": ["language": language]] as [String: Any],
-        ]])
-        AICallLog.write("\(tag) translate: connecting → \(language)")
-        receive()
-        queue.asyncAfter(deadline: .now() + 6) { [weak self] in
-            guard let self, !self.closed, !self.ready else { return }
-            AICallLog.write("\(self.tag) translate: no session.updated after 6s, going ahead")
-            self.ready = true
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.language = language
+            self.transcribe = transcribe
+            self.noiseReduction = noiseReduction
+            self.connectedAt = Date()
+            var request = URLRequest(url: url)
+            request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+            let task = URLSession.shared.webSocketTask(with: request)
+            self.task = task
+            task.resume()
+            AICallLog.write("\(self.tag) translate: connecting → \(language) nr=\(noiseReduction ?? "none")")
+            self.receive()
+            // Wait for session.created before sending session.update, with a
+            // relay fallback so custom proxies that omit session.created still work.
+            self.queue.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                guard let self, !self.closed, !self.updateSent else { return }
+                self.sendSessionUpdate()
+            }
+            self.queue.asyncAfter(deadline: .now() + 6.0) { [weak self] in
+                guard let self, !self.closed, !self.ready else { return }
+                AICallLog.write("\(self.tag) translate: no session.updated after 6s, proceeding")
+                self.ready = true
+                self.onReady?()
+            }
         }
     }
 
-    /// Changes the language the translation is spoken in.
+    /// Changes the output language mid-call.
     func setLanguage(_ code: String) {
         queue.async { [weak self] in
             guard let self, !self.closed, code != self.language else { return }
             self.language = code
-            AICallLog.write("\(self.tag) translate: now → \(code)")
-            self.send(["type": "session.update",
-                       "session": ["audio": ["output": ["language": code]]] as [String: Any]])
+            AICallLog.write("\(self.tag) translate: retarget → \(code)")
+            if self.updateSent {
+                self.send([
+                    "type": "session.update",
+                    "session": ["audio": ["output": ["language": code]]] as [String: Any],
+                ])
+            }
         }
     }
 
-    /// 8 kHz call/mic audio, sent every ~100 ms. Silence must keep flowing too.
+    /// Updates input noise reduction mid-call ("near_field" for headset, "far_field" for speakers).
+    func setNoiseReduction(_ type: String?) {
+        queue.async { [weak self] in
+            guard let self, !self.closed, type != self.noiseReduction else { return }
+            self.noiseReduction = type
+            AICallLog.write("\(self.tag) translate: nr → \(type ?? "none")")
+            guard self.updateSent else { return }
+            let nrValue: Any = type.map { ["type": $0] as [String: Any] } ?? NSNull()
+            self.send([
+                "type": "session.update",
+                "session": ["audio": ["input": ["noise_reduction": nrValue]]] as [String: Any],
+            ])
+        }
+    }
+
+    /// 8 kHz phone-line audio, upsampled to 24 kHz in 60 ms packets.
     func appendAudio8k(_ pcm: Data) {
         queue.async { [weak self] in
             guard let self, !self.closed, self.ready else { return }
-            self.pending.append(pcm)
-            guard self.pending.count >= 1_600 else { return }
-            let chunk = PCM.up3(self.pending)
-            self.pending.removeAll(keepingCapacity: true)
+            self.pending8k.append(pcm)
+            guard self.pending8k.count >= Self.chunkBytes8k else { return }
+            let chunk = PCM.up3(self.pending8k)
+            self.pending8k.removeAll(keepingCapacity: true)
+            self.send(["type": "session.input_audio_buffer.append", "audio": chunk.base64EncodedString()])
+        }
+    }
+
+    /// Native 24 kHz microphone audio, sent directly in 60 ms packets without 8 kHz loss.
+    func appendAudio24k(_ pcm: Data) {
+        queue.async { [weak self] in
+            guard let self, !self.closed, self.ready else { return }
+            self.pending24k.append(pcm)
+            guard self.pending24k.count >= Self.chunkBytes24k else { return }
+            let chunk = self.pending24k
+            self.pending24k.removeAll(keepingCapacity: true)
             self.send(["type": "session.input_audio_buffer.append", "audio": chunk.base64EncodedString()])
         }
     }
@@ -86,6 +143,7 @@ final class TranslateStreamSession: NSObject, VoiceAISession, @unchecked Sendabl
         queue.async { [weak self] in
             guard let self, !self.closed else { return }
             self.closed = true
+            self.flushDraftsNow()
             self.send(["type": "session.close"])
             let task = self.task
             self.task = nil
@@ -95,7 +153,72 @@ final class TranslateStreamSession: NSObject, VoiceAISession, @unchecked Sendabl
         }
     }
 
-    // MARK: -
+    enum TestOutcome: Sendable {
+        case ok(Int)
+        case fail(String)
+    }
+
+    /// Verifies that the configured OpenAI key and endpoint can open a
+    /// `gpt-realtime-translate` session and configure a target language.
+    static func testConnection(base: String, key: String, language: String = "en") async -> TestOutcome {
+        let wsBase = base.replacingOccurrences(of: "https://", with: "wss://")
+            .replacingOccurrences(of: "http://", with: "ws://")
+        guard let url = URL(string: "\(wsBase)/v1/realtime/translations?model=gpt-realtime-translate") else {
+            return .fail("AI 地址无效")
+        }
+        let started = Date()
+        return await withCheckedContinuation { cont in
+            let lock = NSLock()
+            var done = false
+            let session = TranslateStreamSession()
+            session.tag = "test"
+            func finish(_ r: TestOutcome) {
+                lock.lock(); defer { lock.unlock() }
+                guard !done else { return }
+                done = true
+                session.close()
+                cont.resume(returning: r)
+            }
+            session.onReady = {
+                let ms = Int(Date().timeIntervalSince(started) * 1000)
+                finish(.ok(ms))
+            }
+            session.onError = { msg in finish(.fail(msg)) }
+            session.connect(base: base, key: key, language: language, transcribe: true, noiseReduction: "near_field")
+            DispatchQueue.global().asyncAfter(deadline: .now() + 12) {
+                finish(.fail("同传接口 12 秒无响应（\(url.host ?? "")）"))
+            }
+        }
+    }
+
+    // MARK: - Private
+
+    private func sendSessionUpdate() {
+        updateSent = true
+        var input: [String: Any] = [:]
+        if transcribe { input["transcription"] = ["model": "gpt-realtime-whisper"] }
+        if let nr = noiseReduction { input["noise_reduction"] = ["type": nr] }
+        send([
+            "type": "session.update",
+            "session": [
+                "audio": [
+                    "input": input,
+                    "output": ["language": language],
+                ] as [String: Any],
+            ],
+        ])
+    }
+
+    private func flushDraftsNow() {
+        heardGen += 1
+        saidGen += 1
+        let h = heardText.trimmingCharacters(in: .whitespacesAndNewlines)
+        heardText = ""
+        if !h.isEmpty { onHeard?(h) }
+        let s = saidText.trimmingCharacters(in: .whitespacesAndNewlines)
+        saidText = ""
+        if !s.isEmpty { onSaid?(s) }
+    }
 
     private func send(_ event: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: event),
@@ -138,11 +261,22 @@ final class TranslateStreamSession: NSObject, VoiceAISession, @unchecked Sendabl
             AICallLog.write("\(tag) " + (type == "error" ? "error \(text.prefix(300))" : type))
         }
         switch type {
-        case "session.created", "session.updated":
-            ready = true
+        case "session.created":
+            if !updateSent { sendSessionUpdate() }
+        case "session.updated":
+            if !ready {
+                ready = true
+                let ms = Int(Date().timeIntervalSince(connectedAt) * 1000)
+                AICallLog.write("\(tag) translate: ready in \(ms) ms (→ \(language))")
+                onReady?()
+            }
         case "session.output_audio.delta":
             guard let b64 = event["delta"] as? String, var pcm = Data(base64Encoded: b64) else { return }
-            if !firstAudioLogged { firstAudioLogged = true; AICallLog.write("\(tag) first audio") }
+            if !firstAudioLogged {
+                firstAudioLogged = true
+                let ms = Int(Date().timeIntervalSince(connectedAt) * 1000)
+                AICallLog.write("\(tag) translate: first audio at +\(ms) ms")
+            }
             if !leftover.isEmpty { pcm = leftover + pcm; leftover.removeAll() }
             if pcm.count % 2 == 1 { leftover = pcm.suffix(1); pcm.removeLast() }
             onAudio?(pcm)
