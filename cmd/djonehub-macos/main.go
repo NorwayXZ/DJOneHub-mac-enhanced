@@ -52,7 +52,7 @@ func webAppHandler() http.Handler {
 	})
 }
 
-const appVersion = "1.3.0-proxy-preview.89"
+const appVersion = "1.3.0-proxy-preview.90"
 
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
@@ -1292,6 +1292,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("GET /api/health", a.health)
 	mux.HandleFunc("GET /api/status", a.status)
 	mux.HandleFunc("GET /api/sms", a.listSMS)
+	mux.HandleFunc("GET /api/sms/sent", a.listSentSMS)
 	mux.HandleFunc("GET /api/sms/status", a.smsStatus)
 	mux.HandleFunc("PATCH /api/sms/settings", a.updateSMSSettings)
 	mux.HandleFunc("GET /api/sim/identity", a.simIdentity)
@@ -1868,6 +1869,12 @@ func (a *app) listSMS(w http.ResponseWriter, _ *http.Request) {
 	if items == nil {
 		items = []receivedSMS{}
 	}
+	// Messages cached before the code finder improved get one now.
+	for i := range items {
+		if items[i].Code == "" {
+			items[i].Code = extractSMSCode(items[i].Content)
+		}
+	}
 	writeJSON(w, http.StatusOK, items)
 }
 
@@ -2080,11 +2087,16 @@ func (a *app) sendSMS(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) sendTextSMS(phone, message string) (int, error) {
 	if a.modem == nil {
-		return a.sendUSBATSMS(phone, message)
+		segments, err := a.sendUSBATSMS(phone, message)
+		if err == nil && !a.demo {
+			recordSentSMS(phone, message)
+		}
+		return segments, err
 	}
 	if err := a.modem.SendSMSWithOptions(phone, message, smsSubmitOptions(message)); err != nil {
 		return 0, err
 	}
+	recordSentSMS(phone, message)
 	return 1, nil
 }
 

@@ -456,7 +456,7 @@ func (c *fleetController) handler(fallback http.Handler) http.Handler {
 		switch r.URL.Path {
 		case "/api/calls/status":
 			writeJSON(w, 200, map[string]any{"active": nil, "history": []any{}, "polling": true, "poll_interval_s": 3, "last_poll_error": "辅助工具仅在单模块连接时可用"})
-		case "/api/sms":
+		case "/api/sms", "/api/sms/sent":
 			writeJSON(w, 200, []any{})
 		case "/api/proxy":
 			if r.Method == "GET" {

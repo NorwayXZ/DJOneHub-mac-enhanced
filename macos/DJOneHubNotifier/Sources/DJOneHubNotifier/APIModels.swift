@@ -59,6 +59,21 @@ struct SMSMessage: Codable, Equatable, Sendable {
     }
 }
 
+/// A message sent from a module's SIM (from the app, Telegram or keep-alive).
+struct SentMessage: Codable, Sendable {
+    let phone: String
+    let content: String
+    let sentAt: Date
+    var moduleID: String? = nil
+    var moduleName: String? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case phone, content
+        case sentAt = "sent_at"
+        case moduleID = "module_id", moduleName = "module_name"
+    }
+}
+
 struct RejectResponse: Codable, Sendable {
     let rejected: Bool
 }
@@ -240,6 +255,10 @@ struct DJOneHubAPI: Sendable {
 
     func messages() async throws -> [SMSMessage] {
         try await get(path: "api/sms")
+    }
+
+    func sentMessages() async throws -> [SentMessage] {
+        try await get(path: "api/sms/sent")
     }
 
     func gpsStatus() async throws -> GPSStatus {

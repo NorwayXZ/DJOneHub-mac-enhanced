@@ -716,10 +716,10 @@ private struct RecentsRecordingsSection: View {
 // MARK: - 短信会话
 
 private struct SentSMS: Identifiable {
-    let id = UUID()
     let phone: String
     let content: String
     let sentAt: Date
+    var id: String { "\(phone)\u{0}\(sentAt.timeIntervalSince1970)\u{0}\(content)" }
 }
 
 private struct Conversation: Identifiable {
@@ -728,7 +728,54 @@ private struct Conversation: Identifiable {
     let lastTime: Date
     /// Multi-module mode: the module that last received from this sender.
     var module: String? = nil
+    /// The code in the newest message when that message was received.
+    var code: String? = nil
+    var unread = false
     var id: String { sender }
+}
+
+/// Last time each conversation was opened, so new messages show a dot like
+/// on a phone.
+private enum SMSReadMarks {
+    private static let key = "djonehub.smsLastRead"
+    static func get() -> [String: Double]? { UserDefaults.standard.dictionary(forKey: key) as? [String: Double] }
+    static func mark(_ sender: String, at date: Date = Date()) {
+        var marks = get() ?? [:]
+        marks[sender] = date.timeIntervalSince1970
+        UserDefaults.standard.set(marks, forKey: key)
+    }
+    static func markAll(_ senders: [String]) {
+        var marks = get() ?? [:]
+        let now = Date().timeIntervalSince1970
+        for sender in senders where marks[sender] == nil { marks[sender] = now }
+        UserDefaults.standard.set(marks, forKey: key)
+    }
+}
+
+/// The message text with its verification code picked out in color, so a
+/// long message shows the code at a glance. The code may be written with a
+/// letter prefix or split ("G-469200", "623-819").
+func smsCodeHighlighted(_ text: String, code: String?, color: Color = .orange) -> AttributedString {
+    var result = AttributedString(text)
+    guard let code, !code.isEmpty else { return result }
+    let pattern = code.map { NSRegularExpression.escapedPattern(for: String($0)) }.joined(separator: "[-\\s]?")
+    guard let regex = try? NSRegularExpression(pattern: "(?<![0-9])" + pattern + "(?![0-9])"),
+          let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+          let range = Range(match.range, in: text),
+          let lower = AttributedString.Index(range.lowerBound, within: result),
+          let upper = AttributedString.Index(range.upperBound, within: result)
+    else { return result }
+    result[lower..<upper].foregroundColor = color
+    result[lower..<upper].font = .body.weight(.bold)
+    return result
+}
+
+/// Puts a code on the clipboard and says so.
+@MainActor
+func copySMSCode(_ code: String) {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(code, forType: .string)
+    Toast.shared.show(L10n.f("验证码 %@ 已复制", code), .success)
 }
 
 private enum ThreadItem: Identifiable {
@@ -738,7 +785,7 @@ private enum ThreadItem: Identifiable {
     var id: String {
         switch self {
         case let .received(message): return message.identity
-        case let .sent(message): return message.id.uuidString
+        case let .sent(message): return message.id
         }
     }
 
@@ -777,6 +824,7 @@ private struct MessagesView: View {
     @State private var autoCleanupME = true
     @State private var cardCapability: CardCapability?
     @State private var showingQRSMS = false
+    @State private var readMarks: [String: Double] = SMSReadMarks.get() ?? [:]
 
     private var conversations: [Conversation] {
         var latest: [String: (content: String, date: Date)] = [:]
@@ -800,8 +848,18 @@ private struct MessagesView: View {
                 latest[sender] = (message.content, message.sentAt)
             }
         }
+        let marks = readMarks
         return latest
-            .map { Conversation(sender: $0.key, lastContent: $0.value.content, lastTime: $0.value.date, module: latestReceived(from: $0.key)?.moduleName) }
+            .map { entry -> Conversation in
+                let newest = latestReceived(from: entry.key)
+                let isReceivedLast = newest.map { $0.timestamp >= entry.value.date } ?? false
+                var conversation = Conversation(sender: entry.key, lastContent: entry.value.content, lastTime: entry.value.date, module: newest?.moduleName)
+                if isReceivedLast, let code = newest?.code, !code.isEmpty { conversation.code = code }
+                if isReceivedLast, let newest {
+                    conversation.unread = newest.timestamp.timeIntervalSince1970 > (marks[entry.key] ?? 0)
+                }
+                return conversation
+            }
             .sorted { $0.lastTime > $1.lastTime }
     }
 
@@ -847,7 +905,7 @@ private struct MessagesView: View {
                 }
                 .buttonStyle(.plain)
                 .help(L10n.t("扫码发短信（如谷歌登录验证）"))
-                .sheet(isPresented: $showingQRSMS) {
+                .sheet(isPresented: $showingQRSMS, onDismiss: { Task { await load() } }) {
                     QRSMSSheet(ownNumber: ownNumber, capability: cardCapability)
                         .environmentObject(calls)
                 }
@@ -906,18 +964,18 @@ private struct MessagesView: View {
                 )
             } else {
                 ScrollView {
-                    LazyVStack(spacing: 8) {
+                    LazyVStack(spacing: 0) {
                         ForEach(conversations) { conversation in
                             Button {
-                                selected = conversation.sender
+                                open(conversation.sender)
                             } label: {
                                 ConversationRow(conversation: conversation)
-                                    .modifier(PhoneCard())
                             }
                             .buttonStyle(.plain)
+                            Divider().padding(.leading, 76)
                         }
                     }
-                    .padding(12)
+                    .padding(.vertical, 4)
                 }
                 .overlay {
                     if conversations.isEmpty {
@@ -939,6 +997,7 @@ private struct MessagesView: View {
             }
         }
         .task {
+            await load()
             if let identity = try? await calls.apiClient.simIdentity() { ownNumber = identity.phoneNumber }
             if let status = try? await calls.apiClient.smsStatus() { autoCleanupME = status.autoCleanupME }
             var round = 0
@@ -965,7 +1024,7 @@ private struct MessagesView: View {
                         onSend: { phone, content in
                             let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
                             sent.append(SentSMS(phone: phone, content: trimmed, sentAt: Date()))
-                            selected = phone
+                            open(phone)
                             showingComposer = false
                             pendingRecipient = nil
                         },
@@ -995,11 +1054,26 @@ private struct MessagesView: View {
         }
     }
 
+    private func open(_ sender: String) {
+        selected = sender
+        SMSReadMarks.mark(sender)
+        readMarks = SMSReadMarks.get() ?? [:]
+    }
+
     private func load() async {
         loading = true
         defer { loading = false }
         do {
             received = try await calls.apiClient.messages()
+            if let fetched = try? await calls.apiClient.sentMessages() {
+                sent = fetched.map { SentSMS(phone: $0.phone, content: $0.content, sentAt: $0.sentAt) }
+            }
+            // First run: what is already here counts as read.
+            if SMSReadMarks.get() == nil || readMarks.isEmpty {
+                SMSReadMarks.markAll(Array(Set(received.map(\.sender))))
+                readMarks = SMSReadMarks.get() ?? [:]
+            }
+            if let selected { SMSReadMarks.mark(selected); readMarks = SMSReadMarks.get() ?? [:] }
             self.error = nil
         } catch {
             self.error = error.localizedDescription
@@ -1025,6 +1099,7 @@ private struct MessagesView: View {
             do {
                 _ = try await calls.apiClient.sendSMS(to: sender, message: trimmed, module: latestReceived(from: sender)?.moduleID)
                 sent.append(SentSMS(phone: sender, content: trimmed, sentAt: Date()))
+                Toast.shared.show(L10n.t("短信已发送"), .success)
             } catch {
                 self.error = error.localizedDescription
             }
@@ -1487,33 +1562,70 @@ private struct ConversationRow: View {
     let conversation: Conversation
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(alignment: .top, spacing: 10) {
+            Circle()
+                .fill(conversation.unread ? Color.accentColor : .clear)
+                .frame(width: 9, height: 9)
+                .padding(.top, 20)
             ContactAvatarView(
                 photoData: contacts.contact(for: conversation.sender)?.photoData,
                 name: contacts.displayName(for: conversation.sender),
-                size: 38
+                size: 46
             )
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(contacts.displayName(for: conversation.sender))
-                        .font(.body.weight(.semibold))
+                        .font(.system(size: 15, weight: .semibold))
+                        .lineLimit(1)
                     if let module = conversation.module {
                         Text(module).font(.caption2.weight(.medium)).foregroundStyle(.secondary)
                             .padding(.horizontal, 5).padding(.vertical, 1)
                             .background(Color.secondary.opacity(0.12), in: Capsule())
                     }
+                    Spacer(minLength: 8)
+                    Text(smsListTime(conversation.lastTime))
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.tertiary)
                 }
-                Text(conversation.lastContent)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                HStack(alignment: .top, spacing: 8) {
+                    Text(smsCodeHighlighted(conversation.lastContent, code: conversation.code))
+                        .font(.system(size: 13.5))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if let code = conversation.code {
+                        CodeChip(code: code)
+                    }
+                }
             }
-            Spacer(minLength: 8)
-            Text(smsShortTime(conversation.lastTime))
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
-        .padding(.vertical, 2)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .contentShape(Rectangle())
+    }
+}
+
+/// The code in a big colored pill; one click copies it.
+private struct CodeChip: View {
+    let code: String
+
+    var body: some View {
+        Button {
+            copySMSCode(code)
+        } label: {
+            HStack(spacing: 4) {
+                Text(code).font(.system(size: 14, weight: .bold, design: .monospaced))
+                Image(systemName: "doc.on.doc").font(.system(size: 10, weight: .semibold))
+            }
+            .foregroundStyle(.orange)
+            .padding(.horizontal, 9).padding(.vertical, 4)
+            .background(Color.orange.opacity(0.15), in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .help(L10n.t("复制验证码"))
     }
 }
 
@@ -1527,73 +1639,106 @@ private struct ThreadView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Button(action: onBack) {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 14, weight: .semibold))
+            ZStack {
+                VStack(spacing: 3) {
+                    ContactAvatarView(
+                        photoData: contacts.contact(for: sender)?.photoData,
+                        name: contacts.displayName(for: sender),
+                        size: 40
+                    )
+                    Text(contacts.displayName(for: sender))
+                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(1)
                 }
-                .buttonStyle(.plain)
-                ContactAvatarView(
-                    photoData: contacts.contact(for: sender)?.photoData,
-                    name: contacts.displayName(for: sender),
-                    size: 26
-                )
-                Text(contacts.displayName(for: sender))
-                    .font(.system(size: 14, weight: .semibold))
-                    .lineLimit(1)
-                Spacer()
-                Text(L10n.f("%@ 条", String(items.count)))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                HStack {
+                    Button(action: onBack) {
+                        HStack(spacing: 3) {
+                            Image(systemName: "chevron.left").font(.system(size: 15, weight: .semibold))
+                            Text(L10n.t("短信")).font(.system(size: 14))
+                        }
+                        .foregroundStyle(Color.accentColor)
+                    }
+                    .buttonStyle(.plain)
+                    Spacer()
+                }
             }
             .padding(.horizontal, 14)
-            .padding(.vertical, 10)
+            .padding(.vertical, 8)
+            .background(.bar)
 
             Divider()
 
-            ScrollView {
-                LazyVStack(spacing: 7) {
-                    ForEach(items) { item in
-                        MessageBubble(item: item)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 3) {
+                        ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                            if index == 0 || item.date.timeIntervalSince(items[index - 1].date) > 15 * 60 {
+                                Text(smsThreadTime(item.date))
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                                    .padding(.top, index == 0 ? 4 : 14)
+                                    .padding(.bottom, 4)
+                            }
+                            MessageBubble(item: item)
+                                .id(item.id)
+                        }
+                        Color.clear.frame(height: 1).id("bottom")
                     }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
                 }
-                .padding(12)
+                .onAppear { proxy.scrollTo("bottom", anchor: .bottom) }
+                .onChange(of: items.count) { _ in
+                    withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
+                }
             }
 
-            Divider()
-
-            HStack(spacing: 8) {
-                TextField(L10n.t("回复短信…"), text: $draft, axis: .vertical)
+            HStack(alignment: .bottom, spacing: 8) {
+                TextField(L10n.t("短信"), text: $draft, axis: .vertical)
                     .textFieldStyle(.plain)
-                    .font(.body)
-                    .padding(.horizontal, 12)
+                    .font(.system(size: 14))
+                    .padding(.horizontal, 14)
                     .padding(.vertical, 8)
                     .background(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(Color(nsColor: .textBackgroundColor))
+                        Capsule(style: .continuous)
+                            .strokeBorder(Color.secondary.opacity(0.35), lineWidth: 1)
                     )
-                    .lineLimit(1...4)
+                    .lineLimit(1...5)
                     .onSubmit { send() }
                 Button(action: send) {
                     Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 25))
+                        .font(.system(size: 28))
                         .foregroundStyle(
                             draft.trimmingCharacters(in: .whitespaces).isEmpty
-                                ? Color.secondary : Color.accentColor
+                                ? Color.secondary.opacity(0.5) : Color.smsGreen
                         )
                 }
                 .buttonStyle(.plain)
                 .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
             }
-            .padding(10)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .background(.bar)
         }
     }
 
     private func send() {
         let content = draft
+        guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         draft = ""
         onSend(sender, content)
     }
+}
+
+extension Color {
+    /// The green of an SMS bubble on a phone.
+    static let smsGreen = Color(red: 0.204, green: 0.780, blue: 0.349)
+    /// Received bubble gray, light and dark.
+    static let smsGray = Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(srgbRed: 0.149, green: 0.149, blue: 0.161, alpha: 1)
+            : NSColor(srgbRed: 0.914, green: 0.914, blue: 0.922, alpha: 1)
+    })
 }
 
 /// iMessage 风格气泡：主体圆角矩形 + 底部小尾巴连成一个整体，
@@ -1642,54 +1787,63 @@ private struct MessageBubbleShape: Shape {
 private struct MessageBubble: View {
     let item: ThreadItem
 
+    private var code: String? {
+        if case let .received(message) = item, let code = message.code, !code.isEmpty { return code }
+        return nil
+    }
+
     var body: some View {
-        HStack {
-            if item.isSent { Spacer(minLength: 46) }
+        HStack(alignment: .bottom, spacing: 6) {
+            if item.isSent { Spacer(minLength: 60) }
             VStack(alignment: item.isSent ? .trailing : .leading, spacing: 4) {
-                Text(item.content)
-                    .font(.body)
+                Text(item.isSent ? AttributedString(item.content) : smsCodeHighlighted(item.content, code: code, color: .orange))
+                    .font(.system(size: 14))
                     .textSelection(.enabled)
-                if case let .received(message) = item, let code = message.code {
-                    HStack(spacing: 8) {
-                        Text(L10n.f("验证码 %@", code))
-                            .font(.caption.weight(.semibold))
-                        Button(L10n.t("复制")) {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(code, forType: .string)
-                        }
-                        .buttonStyle(.plain)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(Color.accentColor)
-                    }
-                    .padding(.top, 1)
+                    .padding(.horizontal, 13)
+                    .padding(.vertical, 8)
+                    .background(
+                        MessageBubbleShape(sent: item.isSent)
+                            .fill(item.isSent ? Color.smsGreen : Color.smsGray)
+                    )
+                    .foregroundStyle(item.isSent ? Color.white : Color.primary)
+                    .help(smsThreadTime(item.date))
+                if let code {
+                    CodeChip(code: code)
                 }
-                Text(smsShortTime(item.date))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(
-                MessageBubbleShape(sent: item.isSent)
-                    .fill(item.isSent ? Color.accentColor : Color(nsColor: .controlBackgroundColor))
-            )
-            .foregroundStyle(item.isSent ? .white : .primary)
-            if !item.isSent { Spacer(minLength: 46) }
+            if !item.isSent { Spacer(minLength: 60) }
         }
+        .padding(.vertical, 2)
     }
 }
 
-private func smsShortTime(_ date: Date) -> String {
+/// List time like a phone: time today, 昨天, weekday this week, else date.
+private func smsListTime(_ date: Date) -> String {
+    let calendar = Calendar.current
+    if calendar.isDateInToday(date) || calendar.isDateInYesterday(date) {
+        return smsThreadTime(date)
+    }
     let formatter = DateFormatter()
-    let isEN = L10n.effectiveLanguage == .en
-    formatter.locale = Locale(identifier: isEN ? "en_US" : "zh_CN")
-    if Calendar.current.isDateInToday(date) {
-        formatter.dateFormat = "HH:mm"
-    } else if Calendar.current.isDate(date, equalTo: Date(), toGranularity: .year) {
-        formatter.dateFormat = "M/d HH:mm"
+    formatter.locale = Locale(identifier: L10n.effectiveLanguage == .en ? "en_US" : "zh_CN")
+    if let days = calendar.dateComponents([.day], from: date, to: Date()).day, days < 7 {
+        formatter.dateFormat = "EEEE"
     } else {
         formatter.dateFormat = "yy/M/d"
     }
+    return formatter.string(from: date)
+}
+
+/// Thread separator time: "今天 15:59", "昨天 14:05", "11月25日 周二 09:07".
+private func smsThreadTime(_ date: Date) -> String {
+    let calendar = Calendar.current
+    let isEN = L10n.effectiveLanguage == .en
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: isEN ? "en_US" : "zh_CN")
+    formatter.dateFormat = "HH:mm"
+    let time = formatter.string(from: date)
+    if calendar.isDateInToday(date) { return (isEN ? "Today " : "今天 ") + time }
+    if calendar.isDateInYesterday(date) { return (isEN ? "Yesterday " : "昨天 ") + time }
+    formatter.dateFormat = isEN ? "MMM d, EEE HH:mm" : "M月d日 EEE HH:mm"
     return formatter.string(from: date)
 }
 

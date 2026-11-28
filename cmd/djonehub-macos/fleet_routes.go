@@ -23,7 +23,7 @@ func fleetRequestTimeout(method, path string) time.Duration {
 	switch {
 	case method == "GET" && (path == "/api/proxy" || path == "/api/health"):
 		return 1500 * time.Millisecond
-	case method == "GET" && (path == "/api/sms" || path == "/api/calls/status"):
+	case method == "GET" && (path == "/api/sms" || path == "/api/sms/sent" || path == "/api/calls/status"):
 		return 4 * time.Second
 	case strings.HasPrefix(path, "/api/forwarding/calls"), strings.HasPrefix(path, "/api/voice/provision"),
 		strings.HasPrefix(path, "/api/esim/download"), strings.HasPrefix(path, "/api/esim/switch"), strings.HasPrefix(path, "/api/module/setup"), strings.HasPrefix(path, "/api/band"):
@@ -69,7 +69,10 @@ func (c *fleetController) route(w http.ResponseWriter, r *http.Request) bool {
 	selected := r.Header.Get(moduleHeader)
 	switch {
 	case r.Method == "GET" && r.URL.Path == "/api/sms":
-		c.mergedSMS(w)
+		c.mergedSMS(w, "/api/sms", "timestamp")
+		return true
+	case r.Method == "GET" && r.URL.Path == "/api/sms/sent":
+		c.mergedSMS(w, "/api/sms/sent", "sent_at")
 		return true
 	case r.Method == "GET" && r.URL.Path == "/api/calls/status":
 		c.mergedCalls(w)
@@ -155,11 +158,12 @@ func recordTime(item map[string]any, key string) time.Time {
 	return t
 }
 
-// mergedSMS lists every module's messages, newest first, each tagged with its module.
-func (c *fleetController) mergedSMS(w http.ResponseWriter) {
+// mergedSMS lists every module's received (or sent) messages, newest first,
+// each tagged with its module.
+func (c *fleetController) mergedSMS(w http.ResponseWriter, path, timeKey string) {
 	names := c.moduleNames()
 	all := []map[string]any{}
-	for id, data := range c.sweep("/api/sms") {
+	for id, data := range c.sweep(path) {
 		var items []map[string]any
 		if json.Unmarshal(data, &items) != nil {
 			continue
@@ -169,7 +173,7 @@ func (c *fleetController) mergedSMS(w http.ResponseWriter) {
 			all = append(all, item)
 		}
 	}
-	sort.SliceStable(all, func(i, j int) bool { return recordTime(all[i], "timestamp").After(recordTime(all[j], "timestamp")) })
+	sort.SliceStable(all, func(i, j int) bool { return recordTime(all[i], timeKey).After(recordTime(all[j], timeKey)) })
 	writeJSON(w, 200, all)
 }
 
